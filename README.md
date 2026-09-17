@@ -25,7 +25,7 @@ Web 端负责低延迟观看，mpv 端负责超分 / HDR / 高画质，两者互
 | 交付规模 | 135 个文件 / 1.58 MiB；C# 88 个文件 / 约 1.5 万行（其中 `src` 70 个文件、`tests` 18 个文件） |
 | 编译 | `dotnet build StreamPilot.slnx`（Debug 与 Release）**0 警告 / 0 错误** |
 | 测试 | C# 单元测试 **80 / 80 通过**；播放策略前端测试 **13 / 13 通过**；静态红线自检与离线结构分析均通过 |
-| 产物 | `StreamPilot.exe` 单文件 59.3 MiB，整包 61.3 MiB（含 `Web/`、`docs/`、`tools/README.md`） |
+| 产物 | 发行版目录 `StreamPilot-windows-v0.1.0`（单文件 exe 59.3 MiB，整包 61.4 MiB）与同名校验过的压缩包 `StreamPilot-windows-v0.1.0.zip`（54.4 MiB） |
 | 运行时 | 已做冒烟验证：桥接 `/health` 返回 `{"status":"ok","version":"0.1.0","port":5566}`，播放页握手成功并报告 `HEVC: 支持，H.264: 支持` |
 | 尚未验证 | **真实平台直播链路的端到端**（解析真实房间 → 拉流播放 → 录制落盘）：需要联网与真实房间号，请在目标机器上实测 |
 
@@ -50,8 +50,9 @@ Web 端负责低延迟观看，mpv 端负责超分 / HDR / 高画质，两者互
 
 ## 安装与使用
 
-1. 解压发布包到任意目录（例如 `D:\StreamPilot`）。
-2. 双击 `StreamPilot.exe`。
+1. 解压发行版压缩包 `StreamPilot-windows-v0.1.0.zip` 到任意目录（得到同名目录）。目录内容：
+   `StreamPilot-windows-v0.1.0.exe`、`Web\`（播放页与前端库）、`tools\`（自行放置 mpv）、`docs\`、`README.md`、`LICENSE`、`THIRD-PARTY-NOTICES.md`、`VERSION.txt`（含构建信息与 exe 的 SHA256）。
+2. 双击其中的 `StreamPilot-windows-v0.1.0.exe`。
 3. 在左侧“直播”面板选择平台，填入房间号或直播间链接，点击 **解析房间**。
 4. 点击 **开始播放**：播放页会自动完成“候选探测 → 排序 → 首帧 → 追帧”，状态与遥测显示在左侧。
 5. 需要高画质 / HDR / 超分时点击 **mpv 播放**（需 mpv 可用）。
@@ -87,7 +88,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build\run-dev.ps1
 # 运行全部测试：C# 单测 + 前端回归 + 静态红线自检 + 离线结构分析
 powershell -NoProfile -ExecutionPolicy Bypass -File build\test.ps1
 
-# 打包发布到 D:\文件\实用软件\b站插件\StreamPilot_publish
+# 打包发布：产物写入 D:\文件\实用软件\b站插件\StreamPilot_publish\
+#   StreamPilot-windows-v<版本>\          发行版目录
+#   StreamPilot-windows-v<版本>.zip       发行版压缩包（与目录同名）
+#   StreamPilot-windows-v<版本>.zip.sha256  压缩包校验值
 powershell -NoProfile -ExecutionPolicy Bypass -File build\publish.ps1
 
 # 仅静态红线检查（可附带第三方资产 SHA256）
@@ -106,7 +110,7 @@ node build\analyze-csharp.mjs
 | 播放策略前端测试（`node --test`） | **13 / 13 通过** |
 | 静态红线自检 | 通过（无 TODO / Console / 依赖方向 / 通配监听 / 二进制混入） |
 | 离线 C# 结构分析 | 88 文件 / 15119 行 / 133 类型 / 504 方法，无结构性问题 |
-| 发布产物 | `StreamPilot.exe` 单文件 59.3 MiB，总包 61.3 MiB |
+| 发布产物 | 发行版压缩包 `StreamPilot-windows-v0.1.0.zip`（54.4 MiB，含 61.4 MiB 的单文件自包含发行版目录） |
 | 运行时冒烟测试 | 启动正常；桥接 `/health` 返回 `{"status":"ok","version":"0.1.0","port":5566}`；日志出现 `播放器内核已就绪（HEVC: 支持，H.264: 支持）` 与 `播放页加载完成` |
 
 ## 目录结构
