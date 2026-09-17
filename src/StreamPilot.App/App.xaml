@@ -207,12 +207,13 @@
           <Setter.Value>
             <ControlTemplate TargetType="ComboBox">
               <Grid>
-                <ToggleButton Style="{StaticResource ComboBoxToggle}"
-                              IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}" />
+                <!-- IsHitTestVisible=False：内容只负责显示，命中一律交给上层 ToggleButton，
+                     双保险避免"下拉点不开"。 -->
                 <Border Background="{TemplateBinding Background}"
                         BorderBrush="{TemplateBinding BorderBrush}"
                         BorderThickness="1"
-                        CornerRadius="4">
+                        CornerRadius="4"
+                        IsHitTestVisible="False">
                   <Grid>
                     <Grid.ColumnDefinitions>
                       <ColumnDefinition Width="*" />
@@ -243,6 +244,13 @@
                           StrokeThickness="1.6" />
                   </Grid>
                 </Border>
+                <!--
+                  命中区域必须覆盖在内容之上：
+                  ToggleButton 若放在 Border 之前（视觉层级更低），点击会被带背景的 Border 吃掉，
+                  下拉框就完全点不开（只有键盘与自动化 Expand 能打开）。
+                -->
+                <ToggleButton Style="{StaticResource ComboBoxToggle}"
+                              IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}" />
                 <Popup x:Name="PART_Popup"
                        AllowsTransparency="True"
                        Placement="Bottom"

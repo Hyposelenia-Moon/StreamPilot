@@ -7,6 +7,7 @@ using StreamPilot.Core.Http;
 using StreamPilot.Core.Logging;
 using StreamPilot.Core.Models;
 using StreamPilot.Core.Parsers;
+using StreamPilot.Core.Utilities;
 
 /// <summary>
 /// 抖音直播解析器。
@@ -185,6 +186,12 @@ internal sealed class DouyinParser : PlatformParserBase
     /// <summary>pull_data 字段名（live_core_sdk_data 下的档位与地址对象）。</summary>
     private const string PullDataField = "pull_data";
 
+    /// <summary>抖音链接里可能出现的房间号查询参数名（按优先级）。</summary>
+    /// <summary>JSON 字段 status_code（平台拒绝时返回非 0）。</summary>
+    private const string StatusCodeField = "status_code";
+
+    private static readonly string[] RoomIdQueryParameterNames = ["live_web_rid", "web_rid", "room_id", "roomid"];
+
     private readonly HttpTextClient _http;
 
     /// <summary>初始化解析器。</summary>
@@ -239,7 +246,7 @@ internal sealed class DouyinParser : PlatformParserBase
     private string ResolveRoomId(RoomQuery query)
     {
         string? roomId = string.IsNullOrWhiteSpace(query.RoomId)
-            ? TryExtractRoomIdFromUrl(query.RoomUrl)
+            ? ResolveRoomIdFromUrl(query.RoomUrl)
             : query.RoomId;
 
         if (string.IsNullOrWhiteSpace(roomId))
@@ -248,6 +255,60 @@ internal sealed class DouyinParser : PlatformParserBase
         }
 
         return roomId;
+    }
+
+    /// <summary>
+    /// 从抖音链接中取房间号：路径片段优先，其次读查询参数里的 <c>live_web_rid</c>/<c>web_rid</c>/<c>room_id</c>。
+    /// </summary>
+    /// <param name="roomUrl">直播间链接。</param>
+    /// <returns>房间号；取不到时返回 <see langword="null"/>。</returns>
+    /// <remarks>
+    /// 抖音分享出来的链接经常是"首页 + 一串参数"的形式（<c>https://live.douyin.com/?live_web_rid=...</c>），
+    /// 路径里没有房间号，只能从查询参数取，否则会误报"无法确定房间号"。
+    /// </remarks>
+    private static string? ResolveRoomIdFromUrl(string? roomUrl)
+    {
+        string? fromPath = TryExtractRoomIdFromUrl(roomUrl);
+        if (!string.IsNullOrWhiteSpace(fromPath))
+        {
+            return fromPath;
+        }
+
+        if (string.IsNullOrWhiteSpace(roomUrl) || !Uri.TryCreate(roomUrl, UriKind.Absolute, out Uri? uri))
+        {
+            return null;
+        }
+
+        Dictionary<string, List<string>> parsed = QueryStringParser.Parse(uri.Query);
+        foreach (string name in RoomIdQueryParameterNames)
+        {
+            if (parsed.TryGetValue(name, out List<string>? values) && values.Count > 0)
+            {
+                string value = values[0].Trim();
+                if (value.Length > 0 && IsAllowedRoomIdValue(value))
+                {
+                    return value;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>校验从查询参数取到的房间号：只允许数字。</summary>
+    /// <param name="value">候选值。</param>
+    /// <returns>合法返回 <see langword="true"/>。</returns>
+    private static bool IsAllowedRoomIdValue(string value)
+    {
+        foreach (char character in value)
+        {
+            if (!char.IsAsciiDigit(character))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>抓取抖音直播间页面 HTML。</summary>
@@ -422,6 +483,18 @@ internal sealed class DouyinParser : PlatformParserBase
             return null;
         }
 
+        // 平台用非 0 status_code 表示"参数/签名不合法"（例如 10011）。
+        // 这是平台拒绝，不是"房间不存在"或"未开播"，必须区分开（本项目不实现平台签名，见 ADR 0003）。
+        JsonElement statusCodeElement = GetPropertyOrUndefined(document.RootElement, StatusCodeField);
+        if (statusCodeElement.ValueKind == JsonValueKind.Number
+            && statusCodeElement.TryGetInt32(out int statusCode)
+            && statusCode != 0)
+        {
+            throw Fail(
+                ResolveFailure.Rejected,
+                ReflowOperation,
+                $"抖音备用接口拒绝了本次请求（status_code={statusCode}，该接口要求平台签名，本程序不实现）。");
+        }
         JsonElement data = GetNestedProperty(document.RootElement, DataField, DataField);
         if (data.ValueKind != JsonValueKind.Object)
         {

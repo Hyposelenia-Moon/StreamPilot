@@ -559,6 +559,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         IsBusy = true;
         try
         {
+            ApplyPlatformFromInput();
             RoomQuery query = BuildQuery();
             StatusMessage = "正在解析…";
             AppendLog("开始解析：" + _roomInput);
@@ -787,6 +788,40 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// 根据输入链接的域名自动切换平台（链接与当前所选平台不一致时）。
+    /// </summary>
+    /// <remarks>
+    /// 用户经常直接粘贴别家平台的链接而忘了换平台，旧行为会直接报"域名不属于当前平台"。
+    /// 这里在解析前按域名纠正一次，并在日志里说明。
+    /// </remarks>
+    private void ApplyPlatformFromInput()
+    {
+        string input = _roomInput.Trim();
+        if (!input.Contains("://", StringComparison.Ordinal)
+            || !Uri.TryCreate(input, UriKind.Absolute, out Uri? uri))
+        {
+            return;
+        }
+
+        foreach (PlatformOption option in Platforms)
+        {
+            if (option.Id == SelectedPlatform
+                || !Uri.TryCreate(option.UrlPrefix, UriKind.Absolute, out Uri? baseUri))
+            {
+                continue;
+            }
+
+            bool sameHost = uri.Host.Equals(baseUri.Host, StringComparison.OrdinalIgnoreCase)
+                || uri.Host.EndsWith("." + baseUri.Host, StringComparison.OrdinalIgnoreCase);
+            if (sameHost)
+            {
+                SelectedPlatformOption = option;
+                AppendLog("已根据链接自动切换到" + option.DisplayName + "平台。");
+                return;
+            }
+        }
+    }
     private RoomQuery BuildQuery()
     {
         string input = _roomInput.Trim();

@@ -436,29 +436,6 @@ function applyExtremeTarget(run, extremeTargetMs) {
 }
 
 /**
- * 给档位名补上码率后缀（档位名里已经写了码率时不重复追加）。
- * @param {string} label 平台给出的档位名（例如「蓝光4M」）。
- * @param {number|null} bitrateKbps 码率（kbps），未知时传 null。
- * @returns {string} 展示用文字。
- */
-function appendBitrate(label, bitrateKbps) {
-  if (!Number.isFinite(bitrateKbps) || bitrateKbps <= 0) {
-    return label;
-  }
-
-  // 档位名里已经带「4M」「20M」「4000kbps」这类码率时不再叠加，避免出现「蓝光4M · 4000 kbps」。
-  // 注意不要把「4K」（分辨率）当成码率，所以只认 M/mbps/kbps 这几种单位。
-  if (/[0-9]\s*(m|mbps|kbps)\b/i.test(label)) {
-    return label;
-  }
-
-  const text = bitrateKbps >= 1000
-    ? (Math.round(bitrateKbps / 100) / 10) + ' Mbps'
-    : bitrateKbps + ' kbps';
-  return label + ' · ' + text;
-}
-
-/**
  * 规范化宿主下发的画质档位列表，供页面渲染下拉框。
  * @param {*} qualities 宿主 play 消息里的 qualities 字段。
  * @param {*} selectedKey 当前生效的档位键。
@@ -482,11 +459,12 @@ function normalizeQualities(qualities, selectedKey) {
     }
 
     const rawLabel = typeof entry.label === 'string' ? entry.label.trim() : '';
-    const bitrate = Number.isFinite(entry.bitrateKbps) ? Math.round(entry.bitrateKbps) : null;
     const base = rawLabel.length > 0 ? rawLabel : key;
     items.push({
       key,
-      label: appendBitrate(base, bitrate),
+      // 只显示平台自己的档位名，不追加码率后缀：
+      // 档位名里本来就带码率（"蓝光4M"），再补一次会出现"蓝光4M · 4 Mbps"这种不一致。
+      label: base,
       selected: key === wanted,
     });
   }

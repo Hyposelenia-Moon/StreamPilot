@@ -195,8 +195,8 @@ test('normalizeQualities 生成下拉项并回落到首档', () => {
   assert.equal(picked.items.length, 2);
   assert.equal(picked.selectedKey, '10000');
   assert.deepEqual(picked.items.map((item) => item.selected), [false, true]);
-  assert.equal(picked.items[0].label, '4K 原画 · 20 Mbps');
-  assert.equal(picked.items[1].label, '原画 · 10 Mbps');
+  assert.equal(picked.items[0].label, '4K 原画');
+  assert.equal(picked.items[1].label, '原画');
 
   const fallback = core.normalizeQualities(payload, 'not-exist');
   assert.equal(fallback.selectedKey, '20000');
@@ -210,12 +210,13 @@ test('OUTBOUND_MESSAGE_TYPES 包含画质消息', () => {
   assert.equal(core.OUTBOUND_MESSAGE_TYPES.QUALITY, 'quality');
 });
 
-test('appendBitrate 不重复叠加档位名里已有的码率', () => {
+test('画质下拉只显示平台档位名，不追加码率后缀', () => {
   assert.equal(core.normalizeQualities([{ key: '4000', label: '蓝光4M', bitrateKbps: 4000 }], '4000').items[0].label, '蓝光4M');
   assert.equal(core.normalizeQualities([{ key: '20000', label: '蓝光20M', bitrateKbps: 20000 }], '20000').items[0].label, '蓝光20M');
-  assert.equal(core.normalizeQualities([{ key: 'x', label: '超清', bitrateKbps: 2500 }], 'x').items[0].label, '超清 · 2.5 Mbps');
-  assert.equal(core.normalizeQualities([{ key: 'y', label: '流畅', bitrateKbps: 500 }], 'y').items[0].label, '流畅 · 500 kbps');
+  assert.equal(core.normalizeQualities([{ key: 'x', label: '超清', bitrateKbps: 2500 }], 'x').items[0].label, '超清');
+  assert.equal(core.normalizeQualities([{ key: 'y', label: '流畅', bitrateKbps: 500 }], 'y').items[0].label, '流畅');
   assert.equal(core.normalizeQualities([{ key: 'z', label: '原画' }], 'z').items[0].label, '原画');
+  assert.equal(core.normalizeQualities([{ key: 'k', bitrateKbps: 8000 }], 'k').items[0].label, 'k', '没有档位名时用键名');
 });
 
 test('modeLabel 正确显示 250/150 档位（含缺失 extremeTargetMs 的运行对象）', () => {
