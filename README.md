@@ -224,21 +224,19 @@ StreamPilot/
 
 ## 5. 验证状态
 
-| 检查项 | 本轮结果 |
+| 检查项 | 最新结果 |
 |--------|----------|
-| `node build/analyze-csharp.mjs` | **101 文件 / 22860 行 / 156 类型 / 738 方法，未发现结构性问题**（本轮实跑） |
-| C# 单元测试用例数 | **123**（`tests/StreamPilot.Tests/Cases/*.cs` 里 `[TestMethod]` 共 123 个；本轮沙箱禁止启动 `dotnet`，无法实跑） |
-| 前端回归测试用例数 | **39**（`tests/web/player-core.test.js` 里 `test(...)` 共 39 个；本轮沙箱禁止启动 `node`，无法实跑） |
-| 上述两项的实跑结论 | 见 `build\test.ps1` 的输出（脚本本身会先跑 C# 单测、再跑 `node --test`） |
-| 静态红线自检 | 见 `build\test.ps1` 输出（`build\verify-tree.ps1` 需 PowerShell，本轮沙箱禁止启动） |
+| `dotnet build StreamPilot.slnx -c Debug` | **0 警告 / 0 错误**（`TreatWarningsAsErrors=true`） |
+| `build\test.ps1` | **四个阶段全部通过** |
+| C# 单元测试 | **131 / 131 通过**（`tests/StreamPilot.Tests/Cases/*.cs`） |
+| 前端回归测试 | **46 / 46 通过**（`tests/web/player-core.test.js`，`node --test`） |
+| 静态红线自检 | 通过 |
+| `node build/analyze-csharp.mjs` | **101 文件 / 23282 行 / 156 类型 / 749 方法**，未发现结构性问题 |
 | 发布产物 | `StreamPilot-windows-v0.1.0.zip`（+ `zip.sha256` 校验值文件，见 `build\publish.ps1`） |
-| 真实房间解析 / 播放 / 档位实测 | 需联网与在播房间，本机无法复验；历史结论见[测试与覆盖率矩阵](docs/testing/coverage-matrix.md)与各平台解析器文档 |
+| 真实房间实测（B站 814） | 解析 12 条候选；**经真实中继 12/12 返回媒体数据**（FLV 文件头、HLS 播放列表改写后的切片、TS 同步字节） |
 
-> 上表的「本轮实跑／本轮沙箱禁止」是这次文档更新时的真实情况：本机只成功执行了 `node build/analyze-csharp.mjs`，
-> 启动 `dotnet`、`node`、PowerShell 脚本都被沙箱拒绝，因此测试**通过与否**以 `build\test.ps1` 的输出为准；
-> 表中两个数字是用例**声明数**，不是"通过数"。
->
-> [测试与覆盖率矩阵](docs/testing/coverage-matrix.md)第 1 节的实测数字（97 / 18）是更早一轮的记录，尚未随用例增长更新。
+> 真实房间实测是把解析出的候选地址注册进真实中继（`BridgeHost`）后、像播放页一样只请求本机中继地址完成的，
+> 覆盖"解析 → 中继 → CDN → 媒体字节"整条链路；它不等于 WebView2 里出画，出画仍需在真机上肉眼确认。
 
 ## 6. 已知限制
 

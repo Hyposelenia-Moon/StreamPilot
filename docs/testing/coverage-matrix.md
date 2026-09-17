@@ -16,10 +16,10 @@
 | 阶段 | 结果 |
 |------|------|
 | `dotnet build StreamPilot.slnx`（Debug 与 Release） | 0 警告 / 0 错误（`TreatWarningsAsErrors=true`） |
-| C# 单元测试 | **123 / 123 通过** |
-| 播放策略前端测试 | **39 / 39 通过** |
+| C# 单元测试 | **131 / 131 通过** |
+| 播放策略前端测试 | **46 / 46 通过** |
 | 静态红线自检 | 通过 |
-| 离线结构分析 | 101 文件 / 22860 行 / 156 类型 / 738 方法，无结构性问题 |
+| 离线结构分析 | 101 文件 / 23282 行 / 156 类型 / 749 方法，无结构性问题 |
 
 > 离线结构分析的定位：在没有 SDK 的环境里提供可复现的前置检查（括号配对、命名空间规则、重复类型、空 catch、CS1998、未引用私有字段、方法行数、XML 注释 `--`）。
 > **它不替代编译器**：本项目的首次真实编译仍发现了 22 处问题，因此有 SDK 时必须以 `dotnet build` 为准。
@@ -50,14 +50,15 @@
 | `Core.Services.CandidateValidity` | 未声明有效期、已过期（含边界）、非法协议 | `CachingAndValidityTests`（3 个） |
 | `Core.Parsers.PlatformParserBase` | 房间号格式校验、域名校验（含子域/非法 scheme）、平台不匹配、空候选→未开播、未预期异常包装、取消透传、从链接提取房间号 | `ParserBaseTests`（7 个） |
 | `Parsers.Bilibili.IsRiskControlCode` / `Parsers.Yy.ParseRoomPage` / `Parsers.Bigo.CollectCandidates` | 风控码与"房间不存在"区分、YY 房间页字段抽取（含短号→`sid` 与 404 页）、Bigo"有地址即开播"与需要登录时的 `Rejected` 归类 | `PlatformParserTests`（7 个） |
-| 各平台画质档位（`QualityOption`） | 档位列表构造（官方档位名 / 码率 / HDR 标记）、按 `PreferredQualityKey` 取档、未知键回退最高档、单档平台只给一项 | `PlatformParserTests`（画质用例，见文件内 `[TestMethod]`） |
+| 各平台画质档位（`QualityOption`） | 档位列表构造（官方档位名 / 码率 / HDR 标记）、按 `PreferredQualityKey` 取档、未知键回退最高档、单档平台只给一项、**B站档位兜底链（`g_qn_desc` 为空 / `accept_qn` 为空 / 两者都为空 → `current_qn`）** | `PlatformParserTests`（画质用例，见文件内 `[TestMethod]`） |
+| `Parsers.Bilibili.TryParseRoomBaseInfo` / `ShouldRejectForMissingCandidates` | **`getRoomBaseInfo` 真实响应的字段路径（键为真实房间号 856077、`live_status` 在房间对象里）**、风控 `-352` 响应、索引改名 / 缺 `data` / 空索引 / 降级通道自身被风控时的安全返回 `null`、**"有候选永远不判失败"**与直播状态分类（在播 / 未开播 / 轮播 / 未知） | `PlatformParserTests`（含用真实响应片段的离线用例） |
 | `Recording.SegmentPolicy` | 按字节/时长切分、未开始与时间戳回退、非法配置归一化、超大取值不被夹取（无上限）、默认值 10 GiB / 480 分钟、最小字节判定 | `SegmentPolicyTests`（8 个） |
 | `Recording.RecordingFileNaming` | 命名格式、非法字符与路径穿越、超长截断、扩展名映射、冲突不覆盖、元数据路径 | `RecordingFileNamingTests`（6 个） |
 | `Recording.Flv.FlvTagReader` / `FlvTimestamp` | 正常序列、关键帧判定、签名非法、未知标签类型、载荷截断、时间戳边界与截断、缓冲区过短 | `FlvTagReaderTests`（7 个） |
 | `Recording.Flv.FlvSegmentWriter` | 文件头字节、载荷逐字节一致、时间戳重定基、序列头重放、分片元数据、释放后拒绝写入 | `FlvSegmentWriterTests`（6 个） |
 | `Recording.Hls.HlsPlaylistParser` / `TsStreamRecorder.AlignToPacketBoundary` | media/master 播放列表、ENDLIST、空内容、TS 整包对齐、前导垃圾、不足一包 | `HlsPlaylistTests`（7 个） |
-| `Bridge.LoopbackOnlyGuard` / `RelayRegistry` / `BridgeHost` | 回环前缀校验、通配拒绝、端口越界、注册/解析/释放、未知令牌、容量上限、按地址释放、未启动时注册失败 | `BridgeTests`（7 个） |
-| `Web.player-core`（播放策略） | 见 `docs/architecture/playback-strategy.md` 第 7 节 | `player-core.test.js`（39 个，含画质/档位/暂停/缓冲失控/状态行优先级） |
+| `Bridge.LoopbackOnlyGuard` / `RelayRegistry` / `BridgeHost` | 回环前缀校验、通配拒绝、端口越界、注册/解析/释放、未知令牌、容量上限、按地址释放、未启动时注册失败、**中继上游请求必须携带 User-Agent（缺 UA 时 B站 CDN 回 403，见 [ADR 0006](../adr/0006-relay-upstream-headers.md)）** | `BridgeTests`（9 个） |
+| `Web.player-core`（播放策略） | 见 `docs/architecture/playback-strategy.md` 第 7 节 | `player-core.test.js`（46 个，含画质/档位/暂停/缓冲失控/状态行优先级/**实际延迟拼接**/**追帧开关（取消与恢复）**） |
 
 **未覆盖（需联网或人工验证，属集成测试范畴）**：
 

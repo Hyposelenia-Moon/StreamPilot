@@ -200,7 +200,7 @@
 | `probe-rejected` | 单条候选返回 4xx/5xx，已被丢弃 | `outcome`、`statusCode` |
 | `candidate-queue` | 候选队列生成 | `sourceIndexes`、`knownGoodCount`、`inconclusiveCount` |
 | `candidate-active` | 开始连接某候选 | — |
-| `status` | 状态变化 | `firstFrameMs`、`mode`；暂停/继续时 `message` 为"已暂停播放"/"已继续播放" |
+| `status` | 状态变化 | `firstFrameMs`、`mode`；暂停/继续时 `message` 为"已暂停播放"/"已继续播放"；切换追帧开关时 `message` 为"已取消自动追帧…"/"已恢复自动追帧…"并带 `autoChaseEnabled`（布尔） |
 | `log` | 页面诊断日志（页面不再显示日志面板） | `level`（`info`/`warn`/`error`）；宿主按级别落盘并追加到"最近事件" |
 | `telemetry` | 每 ≥10 s 一次 | `currentTime`、`bufferedAheadMs`、`readyState`、`networkState`、`paused`、`pausedByUser`、`elementPaused`、`ended`、`playbackRate`、`secondsSinceProgress`、`droppedVideoFrames`、`totalVideoFrames`、`mode`、`extremeTargetMs`、`runawayChaseAttempts`、`reconnects` |
 | `warning` | 可恢复问题（切换候选、重连、缓冲失控追帧） | `errorName`、`errorMessage`、`reconnectCount`、`bufferedAheadMs`、`secondsSinceProgress`、`runawayChaseAttempts`、`chased` |
@@ -232,6 +232,9 @@ core.INBOUND_MESSAGE_TYPES  // play / chase（页面内部追帧按钮使用）/
 core.OUTBOUND_MESSAGE_TYPES // ready / checking / probe-result / probe-rejected / ... / log / quality / request-play / toggle-pause / request-stop
 core.LOG_LEVELS             // info / warn / error（`log` 与 `host-status` 的 level 字段共用同一套级别）
 core.STATUS_IDLE_TEXT       // 未连接（页面初始化与停止播放后的状态行文案）
+core.CHASE_SWITCH_LABELS    // 取消追帧 / 恢复追帧（画面底部追帧开关按钮文案）
+core.shouldAutoChase        // 追帧开关判定（字段缺失视为开启，仅显式 false 表示已取消）
+core.formatStatusWithLatency // 状态行拼接实际延迟（非法值不追加该分段）
 core.HOST_STATUS_HOLD_MS    // host-status 按级别在状态行上的保留时长（info 6s / warn 12s / error 20s）
 core.resolveStatusLine      // 状态行显示判定（宿主消息优先，超时回落播放状态）
 ```
@@ -250,4 +253,7 @@ core.resolveStatusLine      // 状态行显示判定（宿主消息优先，超�
 - 删除或改名 `type` 属于破坏性变更，必须同时更新本文件、`player.html`、`ShellViewModel` 与前端测试。
 - 宿主**不再下发** `chase`（追帧入口只在播放页底部，页面自己触发）；`INBOUND_MESSAGE_TYPES.CHASE`
   由页面内部的「追帧」按钮使用，因此常量必须保留。
+- 「取消追帧 / 恢复追帧」**不新增消息类型**：它是页面本地的播放策略开关（`run.autoChaseEnabled`），
+  只把一次 `status` 消息作为操作反馈同步给宿主（`extras.autoChaseEnabled`），
+  宿主无需回下发任何消息，因此旧版宿主/旧版页面都不受影响。
 - `Web/player-core.js` 被 `node --test tests/web` 覆盖：任何阈值或档位改动都必须同步更新用例。

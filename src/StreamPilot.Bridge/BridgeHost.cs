@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using System.Text;
 using StreamPilot.Core.Configuration;
 using StreamPilot.Core.Errors;
+using StreamPilot.Core.Http;
 using StreamPilot.Core.Logging;
 using StreamPilot.Core.Runtime;
 using StreamPilot.Core.Services;
@@ -58,6 +59,15 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
 
     /// <summary>中继请求体里表示 HLS 播放列表的 kind 取值。</summary>
     private const string PlaylistKindValue = "hls";
+
+    /// <summary>请求头名称：User-Agent。</summary>
+    private const string HeaderNameUserAgent = "User-Agent";
+
+    /// <summary>请求头名称：Referer。</summary>
+    private const string HeaderNameReferer = "Referer";
+
+    /// <summary>请求头名称：Range。</summary>
+    private const string HeaderNameRange = "Range";
 
     private readonly IStructuredLogger _logger;
     private readonly string _moduleName = "Bridge.Host";
@@ -486,6 +496,46 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         await WriteTextAsync(context, HttpStatusCode.OK, $"{{\"localUrl\":\"{localUrl}\"}}").ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// 构造发往上游 CDN 的请求：注入浏览器 <c>User-Agent</c>，并按需注入 <c>Referer</c> 与 <c>Range</c>。
+    /// </summary>
+    /// <param name="target">中继目标。</param>
+    /// <param name="rangeHeader">客户端传来的 <c>Range</c> 头，可为 <see langword="null"/>。</param>
+    /// <returns>可直接发送的请求（调用方负责释放）。</returns>
+    /// <remarks>
+    /// <para>
+    /// <c>User-Agent</c> 是**必需**的，不是可选优化：<see cref="HttpClient"/> 默认不发送 UA，
+    /// 而 B站 CDN 的部分节点（如 <c>d1--cn-gotcha104.bilivideo.com</c>、
+    /// <c>d1--cn-gotcha04b.bilivideo.com</c>、<c>cn-zjhz-cm-01-08.bilivideo.com</c>）对
+    /// 不带 UA 的请求一律回 <c>403</c>（room_id=814 实测，见
+    /// <c>docs/adr/0006-relay-upstream-headers.md</c>）。
+    /// 缺 UA 时中继的每条线路都会 403，表现为"探测判定全部线路不可用"与真实播放同时失败，
+    /// 而 mpv 播放同一地址正常（mpv 自带 UA）——这正是本方法的由来。
+    /// </para>
+    /// <para>
+    /// HLS 播放列表与切片走同一个方法，保证两者的请求头完全一致；
+    /// 播放列表里的子地址由 <see cref="RegisterChild"/> 继承 <see cref="RelayTarget.Referer"/>，
+    /// 因此切片请求同样带 UA 与 Referer。
+    /// </para>
+    /// </remarks>
+    internal static HttpRequestMessage CreateUpstreamRequest(RelayTarget target, string? rangeHeader)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        HttpRequestMessage request = new(HttpMethod.Get, target.UpstreamUrl);
+        request.Headers.TryAddWithoutValidation(HeaderNameUserAgent, HttpClientFactory.DefaultUserAgent);
+        if (!string.IsNullOrWhiteSpace(target.Referer))
+        {
+            request.Headers.TryAddWithoutValidation(HeaderNameReferer, target.Referer);
+        }
+
+        if (!string.IsNullOrWhiteSpace(rangeHeader))
+        {
+            request.Headers.TryAddWithoutValidation(HeaderNameRange, rangeHeader);
+        }
+
+        return request;
+    }
+
     private async Task StreamRelayAsync(HttpListenerContext context, RelayTarget target)
     {
         // 中继响应必须带 CORS 头：页面源是 https://appassets.local，而中继在 http://127.0.0.1，
@@ -498,17 +548,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
             return;
         }
 
-        using HttpRequestMessage request = new(HttpMethod.Get, target.UpstreamUrl);
-        if (!string.IsNullOrWhiteSpace(target.Referer))
-        {
-            request.Headers.TryAddWithoutValidation("Referer", target.Referer);
-        }
-
-        string? rangeHeader = context.Request.Headers["Range"];
-        if (!string.IsNullOrWhiteSpace(rangeHeader))
-        {
-            request.Headers.TryAddWithoutValidation("Range", rangeHeader);
-        }
+        using HttpRequestMessage request = CreateUpstreamRequest(target, context.Request.Headers[HeaderNameRange]);
 
         using HttpResponseMessage response = await _relayClient
             .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, _shutdown.Token)
@@ -545,11 +585,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// </remarks>
     private async Task ServePlaylistAsync(HttpListenerContext context, RelayTarget target)
     {
-        using HttpRequestMessage request = new(HttpMethod.Get, target.UpstreamUrl);
-        if (!string.IsNullOrWhiteSpace(target.Referer))
-        {
-            request.Headers.TryAddWithoutValidation("Referer", target.Referer);
-        }
+        using HttpRequestMessage request = CreateUpstreamRequest(target, rangeHeader: null);
 
         using HttpResponseMessage response = await _relayClient
             .SendAsync(request, HttpCompletionOption.ResponseContentRead, _shutdown.Token)

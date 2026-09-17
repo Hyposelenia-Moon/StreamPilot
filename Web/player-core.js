@@ -389,6 +389,9 @@ function buildMpegtsConfig(extreme, targetSeconds, autoChase) {
   const latencyMax = extreme
     ? Math.max(0.35, targetSeconds + LATENCY_MAX_MARGIN_SECONDS)
     : STABLE_LATENCY_MAX_SECONDS;
+  const syncMax = extreme
+    ? Math.max(0.22, targetSeconds + LIVE_SYNC_MAX_MARGIN_SECONDS)
+    : STABLE_LATENCY_MAX_SECONDS;
 
   return {
     isLive: true,
@@ -402,11 +405,9 @@ function buildMpegtsConfig(extreme, targetSeconds, autoChase) {
     liveBufferLatencyMaxLatency: chasing ? latencyMax : CHASE_DISABLED_LATENCY_SECONDS,
     liveBufferLatencyMinRemain: extreme ? targetSeconds : STABLE_LATENCY_MIN_REMAIN_SECONDS,
     liveSync: chasing && extreme,
-    liveSyncMaxLatency: chasing
-      ? extreme ? Math.max(0.22, targetSeconds + LIVE_SYNC_MAX_MARGIN_SECONDS) : STABLE_LATENCY_MAX_SECONDS
-      : CHASE_DISABLED_LATENCY_SECONDS,
+    liveSyncMaxLatency: chasing ? syncMax : CHASE_DISABLED_LATENCY_SECONDS,
     liveSyncTargetLatency: extreme ? targetSeconds : 0.8,
-    liveSyncPlaybackRate: chasing ? extreme ? LIVE_SYNC_PLAYBACK_RATE : CHASE_DISABLED_PLAYBACK_RATE : CHASE_DISABLED_PLAYBACK_RATE,
+    liveSyncPlaybackRate: extreme && chasing ? LIVE_SYNC_PLAYBACK_RATE : CHASE_DISABLED_PLAYBACK_RATE,
     fixAudioTimestampGap: true,
   };
 }
@@ -419,6 +420,7 @@ function buildMpegtsConfig(extreme, targetSeconds, autoChase) {
  */
 function buildHlsConfig(extreme, autoChase) {
   const chasing = autoChase === undefined ? true : autoChase === true;
+  const maxLatencyCount = extreme ? HLS_MAX_LATENCY_COUNT_EXTREME : HLS_MAX_LATENCY_COUNT_STABLE;
 
   return {
     enableWorker: true,
@@ -431,9 +433,7 @@ function buildHlsConfig(extreme, autoChase) {
       `maxLiveSyncPlaybackRate = 1`（不加速追赶）与把最大延迟切片数放到不可能达到的值
       （不因延迟而跳片）。两者同时给出，取消追帧后画面就以正常倍速连续播放。
     */
-    liveMaxLatencyDurationCount: chasing
-      ? extreme ? HLS_MAX_LATENCY_COUNT_EXTREME : HLS_MAX_LATENCY_COUNT_STABLE
-      : CHASE_DISABLED_MAX_LATENCY_COUNT,
+    liveMaxLatencyDurationCount: chasing ? maxLatencyCount : CHASE_DISABLED_MAX_LATENCY_COUNT,
     maxLiveSyncPlaybackRate: chasing ? HLS_MAX_LIVE_SYNC_PLAYBACK_RATE : CHASE_DISABLED_PLAYBACK_RATE,
   };
 }

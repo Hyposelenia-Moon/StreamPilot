@@ -3,6 +3,7 @@ namespace StreamPilot.Tests.Cases;
 using StreamPilot.Bridge;
 using StreamPilot.Core.Configuration;
 using StreamPilot.Core.Errors;
+using StreamPilot.Core.Http;
 using StreamPilot.Core.Logging;
 using StreamPilot.Core.Services;
 using StreamPilot.Tests.Framework;
@@ -131,5 +132,49 @@ public sealed class BridgeTests
         BridgeException exception = Assert.Throws<BridgeException>(() =>
             host.RegisterRelay(new RelayTarget { UpstreamUrl = "https://cdn.example/x.flv" }));
         Assert.Contains("未启动", exception.Message);
+    }
+
+    /// <summary>
+    /// 中继上游请求必须携带浏览器 User-Agent。
+    /// </summary>
+    /// <remarks>
+    /// 回归点（见 docs/adr/0006）：<see cref="HttpClient"/> 默认不发送 UA，
+    /// 而 B站 CDN 的部分节点对不带 UA 的请求一律返回 403，
+    /// 于是中继的每条线路都 403，"全部候选线路不可用"（room_id=814）。
+    /// 这里锁住"至少带 UA"这一条不变量，UA 具体取值只允许等于项目统一的默认 UA。
+    /// </remarks>
+    [TestMethod("中继：上游请求必须携带 User-Agent")]
+    public void UpstreamRequestAlwaysCarriesUserAgent()
+    {
+        using HttpRequestMessage withReferer = BridgeHost.CreateUpstreamRequest(
+            new RelayTarget
+            {
+                UpstreamUrl = "https://d1--cn-gotcha104.bilivideo.com/live-bvc/x.m3u8?expires=1&sign=secret",
+                Referer = "https://live.bilibili.com/",
+            },
+            "bytes=0-1");
+
+        Assert.Equal(HttpMethod.Get, withReferer.Method);
+        Assert.True(
+            withReferer.Headers.TryGetValues("User-Agent", out IEnumerable<string>? agentValues),
+            "上游请求必须带 User-Agent");
+        // 读回时 .NET 会把 User-Agent 按 RFC 拆成若干段（空格分隔），因此按空格拼回后必须与写入值逐字节相同：
+        // 这既证明头存在，也证明没有被截断、重复或改写。
+        Assert.Equal(
+            HttpClientFactory.DefaultUserAgent,
+            string.Join(" ", agentValues!),
+            "上游请求的 User-Agent 必须与项目默认 UA 逐字节一致");
+        Assert.True(withReferer.Headers.Contains("Referer"), "设置了 Referer 时必须带 Referer");
+        Assert.True(withReferer.Headers.Contains("Range"), "客户端带了 Range 时必须透传");
+
+        using HttpRequestMessage bare = BridgeHost.CreateUpstreamRequest(
+            new RelayTarget { UpstreamUrl = "https://cdn.example/x.flv" },
+            null);
+
+        Assert.True(
+            bare.Headers.Contains("User-Agent"),
+            "没有 Referer / Range 时同样必须带 UA，否则 B站 CDN 会回 403");
+        Assert.False(bare.Headers.Contains("Referer"));
+        Assert.False(bare.Headers.Contains("Range"));
     }
 }

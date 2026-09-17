@@ -16,8 +16,14 @@
 |------|-----------|------|
 | 1 | `GET https://live.bilibili.com/{idOrShortId}` | 仅在输入不是纯数字时执行；解析 `defaultRoomId` / `room_id` / `roomid` / `roomId` |
 | 2 | `GET https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByRoom?room_id={id}` | 标题、主播名、分区、封面；`data: null` → 房间不存在；被风控（`code=-352/-412/-509`）时降级到第 3 步 |
-| 3 | `GET https://api.live.bilibili.com/xlive/web-room/v1/index/getRoomBaseInfo?room_ids={id}&req_biz=web_room_componet` | 仅在第 2 步不可用时调用；取 `data.by_room_ids` 里的 `title` / `uname` / `area_name` / `cover` |
+| 3 | `GET https://api.live.bilibili.com/xlive/web-room/v1/index/getRoomBaseInfo?room_ids={id}&req_biz=web_room_componet` | 仅在第 2 步不可用时调用；取 `data.by_room_ids["{真实房间号}"].title` / `uname` / `area_name` / `cover` / `live_status` |
 | 4 | `GET https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?protocol=0,1&format=0,1,2&codec=0,1&qn={qn}&platform=web&ptype=8&dolby=5&panorama=1&room_id={id}` | 全部候选线路与画质；`qn` 默认 `30000`，用户选了档位时用该档位的 qn |
+
+> `getRoomBaseInfo` 的两个字段路径容易读错（实测 `room_ids=814`）：
+> `data.by_room_ids` 的**键是平台真实房间号**（814 是短号，键是 `856077`），
+> `live_status` 藏在每个房间对象里（顶层与 `data` 层都没有该字段）。
+> 读错路径只会得到"状态未知"，进而把在播房间误判成未开播，因此这里的解析被抽成纯函数
+> `BilibiliParser.TryParseRoomBaseInfo` 并由离线用例直接断言。
 
 `qn` 取值：`30000`=杜比原画、`25000`=默认原画、`20000`=4K、`15000`=2K、`10000`=1080P 原画（有 4K 的房间显示为「1080P 高码率」）、`400`=蓝光、`250`=超清、`150`=高清、`80`=流畅。是否追加「高帧率」「HDR」后缀见下文「HDR / 高帧率后缀只看接口声明」。
 
@@ -78,16 +84,26 @@ UA 为桌面 Chrome，`Referer: https://live.bilibili.com/`）：
 
 | 状态 | 判定 |
 |------|------|
-| 未开播 | `data.live_status == 0`；或最终候选数为 0 |
-| 轮播中 | `data.live_status == 2` |
+| 成功 | **只要 `getRoomPlayInfo` 返回 `code=0` 且能从 `playurl_info` 取到候选地址，就必须解析成功**；直播状态只用来决定文案，不用来决定成败 |
+| 未开播 | 候选数为 0 且两个来源都未声明直播状态，或声明的是 `live_status == 0` |
+| 轮播中 | 候选数为 0 且声明的是 `live_status == 2` |
+| 解析错误（在播但无地址） | 候选数为 0 且任一来源声明 `live_status == 1`：接口说在播却拿不到地址，如实报解析失败，不伪装成未开播 |
 | 房间不存在 | `getInfoByRoom` 的 `data` 为 `null` 或 `code == -400` |
 | 被拒绝 | 风控码 `code ∈ {-352, -412, -509}`（房间信息接口失败时降级，播放接口失败时归类为被拒绝） |
 | 解析错误 | `code != 0`（带平台 `message`）、关键字段缺失、响应不是 JSON |
 | 网络错误 | 由 `HttpTextClient` 抛出 |
 
-> 降级顺序：房间信息接口被风控 → 先试 `getRoomBaseInfo` 取主播名与标题（拿到就用），
-> 再只用播放接口判定开播状态；两条元数据通道都不可用时主播名与标题显示为占位文本，
-> 但**不会**把可用房间误报成"房间号不存在"。
+直播状态按可信度取两个来源：① `getInfoByRoom` / `getRoomBaseInfo` 明确给出的 `live_status`；
+② `getRoomPlayInfo` 的 `data.live_status`。两者都没有时状态记为"未知"——**未知不等于未开播**，
+只有候选数也为 0 时才归类为未开播；若状态明确为在播却没有地址，归类为解析错误。
+判定入口是纯函数 `BilibiliParser.ShouldRejectForMissingCandidates`
+（被离线用例覆盖，锁定"有候选永远不判失败"这条规则）。
+
+> 降级顺序：房间信息接口被风控 → 先试 `getRoomBaseInfo` 取主播名、标题与直播状态（拿到就用），
+> 再只用播放接口判定开播状态；两条元数据通道都不可用时主播名与标题显示为占位文本
+> （`未知主播` / `（标题不可用）`），**但只要有候选地址就不会让解析失败**，
+> 也**不会**把可用房间误报成"房间号不存在"。
+> 每一步降级都写 `Warn` 日志并带 `roomId` / `failure` / `liveStatus` / `detail` 字段说明原因。
 
 ## Cookie 说明
 

@@ -190,6 +190,9 @@ internal sealed class BilibiliParser : PlatformParserBase
     /// <summary>B站请求过于频繁错误码。</summary>
     private const int RequestThrottledCode = -509;
 
+    /// <summary>播放状态取值：正在直播。</summary>
+    private const int LiveStatusLive = 1;
+
     /// <summary>播放状态取值：未开播。</summary>
     private const int LiveStatusOffline = 0;
 
@@ -355,7 +358,8 @@ internal sealed class BilibiliParser : PlatformParserBase
     /// 规则只有两条，顺序不能颠倒：
     /// <list type="number">
     /// <item><description>只要有候选就必须成功：候选是不可替代的产物，直播状态只影响文案；</description></item>
-    /// <item><description>没有候选时才按直播状态分类：轮播单独提示，其余（含状态未知）按未开播，
+    /// <item><description>没有候选时才按直播状态分类：轮播单独提示；接口声明"正在直播"却没有任何地址，
+    /// 属于解析失败而不是未开播（提示用户稍后重试）；其余（含状态未知）按未开播，
     /// 因为"没有任何地址"对用户的可操作结论就是"现在没得看"。
     /// 房间信息接口给出的状态优先（它来自 <c>getInfoByRoom</c> / <c>getRoomBaseInfo</c> 的权威字段）。</description></item>
     /// </list>
@@ -371,7 +375,12 @@ internal sealed class BilibiliParser : PlatformParserBase
         }
 
         int declared = roomLiveStatus != LiveStatusUnknown ? roomLiveStatus : liveStatus;
-        return declared == LiveStatusReplaying ? ResolveFailure.Replaying : ResolveFailure.NotLive;
+        return declared switch
+        {
+            LiveStatusReplaying => ResolveFailure.Replaying,
+            LiveStatusLive => ResolveFailure.ParseError,
+            _ => ResolveFailure.NotLive,
+        };
     }
 
     /// <summary>
@@ -581,7 +590,7 @@ internal sealed class BilibiliParser : PlatformParserBase
     }
 
     /// <summary>
-    /// 尝试用 getRoomBaseInfo 取主播名、标题与分区；任何失败都返回 <see langword="null"/>（不抛出）。
+    /// 尝试用 getRoomBaseInfo 取主播名、标题、分区与直播状态；任何失败都返回 <see langword="null"/>（不抛出）。
     /// </summary>
     /// <param name="numericRoomId">数字房间号。</param>
     /// <param name="cookie">B站 Cookie，可为 <see langword="null"/>（匿名解析）。</param>
@@ -631,7 +640,7 @@ internal sealed class BilibiliParser : PlatformParserBase
     /// <c>{"code":0,"data":{"by_uids":{},"by_room_ids":{"856077":{...}}}}</c>。
     /// 注意两点，都曾让降级通道"取到数据却判错"：
     /// <list type="number">
-    /// <item><description>索引键是**平台真实房间号**（814 是短号，键为 856077），不是请求里的房间号；</description></item>
+    /// <item><description>索引键是平台真实房间号（814 是短号，键为 856077），不是请求里的房间号；</description></item>
     /// <item><description><c>live_status</c> 藏在 <c>by_room_ids</c> 的每个房间对象里，
     /// 顶层与 <c>data</c> 层都没有；读取路径写错会得到"未知"，进而把在播房间误判成未开播。</description></item>
     /// </list>

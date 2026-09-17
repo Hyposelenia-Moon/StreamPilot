@@ -225,7 +225,11 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
 分模式卡顿阈值（含"用户暂停不判卡顿"与恢复宽限期）、缓冲失控阈值与处置顺序（含宽限期与用尽后交回重连）、
 探测开关、`LOADING_COMPLETE` 重连条件、手动追帧夹取、进度判定与缓冲计算、播放计划过滤、错误归类、首帧超时选择、
 画质下拉规范化（档位键回落与码率标签）、消息契约（含 `log`、页面侧请求消息与 `request-stop`）、
-播放页静态结构（顶部提示已彻底移除、播放控制三键顺序为 开始 → 暂停/继续 → 停止）。
+**状态行实际延迟拼接（`formatStatusWithLatency` 的合法值 / `null` / `NaN` / 负数 / 空基础文案）**、
+**追帧开关（`shouldAutoChase` 的默认开启与显式取消、`chaseSwitchLabel` 两侧文案、
+取消追帧对 mpegts.js / hls.js 配置的影响，且不改变缓冲策略）**、
+**取消追帧在状态行上的标注**、播放页静态结构（顶部提示已彻底移除、播放控制三键顺序为 开始 → 暂停/继续 → 停止、
+「取消追帧」按钮在「追帧」左边）。
 
 ## 8. 画质档位切换
 
@@ -251,7 +255,50 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
   `extremeTargetMs` 与 `extremeTargetSeconds`，避免字段缺失时静默回落成默认值
   （曾表现为"选了 250 仍显示 200"）。
 
-## 10. 桥接中继的稳定性约束
+## 10. 取消追帧与暂停播放的区别
+
+播放页底部有第三个与追帧相关的入口：**「取消追帧 / 恢复追帧」**（`#chaseToggleBtn`，排在「追帧」按钮左边）。
+它切换的是"要不要按目标延迟把画面拉回直播边缘"这一**策略**，不是"要不要继续播放"。
+
+| 维度 | 取消追帧 | 暂停播放 | 追帧（一次性） |
+|------|----------|----------|----------------|
+| 接口 | 无新消息类型：页面本地改配置，并回一条 `status` 说明 | 页面回 `toggle-pause`，宿主回下发 `pause` | 页面内部按钮，本地 `seek` |
+| 媒体元素 | 继续播放（**不调用** `video.pause()`） | `video.pause()`，画面完全停住 | 不变 |
+| 播放器 | 不销毁（`configure` 热改配置） | 不销毁 | 不销毁 |
+| 地址 / 中继 | 不释放 | 不释放 | 不释放 |
+| 延迟走向 | 按实时速率增长（不再被拉回目标值） | 暂停期间缓冲继续增长，继续播放时可能先追帧 | 立刻拉回缓冲末端前 0.08 s |
+| 恢复方式 | 再点一次按钮 | 「继续播放」 | 无需恢复 |
+
+`core.shouldAutoChase(run)`（纯函数、被单测覆盖）是唯一判定入口：
+**字段缺失视为开启**（`run.autoChaseEnabled !== false`），只有用户显式取消才算关闭，
+这样旧会话与旧调用点不会因为字段缺失被误当成"已取消"。
+
+取消后写入播放器的配置（`core.buildMpegtsConfig(extreme, target, false)` / `core.buildHlsConfig(extreme, false)`）：
+
+| 链路 | 取消追帧时 | 默认（自动追帧） |
+|------|------------|------------------|
+| mpegts.js | `liveBufferLatencyChasing = false`、`liveSync = false`，并把 `liveBufferLatencyMaxLatency` / `liveSyncMaxLatency` 写成永不触发的值 | `true` / `extreme` 时 `true`，阈值为 0.42–0.52 s / 0.29–0.39 s |
+| hls.js | `maxLiveSyncPlaybackRate = 1`、`liveMaxLatencyDurationCount` 写成不可能达到的值 | `1.5` 与 `4`（极限档）/ `8`（稳定档） |
+| 两者共同 | `autoCleanupSourceBuffer` / `maxBufferLength` / `enableStashBuffer` 等**一律不变** | — |
+
+两点边界必须记住：
+
+1. **取消追帧不关闭缓冲失控保护**（第 5.2 节）。前者是"不主动追"，后者是"画面真的停住且缓冲涨到 8 s 以上时的兜底重连"，
+   两者目的相反，不能互相牵连：取消追帧后画面仍在前进，失控保护就不会介入；
+2. **取消追帧不改变目标延迟档位**：`150/200/250` 只被记住（恢复后立即生效），下拉框不回退、不改写。
+
+## 11. 状态行显示实际延迟
+
+画面下方状态行（`#statusLine`）在播放状态下追加**遥测实测的延迟**，形如 `播放中 · 极限追帧 250 ms · 318 ms`：
+
+- 数据来源：遥测每轮（`TELEMETRY_INTERVAL_MS = 500 ms`）把 `getLocalBufferSeconds(...)` 的结果写进
+  `run.lastLatencyMs`，与 `telemetry` 消息里的 `bufferedAheadMs` **同源同值**；
+- 拼接是纯函数 `core.formatStatusWithLatency(base, latencyMs)`：`latencyMs` 为 `null` / `NaN` / `Infinity` / 负数时
+  **不追加该分段**，绝不显示占位数字；
+- 刻意**不**用追帧档位（150/200/250）冒充延迟：那是目标值，不是实际值；
+- 已取消追帧时状态行多一段标注（`… · 已取消追帧 · 900 ms`），恢复后自动消失。
+
+## 12. 桥接中继的稳定性约束
 
 - `BridgeHost` 的中继 `HttpClient`：`Timeout = InfiniteTimeSpan`（长连接不能被整体超时取消），
   且 `PooledConnectionLifetime = InfiniteTimeSpan`，**连接池不再定时回收正在使用中的流连接**

@@ -16,4 +16,9 @@
     <ProjectReference Include="..\StreamPilot.Core\StreamPilot.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- 中继上游请求头属于缺陷回归点（见 docs/adr/0006），离线用例需要直接断言它。 -->
+    <InternalsVisibleTo Include="StreamPilot.Tests" />
+  </ItemGroup>
+
 </Project>

@@ -474,6 +474,7 @@ public sealed class PlatformParserTests
     private const string BilibiliRiskControlResponse =
         """{ "code": -352, "message": "-352", "ttl": 1 }""";
 
+    /// <summary>getRoomBaseInfo 真实响应（room_ids=814，2026-09-17 抓取）。</summary>
     private const string BilibiliRoomBaseInfoResponse =
         """
         { "code": 0, "message": "OK", "ttl": 1, "data": { "by_uids": {}, "by_room_ids": {
@@ -485,51 +486,37 @@ public sealed class PlatformParserTests
               "cover": "https://i0.hdslb.com/bfs/live/new_room_cover/cover.jpg" } } } }
         """;
 
+    /// <summary>
+    /// getRoomPlayInfo 真实响应（room_ids=814，2026-09-17 抓取）。
+    /// </summary>
+    /// <remarks>
+    /// 只保留 <c>http_stream/flv</c> 一条 stream（真实响应还有 ts 与 fmp4），
+    /// 共 4 条候选地址；每个 <c>codec</c> 的 <c>url_info</c> 真实响应是 2 条，这里原样保留。
+    /// 所有 <c>extra</c> 里的签名参数（<c>sk</c>/<c>sign</c>/<c>upsig</c>/<c>trid</c>…）已删除，只留 <c>expires</c> 与 <c>qn</c>。
+    /// </remarks>
     private const string BilibiliPlayInfoResponse =
         """
         { "code": 0, "message": "OK", "ttl": 1, "data": {
             "room_id": 856077, "short_id": 814, "uid": 13221028, "live_status": 1,
-            "playurl_info": { "conf_json": "{\"cdn_rate\":10000}", "playurl": { "cid": 856077,
+            "playurl_info": { "playurl": {
+              "cid": 856077,
               "g_qn_desc": [
-                { "qn": 30000, "desc": "杜比", "hdr_desc": "", "attr_desc": null, "hdr_type": 0, "media_base_desc": null },
-                { "qn": 20000, "desc": "4K", "hdr_desc": "", "attr_desc": null, "hdr_type": 0, "media_base_desc": null },
-                { "qn": 15000, "desc": "2K", "hdr_desc": "", "attr_desc": null, "hdr_type": 0, "media_base_desc": null },
-                { "qn": 10000, "desc": "原画", "hdr_desc": "", "attr_desc": null, "hdr_type": 0,
-                  "media_base_desc": { "detail_desc": { "desc": "1080P 原画", "tag": ["高帧率"] },
-                                       "brief_desc": { "desc": "1080P", "badge": "原画" } } },
-                { "qn": 400, "desc": "蓝光", "hdr_desc": "", "attr_desc": null, "hdr_type": 0,
-                  "media_base_desc": { "detail_desc": { "desc": "1080P 蓝光" }, "brief_desc": { "desc": "1080P" } } },
-                { "qn": 250, "desc": "超清", "hdr_desc": "", "attr_desc": null, "hdr_type": 0,
-                  "media_base_desc": { "detail_desc": { "desc": "720P 超清" }, "brief_desc": { "desc": "720P" } } },
-                { "qn": 150, "desc": "高清", "hdr_desc": "", "attr_desc": null, "hdr_type": 0, "media_base_desc": null },
-                { "qn": 80, "desc": "流畅", "hdr_desc": "", "attr_desc": null, "hdr_type": 0, "media_base_desc": null } ],
-              "stream": [
-                { "protocol_name": "http_stream", "format": [ { "format_name": "flv", "codec": [
-                    { "codec_name": "avc", "current_qn": 250, "accept_qn": [ 10000, 400, 250 ],
-                      "base_url": "/live-bvc/888878/live_lowlatency_2500.flv?",
-                      "url_info": [
-                        { "host": "https://cn-jssz-cm-02-09.bilivideo.com", "extra": "expires=1789656617&pt=web&qn=250" },
-                        { "host": "https://d1-cn-gotcha04b.bilivideo.com", "extra": "expires=1789656617&pt=web&qn=250" } ] },
-                    { "codec_name": "hevc", "current_qn": 250, "accept_qn": [ 10000, 400, 250 ],
-                      "base_url": "/live-bvc/777112/live_lowlatency_minihevc.flv?",
-                      "url_info": [
-                        { "host": "https://cn-fjqz-cm-01-01.bilivideo.com", "extra": "expires=1789656617&pt=web&qn=250" },
-                        { "host": "https://d1-cn-gotcha04b.bilivideo.com", "extra": "expires=1789656617&pt=web&qn=250" } ] } ] } ] },
-                { "protocol_name": "http_hls", "format": [
-                    { "format_name": "ts", "codec": [
-                        { "codec_name": "avc", "current_qn": 250, "accept_qn": [ 10000, 400, 250 ],
-                          "base_url": "/live-bvc/280866/live_lowlatency_2500.m3u8?",
-                          "url_info": [ { "host": "https://d1-cn-gotcha104.bilivideo.com", "extra": "expires=1789656617&qn=250" } ] },
-                        { "codec_name": "hevc", "current_qn": 250, "accept_qn": [ 10000, 400, 250 ],
-                          "base_url": "/live-bvc/835051/live_lowlatency_minihevc.m3u8?",
-                          "url_info": [ { "host": "https://d1-cn-gotcha104b.bilivideo.com", "extra": "expires=1789656617&qn=250" } ] } ] },
-                    { "format_name": "fmp4", "codec": [
-                        { "codec_name": "avc", "current_qn": 250, "accept_qn": [ 10000, 400, 250 ],
-                          "base_url": "/live-bvc/123214/live_lowlatency_2500/index.m3u8?",
-                          "url_info": [ { "host": "https://cn-jssz-cm-02-08.bilivideo.com", "extra": "expires=1789656617&qn=250" } ] },
-                        { "codec_name": "hevc", "current_qn": 250, "accept_qn": [ 10000, 400, 250 ],
-                          "base_url": "/live-bvc/812814/live_lowlatency_minihevc/index.m3u8?",
-                          "url_info": [ { "host": "https://cn-fjqz-cm-01-03.bilivideo.com", "extra": "expires=1789656617&qn=250" } ] } ] } ] } } } }
+                {"qn":30000,"desc":"杜比","hdr_desc":"","attr_desc":null,"hdr_type":0,"media_base_desc":null},
+                {"qn":20000,"desc":"4K","hdr_desc":"","attr_desc":null,"hdr_type":0,"media_base_desc":null},
+                {"qn":15000,"desc":"2K","hdr_desc":"","attr_desc":null,"hdr_type":0,"media_base_desc":null},
+                {"qn":10000,"desc":"原画","hdr_desc":"","attr_desc":null,"hdr_type":0,"media_base_desc":{"detail_desc":{"desc":"1080P 原画","tag":["高帧率"]},"brief_desc":{"desc":"1080P","badge":"原画"}}},
+                {"qn":400,"desc":"蓝光","hdr_desc":"","attr_desc":null,"hdr_type":0,"media_base_desc":{"detail_desc":{"desc":"1080P 蓝光"},"brief_desc":{"desc":"1080P"}}},
+                {"qn":250,"desc":"超清","hdr_desc":"","attr_desc":null,"hdr_type":0,"media_base_desc":{"detail_desc":{"desc":"720P 超清"},"brief_desc":{"desc":"720P"}}},
+                {"qn":150,"desc":"高清","hdr_desc":"","attr_desc":null,"hdr_type":0,"media_base_desc":null},
+                {"qn":80,"desc":"流畅","hdr_desc":"","attr_desc":null,"hdr_type":0,"media_base_desc":null} ],
+              "stream": [ { "protocol_name": "http_stream", "format": [ { "format_name": "flv", "codec": [
+                { "codec_name": "avc", "current_qn": 250, "accept_qn": [10000,400,250],
+                  "base_url": "/live-bvc/888878/live_7vdes_SzLiDtW_5tbz1_2500.flv?", "url_info": [ { "host": "https://cn-jssz-cm-02-09.bilivideo.com", "extra": "expires=1789656617&qn=250" }, { "host": "https://d1--cn-gotcha04b.bilivideo.com", "extra": "expires=1789656617&qn=250" } ] },
+                { "codec_name": "hevc", "current_qn": 250, "accept_qn": [10000,400,250],
+                  "base_url": "/live-bvc/777112/live_7vdes_SzLiDtW_5tbz1_minihevc.flv?", "url_info": [ { "host": "https://cn-fjqz-cm-01-01.bilivideo.com", "extra": "expires=1789656617&qn=250" }, { "host": "https://d1--cn-gotcha04b.bilivideo.com", "extra": "expires=1789656617&qn=250" } ] }
+              ] } ] } ]
+            } }
+        } }
         """;
 
     /// <summary>B站：getRoomBaseInfo 的字段路径必须能读出在播状态（读取路径写错会把在播房间判成未开播）。</summary>
@@ -685,26 +672,27 @@ public sealed class PlatformParserTests
         IReadOnlyList<StreamCandidate> candidates = builder.Build();
         (IReadOnlyList<QualityOption> qualities, string? selectedKey) = parser.BuildQualityOptions(playData, requestedQuality: null);
 
-        Assert.Equal(12, candidates.Count, "真实响应的候选数与运行日志一致");
-        Assert.Equal("cn-jssz-cm-02-09.bilivideo.com", candidates[0].CdnHost);
+        Assert.Equal(4, candidates.Count, "真实响应的 http_stream/flv 候选数（avc 2 条 + hevc 2 条）");
+        // B站 playurl 的 url_info.host 自带协议前缀，解析器原样带出，故 CDN 标识含 https://。
+        Assert.Equal("https://cn-jssz-cm-02-09.bilivideo.com", candidates[0].CdnHost);
         Assert.Equal(3, qualities.Count, "accept_qn=[10000,400,250] 决定可用档位");
         Assert.Equal("10000", selectedKey);
 
-        // 房间信息两个来源都不可用 + 播放接口给出在播状态 → 必须继续解析（不抛 NotLive）。
-        Assert.Null(parser.ShouldRejectForMissingCandidates(3, liveStatus: 1), "有候选时永远不能判失败");
-        Assert.Null(parser.ShouldRejectForMissingCandidates(0, liveStatus: 1), "在播但无候选：交给上层按播放接口失败处理");
+        // 只要有候选，两个元数据通道都不可用也必须成功（这是房间 814 的真实组合）。
+        Assert.Null(BilibiliParser.ShouldRejectForMissingCandidates(candidates.Count, liveStatus: 1), "有候选时永远不能判失败");
+        Assert.Equal<ResolveFailure?>(
+            ResolveFailure.ParseError,
+            BilibiliParser.ShouldRejectForMissingCandidates(0, liveStatus: 1),
+            "接口声明在播却一条地址都没有，是解析失败，不能糊弄成未开播");
+        Assert.Equal<ResolveFailure?>(
+            ResolveFailure.ParseError,
+            BilibiliParser.ShouldRejectForMissingCandidates(0, liveStatus: -1, roomLiveStatus: 1),
+            "房间信息接口声明在播、播放接口没给状态、又没有地址，同样是解析失败");
 
-        // 房间信息来源给出"在播"，播放接口的 live_status 缺失 → 在播状态必须被保留下来。
-        Assert.Null(parser.ShouldRejectForMissingCandidates(0, liveStatus: -1, roomLiveStatus: 1));
-        Assert.Equal(
-            (int)ResolveFailure.NotLive,
-            parser.ShouldRejectForMissingCandidates(0, liveStatus: -1, roomLiveStatus: 0));
-        Assert.Equal(
-            (int)ResolveFailure.Replaying,
-            parser.ShouldRejectForMissingCandidates(0, liveStatus: 2, roomLiveStatus: -1));
-        Assert.Equal(
-            (int)ResolveFailure.NotLive,
-            parser.ShouldRejectForMissingCandidates(0, liveStatus: -1, roomLiveStatus: -1));
+        // 两个来源都不可用、且没有候选：只能判未开播（此时用户的可操作结论就是"现在没得看"）。
+        Assert.Equal<ResolveFailure?>(ResolveFailure.NotLive, BilibiliParser.ShouldRejectForMissingCandidates(0, liveStatus: -1, roomLiveStatus: -1));
+        Assert.Equal<ResolveFailure?>(ResolveFailure.NotLive, BilibiliParser.ShouldRejectForMissingCandidates(0, liveStatus: -1, roomLiveStatus: 0));
+        Assert.Equal<ResolveFailure?>(ResolveFailure.Replaying, BilibiliParser.ShouldRejectForMissingCandidates(0, liveStatus: 2, roomLiveStatus: -1));
     }
 
     /// <summary>B站：调用方显式请求的档位在没有其它声明时也必须出现在列表里。</summary>
