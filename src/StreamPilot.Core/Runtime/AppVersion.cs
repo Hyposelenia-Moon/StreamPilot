@@ -17,7 +17,9 @@ public static class AppVersion
 
     private static string ResolveVersion()
     {
-        Assembly assembly = typeof(AppVersion).Assembly;
+        // 优先使用入口程序集（StreamPilot.exe）：版本号由应用工程声明，
+        // Core 只是被引用的类库，其版本不代表产品版本。
+        Assembly assembly = Assembly.GetEntryAssembly() ?? typeof(AppVersion).Assembly;
         string? informational = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
         if (!string.IsNullOrWhiteSpace(informational))
         {

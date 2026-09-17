@@ -93,8 +93,7 @@ public sealed class HttpClientFactory : IDisposable
                 return _streamingClient;
             }
 
-            HttpClientHandler handler = CreateHandler();
-            handler.PooledConnectionLifetime = StreamingPooledConnectionLifetime;
+            SocketsHttpHandler handler = CreateHandler();
             HttpClient client = new(handler, disposeHandler: true)
             {
                 Timeout = Timeout.InfiniteTimeSpan,
@@ -138,22 +137,26 @@ public sealed class HttpClientFactory : IDisposable
         return client;
     }
 
-    private HttpClientHandler CreateHandler()
+    /// <summary>创建统一的 HTTP 处理器（连接池、代理、自动解压）。</summary>
+    /// <returns>配置好的 <see cref="SocketsHttpHandler"/>。</returns>
+    private SocketsHttpHandler CreateHandler()
     {
-        HttpClientHandler handler = new()
+        SocketsHttpHandler handler = new()
         {
             // 不使用 CookieContainer：避免跨请求串号，Cookie 由调用方按请求注入。
             UseCookies = false,
             AllowAutoRedirect = true,
             MaxAutomaticRedirections = MaxRedirects,
             AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate,
+            ConnectTimeout = TimeSpan.FromSeconds(StreamingConnectTimeoutSeconds),
+            PooledConnectionLifetime = StreamingPooledConnectionLifetime,
         };
 
         if (!string.IsNullOrWhiteSpace(NetworkOptions.Proxy))
         {
             if (Uri.TryCreate(NetworkOptions.Proxy, UriKind.Absolute, out Uri? proxyUri))
             {
-                handler.Proxy = new System.Net.WebProxy(proxyUri, bypassOnLocal: true);
+                handler.Proxy = new System.Net.WebProxy(proxyUri, false);
                 handler.UseProxy = true;
             }
             else

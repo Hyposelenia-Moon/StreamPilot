@@ -342,7 +342,7 @@ public sealed class TsStreamRecorder
 
     private (FileStream Stream, string Path) OpenSegment(ResolvedRoom room, string outputDirectory, int segmentIndex)
     {
-        string fileName = RecordingFileNaming.BuildFileName(room, _startedAt, segmentIndex, ".ts");
+        string fileName = RecordingFileNaming.BuildFileName(room.Platform, room.Anchor, room.RoomId, _startedAt, segmentIndex, ".ts");
         string path = RecordingFileNaming.ResolveUniquePath(outputDirectory, fileName);
         FileStream stream = new(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         return (stream, path);

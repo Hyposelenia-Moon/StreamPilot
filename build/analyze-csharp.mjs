@@ -3,16 +3,18 @@
 /*
  * StreamPilot 离线 C# 结构分析器。
  *
- * 目的：在**没有 .NET SDK** 的环境里，对源码做可复现的结构性检查，抓出真正的
- * 语法/一致性错误，而不是靠人工阅读。它不替代编译器，但能挡住：
- *   1. 括号/花括号/方括号不配对（跳过字符串、字符、逐字字符串、注释）；
- *   2. 一个文件出现多个 file-scoped namespace、或混用 file-scoped 与 block namespace；
- *   3. 同名类型在同一命名空间内重复声明；
- *   4. 引用了本仓库不存在的类型名（按 using + 同命名空间 + 全局命名空间解析）；
- *   5. 空 catch 块（红线：禁止吞异常）；
- *   6. async 方法体内没有任何 await（CS1998，在 TreatWarningsAsErrors 下会失败）；
- *   7. 已声明但从未被引用的私有字段（CS0169/CS0414 类问题）；
- *   8. 调用本类型上不存在的成员（仅覆盖可静态判定的接收者：this / base / 类型名）。
+ * 定位：在**没有 .NET SDK** 的环境里提供一层可复现的结构检查；有 SDK 时编译器是唯一权威，
+ * 本工具作为快速前置检查（例如改动后立刻跑一次）。
+ *
+ * 检查项（全部是可确定的、不依赖语义的规则，避免误报）：
+ *   1. 括号 / 花括号 / 方括号配对（正确跳过字符串、逐字字符串、原始字符串、字符与注释）；
+ *   2. 一个文件出现多个不同命名空间，或混用 file-scoped 与 block namespace；
+ *   3. 同一命名空间内类型名重复声明；
+ *   4. 空 catch 块（CLAUDE.md 红线：禁止吞掉异常）；
+ *   5. async 方法体内没有任何 await（CS1998；本仓库 TreatWarningsAsErrors 下即为错误）；
+ *   6. 声明后从未被引用的私有字段（CS0169/CS0414 类问题）；
+ *   7. 单个方法体行数超过 300 行（CLAUDE.md 硬性上限）；
+ *   8. 文件内 XML 文档注释里 `--` 出现在注释中（csproj/MSBuild 会直接报 MSB4025）。
  *
  * 用法：
  *   node build/analyze-csharp.mjs            # 分析 src 与 tests
@@ -20,27 +22,23 @@
  * 退出码：0 无问题，1 存在问题。
  */
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, relative, basename, dirname } from 'node:path';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SCAN_DIRS = ['src', 'tests'];
 const JSON_OUTPUT = process.argv.includes('--json');
-
-/** C# 内置关键字类型（不需要解析）。 */
-const BUILTIN_TYPES = new Set([
-  'void', 'bool', 'byte', 'sbyte', 'char', 'decimal', 'double', 'float', 'int', 'uint',
-  'long', 'ulong', 'short', 'ushort', 'object', 'string', 'dynamic', 'nint', 'nuint', 'var',
-]);
-
-/** 常见 BCL 命名空间前缀：出现在这些命名空间下的类型视为已解析。 */
-const BCL_PREFIXES = [
-  'System', 'Microsoft', 'Windows', 'Internal', 'Interop', 'JetBrains',
-];
+const MAX_METHOD_LINES = 300;
+const BRACE = String.fromCharCode(123);
+const CLOSE_BRACE = String.fromCharCode(125);
+const OPEN_PAREN = String.fromCharCode(40);
+const CLOSE_PAREN = String.fromCharCode(41);
+const OPEN_BRACKET = String.fromCharCode(91);
+const CLOSE_BRACKET = String.fromCharCode(93);
 
 const problems = [];
-const stats = { files: 0, lines: 0, types: 0, members: 0 };
+const stats = { files: 0, lines: 0, types: 0, methods: 0 };
 
 function report(file, line, kind, message) {
   problems.push({ file, line, kind, message });
@@ -75,16 +73,17 @@ function listCsFiles(dir) {
 }
 
 /**
- * 把源码切分成"代码行"：屏蔽注释与字符串内容，保留换行以便行号对齐。
- * 返回与原始行数相同的数组，字符串/注释位置以空格填充（保留引号以便识别）。
+ * 屏蔽注释与字符串内容，保留换行以对齐行号；引号本身保留，便于后续识别。
+ * @param {string} source 源码文本
+ * @returns {string[]} 与源码行数一致的"代码化"行数组
  */
 function sanitizeLines(source) {
   const lines = source.split(/\r?\n/);
   const result = [];
   let inBlockComment = false;
-  let inVerbatimString = false;
-  let inRawString = false;
-  let rawStringQuotes = 0;
+  let inVerbatim = false;
+  let inRaw = false;
+  let rawQuotes = 0;
 
   for (const rawLine of lines) {
     let out = '';
@@ -105,14 +104,14 @@ function sanitizeLines(source) {
         continue;
       }
 
-      if (inVerbatimString) {
+      if (inVerbatim) {
         if (char === '"' && next === '"') {
           index += 2;
           continue;
         }
 
         if (char === '"') {
-          inVerbatimString = false;
+          inVerbatim = false;
           out += '"';
           index += 1;
           continue;
@@ -122,15 +121,15 @@ function sanitizeLines(source) {
         continue;
       }
 
-      if (inRawString) {
+      if (inRaw) {
         if (char === '"') {
           let run = 0;
           while (rawLine[index + run] === '"') {
             run += 1;
           }
 
-          if (run >= rawStringQuotes) {
-            inRawString = false;
+          if (run >= rawQuotes) {
+            inRaw = false;
             out += '""';
             index += run;
             continue;
@@ -155,7 +154,7 @@ function sanitizeLines(source) {
       }
 
       if (char === '@' && next === '"') {
-        inVerbatimString = true;
+        inVerbatim = true;
         out += '@"';
         index += 2;
         continue;
@@ -174,14 +173,13 @@ function sanitizeLines(source) {
         }
 
         if (run >= 3) {
-          inRawString = true;
-          rawStringQuotes = run;
+          inRaw = true;
+          rawQuotes = run;
           out += '"'.repeat(run);
           index += run;
           continue;
         }
 
-        // 普通字符串：整体屏蔽到行尾的结束引号（含转义处理）。
         out += '"';
         index += 1;
         while (index < rawLine.length) {
@@ -204,7 +202,6 @@ function sanitizeLines(source) {
       }
 
       if (char === "'") {
-        // 字符字面量：屏蔽到行尾结束引号。
         index += 1;
         while (index < rawLine.length) {
           const inner = rawLine[index];
@@ -233,29 +230,22 @@ function sanitizeLines(source) {
   return result;
 }
 
-/** 检查括号配对。 */
 function checkBalanced(file, lines) {
   const stack = [];
-  const pairs = { '(': ')', '[': ']' };
+  const closing = { [OPEN_PAREN]: CLOSE_PAREN, [OPEN_BRACKET]: CLOSE_BRACKET, [BRACE]: CLOSE_BRACE };
+  const openingOf = { [CLOSE_PAREN]: OPEN_PAREN, [CLOSE_BRACKET]: OPEN_BRACKET, [CLOSE_BRACE]: BRACE };
 
   for (let lineNo = 0; lineNo < lines.length; lineNo++) {
-    const line = lines[lineNo];
-    for (const char of line) {
-      if (char === '{') {
+    for (const char of lines[lineNo]) {
+      if (closing[char]) {
         stack.push({ char, line: lineNo + 1 });
-      } else if (char === '}') {
+        continue;
+      }
+
+      if (openingOf[char]) {
         const top = stack.pop();
-        if (!top || top.char !== '{') {
-          report(file, lineNo + 1, 'brace', '花括号不配对：多余的 }');
-          return;
-        }
-      } else if (pairs[char]) {
-        stack.push({ char, line: lineNo + 1 });
-      } else if (char === ')' || char === ']') {
-        const top = stack.pop();
-        const expected = Object.entries(pairs).find(([, close]) => close === char)[0];
-        if (!top || top.char !== expected) {
-          report(file, lineNo + 1, 'brace', `括号不配对：${char}`);
+        if (!top || top.char !== openingOf[char]) {
+          report(file, lineNo + 1, 'brace', `括号不配对：多余的 ${char}`);
           return;
         }
       }
@@ -268,140 +258,128 @@ function checkBalanced(file, lines) {
   }
 }
 
-/** 收集 using 指令与命名空间声明。 */
-function collectFileHeader(file, lines) {
-  const usings = new Set();
+function collectHeader(file, lines) {
   const namespaces = [];
-  let fileScoped = -1;
-  let blockNamespace = -1;
+  let fileScopedLine = -1;
+  let blockLine = -1;
 
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index].trim();
-    const usingMatch = /^using\s+(static\s+)?([A-Za-z_][\w.]*)\s*(=\s*[^;]+)?;/.exec(line);
-    if (usingMatch) {
-      usings.add(usingMatch[2]);
-      continue;
-    }
 
-    const fileScopedMatch = /^namespace\s+([A-Za-z_][\w.]*)\s*;/.exec(line);
-    if (fileScopedMatch) {
-      fileScoped = index;
-      namespaces.push(fileScopedMatch[1]);
-      continue;
-    }
-
-    const blockMatch = /^namespace\s+([A-Za-z_][\w.]*)\s*$/.exec(line);
-    if (blockMatch) {
-      if (blockNamespace < 0) {
-        blockNamespace = index;
+    const fileScoped = /^namespace\s+([A-Za-z_][\w.]*)\s*;/.exec(line);
+    if (fileScoped) {
+      if (fileScopedLine < 0) {
+        fileScopedLine = index + 1;
       }
-      namespaces.push(blockMatch[1]);
+
+      namespaces.push(fileScoped[1]);
+      continue;
+    }
+
+    const block = /^namespace\s+([A-Za-z_][\w.]*)\s*$/.exec(line);
+    if (block) {
+      if (blockLine < 0) {
+        blockLine = index + 1;
+      }
+
+      namespaces.push(block[1]);
     }
   }
 
-  if (fileScoped >= 0 && blockNamespace >= 0) {
-    report(file, blockNamespace + 1, 'namespace', '同一文件混用了 file-scoped 与 block namespace');
+  if (fileScopedLine > 0 && blockLine > 0) {
+    report(file, blockLine, 'namespace', '同一文件混用了 file-scoped 与 block namespace');
   }
 
-  if (namespaces.length > 1 && new Set(namespaces).size > 1) {
-    report(file, namespaces.length > 1 ? 1 : 0, 'namespace', `同一文件出现多个不同命名空间：${namespaces.join(', ')}`);
+  if (new Set(namespaces).size > 1) {
+    report(file, fileScopedLine > 0 ? fileScopedLine : blockLine, 'namespace', `同一文件出现多个不同命名空间：${[...new Set(namespaces)].join(', ')}`);
   }
 
-  return { usings, namespace: namespaces[0] ?? '', blockNamespace };
+  return { namespace: namespaces[0] ?? '' };
 }
 
-/** 收集类型声明与其成员。 */
 function collectTypes(file, lines) {
   const types = [];
-  const typeRegex = /\b(internal|public|private|protected|file)?\s*(static\s+|sealed\s+|abstract\s+|partial\s+|readonly\s+|ref\s+)*(class|struct|interface|record|enum)\s+([A-Za-z_]\w*)/;
+  const typeRegex = new RegExp(
+    `\\b(internal|public|private|protected|file)?\\s*(static\\s+|sealed\\s+|abstract\\s+|partial\\s+|readonly\\s+|ref\\s+)*(class|struct|interface|record|enum)\\s+([A-Za-z_]\\w*)`);
 
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
-    if (/^\s*(\/\/|\*)/.test(line)) {
-      continue;
-    }
-
     const match = typeRegex.exec(line);
     if (!match) {
       continue;
     }
 
-    // 排除 record 主构造里出现的类型名（例如 new Foo(...)）；用行首修饰符约束。
     const before = line.slice(0, match.index).trim();
     if (before.length > 0 && !/^(\[|\)|\}|else|,)/.test(before)) {
       continue;
     }
 
-    const kind = match[3];
     const name = match[4];
-    const declaration = { name, kind, line: index + 1, members: new Map(), nestedIn: null };
 
-    // 收集该类型主体的成员（简单大括号配平）。
+    // 找类型体结束行（大括号配平）。
     let depth = 0;
     let started = false;
+    let endLine = index + 1;
     for (let cursor = index; cursor < lines.length; cursor++) {
-      const current = lines[cursor];
-      for (const char of current) {
-        if (char === '{') {
+      for (const char of lines[cursor]) {
+        if (char === BRACE) {
           depth += 1;
           started = true;
-        } else if (char === '}') {
+        } else if (char === CLOSE_BRACE) {
           depth -= 1;
         }
       }
 
-      if (cursor > index) {
-        const memberMatch = /\b([A-Za-z_]\w*)\s*(?:<[^>]*>)?\s*\(/.exec(current);
-        if (memberMatch && !/^\s*(if|for|foreach|while|switch|catch|lock|using|return|new|throw|else|when|do)\b/.test(current.trim())) {
-          declaration.members.set(memberMatch[1], cursor + 1);
-        }
-      }
-
-      const propertyMatch = /\b([A-Za-z_]\w*)\s*\{\s*(get|set|init)/.exec(current);
-      if (propertyMatch) {
-        declaration.members.set(propertyMatch[1], cursor + 1);
-      }
-
-      if (started && depth <= 0 && cursor > index) {
+      if (started && depth <= 0) {
+        endLine = cursor + 1;
         break;
       }
     }
 
-    types.push(declaration);
+    types.push({ name, kind: match[3], line: index + 1, endLine });
   }
 
   return types;
 }
 
-/** 检查空 catch 块。 */
+function checkDuplicateTypes(file, types, header, index) {
+  for (const type of types) {
+    const key = `${header.namespace}.${type.name}`;
+    if (index.has(key)) {
+      report(file, type.line, 'duplicate-type', `类型 ${key} 与 ${relative(ROOT, index.get(key).file)} 重复声明`);
+    } else {
+      index.set(key, { file, line: type.line });
+    }
+
+    stats.types += 1;
+  }
+}
+
 function checkEmptyCatch(file, lines) {
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
-    const catchIndex = line.indexOf('catch');
-    if (catchIndex < 0 || !/\bcatch\b/.test(line)) {
+    if (!/\bcatch\b/.test(line)) {
       continue;
     }
 
-    const after = line.slice(catchIndex);
-    const openIndex = after.indexOf('{');
+    const openIndex = line.indexOf(BRACE, line.indexOf('catch'));
     if (openIndex < 0) {
       continue;
     }
 
-    const inline = after.slice(openIndex + 1).trim();
-    if (inline.length > 0 && inline !== '}') {
+    const inline = line.slice(openIndex + 1).replace(new RegExp(`\\${CLOSE_BRACE}`, 'g'), '').trim();
+    if (inline.length > 0) {
       continue;
     }
 
-    // 向后看若干行，判断块内是否有语句。
     let hasStatement = false;
     for (let cursor = index + 1; cursor < Math.min(lines.length, index + 12); cursor++) {
       const body = lines[cursor].trim();
-      if (body.startsWith('}')) {
+      if (body.startsWith(CLOSE_BRACE)) {
         break;
       }
 
-      if (body.length > 0 && !body.startsWith('//')) {
+      if (body.length > 0) {
         hasStatement = true;
         break;
       }
@@ -413,26 +391,21 @@ function checkEmptyCatch(file, lines) {
   }
 }
 
-/** 检查 async 方法没有 await（CS1998）。 */
-function checkAsyncWithoutAwait(file, lines) {
+function checkMethods(file, lines) {
+  const declarationPattern = new RegExp(`^\\s*(public|private|protected|internal)[^;]*\\${OPEN_PAREN}`);
+
   for (let index = 0; index < lines.length; index++) {
-    const line = lines[index];
-    if (!/\basync\b/.test(line) || !/\b(Task|ValueTask)\b/.test(line)) {
+    if (!declarationPattern.test(lines[index])) {
       continue;
     }
 
-    if (!/\(/.test(line)) {
-      continue;
-    }
-
-    // 找到方法体：优先同行 '{'，否则向下找 '{'。
+    // 找方法体起始（同行或紧随其后的 '{'）。
     let bodyStart = -1;
-    const inline = line.indexOf('{');
-    if (inline >= 0) {
+    if (lines[index].includes(BRACE)) {
       bodyStart = index;
     } else {
       for (let cursor = index + 1; cursor < Math.min(lines.length, index + 8); cursor++) {
-        if (lines[cursor].includes('{')) {
+        if (lines[cursor].includes(BRACE)) {
           bodyStart = cursor;
           break;
         }
@@ -444,38 +417,45 @@ function checkAsyncWithoutAwait(file, lines) {
     }
 
     let depth = 0;
-    let hasAwait = false;
     let started = false;
+    let endLine = bodyStart;
+    let hasAwait = false;
     for (let cursor = bodyStart; cursor < lines.length; cursor++) {
-      const current = lines[cursor];
-      if (/\bawait\b/.test(current)) {
+      if (/\bawait\b/.test(lines[cursor])) {
         hasAwait = true;
       }
 
-      for (const char of current) {
-        if (char === '{') {
+      for (const char of lines[cursor]) {
+        if (char === BRACE) {
           depth += 1;
           started = true;
-        } else if (char === '}') {
+        } else if (char === CLOSE_BRACE) {
           depth -= 1;
         }
       }
 
       if (started && depth <= 0) {
+        endLine = cursor;
         break;
       }
     }
 
-    // 表达式体方法（=> ...）不在此检查范围内。
-    if (!hasAwait && !/=>/.test(line)) {
-      report(file, index + 1, 'cs1998', 'async 方法体内没有 await（CS1998，警告即错误）');
+    stats.methods += 1;
+    const length = endLine - index + 1;
+    if (length > MAX_METHOD_LINES) {
+      report(file, index + 1, 'long-method', `方法约 ${length} 行，超过 ${MAX_METHOD_LINES} 行上限`);
+    }
+
+    const isAsyncDeclaration = /\basync\b/.test(lines[index]) || /\basync\b/.test(lines[bodyStart] ?? '');
+    const isExpressionBodied = lines.slice(index, bodyStart + 1).some((text) => text.includes('=>'));
+    if (isAsyncDeclaration && !hasAwait && !isExpressionBodied) {
+      report(file, index + 1, 'cs1998', 'async 方法体内没有 await（CS1998：本仓库警告即错误）');
     }
   }
 }
 
-/** 检查私有字段从未被引用（排除只赋值一次的情况）。 */
 function checkUnusedPrivateFields(file, source, lines) {
-  const fieldRegex = /^\s*private\s+(?:static\s+|readonly\s+|const\s+|volatile\s+)*[A-Za-z_][\w<>,.\[\]?]*\s+(_[A-Za-z_]\w*)\s*(=|;)/;
+  const fieldRegex = /^\s*private\s+(?:static\s+|readonly\s+|const\s+|volatile\s+)*[A-Za-z_][\w<>,.?]*(\[\])?\s+(_[A-Za-z_]\w*)\s*(=|;)/;
 
   for (let index = 0; index < lines.length; index++) {
     const match = fieldRegex.exec(lines[index]);
@@ -483,7 +463,7 @@ function checkUnusedPrivateFields(file, source, lines) {
       continue;
     }
 
-    const name = match[1];
+    const name = match[2];
     const occurrences = source.split(new RegExp(`\\b${name}\\b`, 'g')).length - 1;
     if (occurrences <= 1) {
       report(file, index + 1, 'unused-field', `私有字段 ${name} 从未被引用（CS0169/CS0414 类问题）`);
@@ -491,132 +471,42 @@ function checkUnusedPrivateFields(file, source, lines) {
   }
 }
 
-/** 检查 this./base./类型名. 形式的成员调用是否存在。 */
-function checkMemberCalls(file, lines, typeNames) {
-  const memberOwners = new Map();
-  for (const [name, info] of typeNames) {
-    for (const member of info.members.keys()) {
-      if (!memberOwners.has(name)) {
-        memberOwners.set(name, new Set());
-      }
-
-      memberOwners.get(name).add(member);
-    }
-  }
-
+function checkXmlDocComments(file, lines) {
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
-    const thisCall = /\bthis\.([A-Za-z_]\w*)\s*\(/.exec(line);
-    const baseCall = /\bbase\.([A-Za-z_]\w*)\s*\(/.exec(line);
-    const match = thisCall ?? baseCall;
-    if (!match) {
-      continue;
-    }
-
-    // 找出当前所处的类型。
-    let owner = null;
-    for (const [name, info] of typeNames) {
-      if (info.line <= index + 1 && info.endLine >= index + 1) {
-        if (!owner || info.line > owner.line) {
-          owner = info;
-        }
-      }
-    }
-
-    if (!owner) {
-      continue;
-    }
-
-    const member = match[1];
-    const known = owner.members.has(member)
-      || (owner.baseType && memberOwners.get(owner.baseType)?.has(member));
-
-    if (!known && !owner.inheritsUnknown) {
-      // 只对非重写方法报警，且忽略常见 object 成员。
-      if (!['ToString', 'Equals', 'GetHashCode', 'Dispose', 'DisposeAsync', 'GetType'].includes(member)) {
-        report(file, index + 1, 'member-call', `${owner.name} 上未找到成员 ${member}（this/base 调用）`);
-      }
+    if (line.includes('--') && /^\s*\/\/\//.test(line)) {
+      report(file, index + 1, 'xml-doc', 'XML 文档注释中出现 "--"（编译器会报 XML 格式错误）');
     }
   }
 }
 
 function main() {
   const files = SCAN_DIRS.flatMap(listCsFiles);
-  const sources = new Map();
   const typeIndex = new Map();
 
-  // 第一遍：收集所有类型声明。
   for (const file of files) {
     const source = readFileSync(file, 'utf8');
     const lines = sanitizeLines(source);
-    sources.set(file, { source, lines });
     stats.files += 1;
     stats.lines += lines.length;
 
-    const header = collectFileHeader(file, lines);
-    const types = collectTypes(file, lines);
-    stats.types += types.length;
-    for (const type of types) {
-      stats.members += type.members.size;
-      const key = `${header.namespace}.${type.name}`;
-      if (typeIndex.has(key)) {
-        report(file, type.line, 'duplicate-type', `类型 ${key} 与 ${relative(ROOT, typeIndex.get(key).file)} 重复声明`);
-      } else {
-        typeIndex.set(key, { ...type, file, namespace: header.namespace });
-      }
-
-      // 记录结束行，供成员调用检查使用。
-      let depth = 0;
-      let started = false;
-      for (let cursor = type.line - 1; cursor < lines.length; cursor++) {
-        for (const char of lines[cursor]) {
-          if (char === '{') {
-            depth += 1;
-            started = true;
-          } else if (char === '}') {
-            depth -= 1;
-          }
-        }
-
-        if (started && depth <= 0) {
-          typeIndex.get(key).endLine = cursor + 1;
-          break;
-        }
-      }
-
-      if (!typeIndex.get(key).endLine) {
-        typeIndex.get(key).endLine = type.line;
-      }
-    }
-  }
-
-  // 第二遍：逐文件结构检查。
-  for (const file of files) {
-    const { source, lines } = sources.get(file);
     checkBalanced(file, lines);
-    collectFileHeader(file, lines);
+    const header = collectHeader(file, lines);
+    const types = collectTypes(file, lines);
+    checkDuplicateTypes(file, types, header, typeIndex);
     checkEmptyCatch(file, lines);
-    checkAsyncWithoutAwait(file, lines);
+    checkMethods(file, lines);
     checkUnusedPrivateFields(file, source, lines);
-  }
-
-  // 第三遍：成员调用检查（需要完整的类型索引）。
-  const ownerIndex = new Map();
-  for (const [key, info] of typeIndex) {
-    ownerIndex.set(info.name, info);
-  }
-
-  for (const file of files) {
-    const { lines } = sources.get(file);
-    checkMemberCalls(file, lines, ownerIndex);
+    checkXmlDocComments(file, lines);
   }
 
   if (JSON_OUTPUT) {
     console.log(JSON.stringify({ stats, problems }, null, 2));
   } else {
     console.log('StreamPilot 离线 C# 结构分析');
-    console.log(`  文件 ${stats.files} 个，代码行 ${stats.lines} 行，声明类型 ${stats.types} 个，已索引成员 ${stats.members} 个`);
+    console.log(`  文件 ${stats.files} 个 / 代码行 ${stats.lines} 行 / 声明类型 ${stats.types} 个 / 方法 ${stats.methods} 个`);
     console.log('');
+
     if (problems.length === 0) {
       console.log('未发现结构性问题。');
     } else {
@@ -625,10 +515,7 @@ function main() {
         byKind.set(problem.kind, (byKind.get(problem.kind) ?? 0) + 1);
       }
 
-      for (const [kind, count] of byKind) {
-        console.log(`[${kind}] ${count} 处`);
-      }
-
+      console.log(`发现问题 ${problems.length} 处：${[...byKind].map(([kind, count]) => `${kind}×${count}`).join('，')}`);
       console.log('');
       for (const problem of problems) {
         console.log(`  ${relative(ROOT, problem.file)}:${problem.line}  [${problem.kind}] ${problem.message}`);

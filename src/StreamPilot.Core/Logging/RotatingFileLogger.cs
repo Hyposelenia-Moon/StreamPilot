@@ -23,9 +23,14 @@ public sealed class RotatingFileLogger : IStructuredLogger, IDisposable
         @"(?im)\b(cookie|set-cookie|authorization)\b\s*[:=]\s*[^\r\n]+",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    /// <summary>日志正文使用的 UTF-8 编码（不带 BOM，BOM 只在文件为空时手工写入一次）。</summary>
+    private static readonly UTF8Encoding Utf8WithoutBom = new(encoderShouldEmitUTF8Identifier: false);
+
+    /// <summary>UTF-8 BOM 字节序列。</summary>
+    private static readonly byte[] Utf8Bom = [0xEF, 0xBB, 0xBF];
+
     private readonly Lock _gate = new();
-    private readonly string _directory;
-    private readonly string _filePrefix;
+    private readonly string _directory;    private readonly string _filePrefix;
     private readonly LogLevel _minimumLevel;
     private readonly long _maxFileBytes;
     private readonly int _retainedFiles;
@@ -261,9 +266,20 @@ public sealed class RotatingFileLogger : IStructuredLogger, IDisposable
     {
         CleanupObsoleteFiles();
         string path = Path.Combine(_directory, $"{_filePrefix}-{DateTime.Now:yyyyMMdd}.log");
-        FileStream stream = new(path, FileMode.Append, FileAccess.Write, FileShare.Read);
+
+        // FileShare.ReadWrite：允许诊断工具（或用户）在程序运行时读取/复制日志。
+        FileStream stream = new(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+
+        // 新文件写入 UTF-8 BOM：让记事本等工具明确识别编码，
+        // 避免被按系统 ANSI 代码页解释而出现乱码（内容本身始终是 UTF-8）。
+        if (stream.Length == 0)
+        {
+            stream.Write(Utf8Bom);
+            stream.Flush();
+        }
+
         _writtenBytes = stream.Length;
-        return new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)) { AutoFlush = false };
+        return new StreamWriter(stream, Utf8WithoutBom) { AutoFlush = false };
     }
 
     private void Roll()

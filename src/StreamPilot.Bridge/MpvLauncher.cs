@@ -123,14 +123,16 @@ public sealed class MpvLauncher
     /// <param name="url">直播流地址。</param>
     /// <param name="title">窗口标题附加信息，可为 <see langword="null"/>。</param>
     /// <param name="referer">可选 Referer，可为 <see langword="null"/>。</param>
-    /// <param name="options">播放配置（mpv 路径、低延迟开关、附加参数）。</param>
+    /// <param name="playbackOptions">播放配置（mpv 路径与附加参数）。</param>
+    /// <param name="bridgeOptions">桥接配置（是否使用低延迟参数）。</param>
     /// <returns>启动成功返回 <see langword="true"/>。</returns>
-    public bool Launch(string url, string? title, string? referer, PlaybackOptions options)
+    public bool Launch(string url, string? title, string? referer, PlaybackOptions playbackOptions, BridgeOptions bridgeOptions)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(url);
-        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(playbackOptions);
+        ArgumentNullException.ThrowIfNull(bridgeOptions);
 
-        string? executable = ResolveExecutable(options.MpvPath);
+        string? executable = ResolveExecutable(playbackOptions.MpvPath);
         if (executable is null)
         {
             _logger.Error(_moduleName, "未找到 mpv，无法外挂播放。", new Dictionary<string, object?>
@@ -142,7 +144,7 @@ public sealed class MpvLauncher
 
         List<string> arguments = [];
         arguments.AddRange(CommonArguments);
-        if (options.UseLowLatencyMpvArguments)
+        if (bridgeOptions.UseLowLatencyMpvArguments)
         {
             arguments.AddRange(LowLatencyArguments);
         }
@@ -153,7 +155,7 @@ public sealed class MpvLauncher
             arguments.Add("--http-header-fields=Referer: " + referer);
         }
 
-        foreach (string extra in SplitExtraArguments(options.MpvExtraArguments))
+        foreach (string extra in SplitExtraArguments(playbackOptions.MpvExtraArguments))
         {
             arguments.Add(extra);
         }
@@ -188,7 +190,7 @@ public sealed class MpvLauncher
             _logger.Info(_moduleName, "已启动 mpv 外挂播放。", new Dictionary<string, object?>
             {
                 ["executable"] = Path.GetFileName(executable),
-                ["lowLatency"] = options.UseLowLatencyMpvArguments,
+                ["lowLatency"] = bridgeOptions.UseLowLatencyMpvArguments,
             });
             return true;
         }

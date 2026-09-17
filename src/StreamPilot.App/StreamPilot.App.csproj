@@ -14,7 +14,14 @@
     <AssemblyName>StreamPilot</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Description>StreamPilot 桌面应用：多平台低延迟播放、原始流录制与 mpv 外挂桥接。</Description>
+    <!--
+      Version 只影响包版本；AssemblyVersion 决定运行时 AppVersion.Current 的取值，
+      因此必须显式指定，否则会回落到默认的 1.0.0.0。
+    -->
     <Version>0.1.0</Version>
+    <AssemblyVersion>0.1.0.0</AssemblyVersion>
+    <FileVersion>0.1.0.0</FileVersion>
+    <InformationalVersion>0.1.0</InformationalVersion>
     <Product>StreamPilot</Product>
     <Company>StreamPilot</Company>
     <Copyright>Copyright (c) StreamPilot contributors</Copyright>

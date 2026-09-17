@@ -329,7 +329,7 @@ public sealed class FlvStreamRecorder
 
     private FlvSegmentWriter CreateWriter(SessionState session, ResolvedRoom room, string outputDirectory)
     {
-        string fileName = RecordingFileNaming.BuildFileName(room, _startedAt, session.SegmentIndex, session.FileExtension);
+        string fileName = RecordingFileNaming.BuildFileName(room.Platform, room.Anchor, room.RoomId, _startedAt, session.SegmentIndex, session.FileExtension);
         string path = RecordingFileNaming.ResolveUniquePath(outputDirectory, fileName);
         session.SegmentIndex++;
         return new FlvSegmentWriter(path, _policy, _logger);

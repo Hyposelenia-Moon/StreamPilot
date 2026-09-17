@@ -16,7 +16,7 @@ public static class SensitiveData
     {
         "auth", "auth_key", "access_token", "cookie", "credential", "expire", "expires",
         "fm", "playauth", "secret", "sign", "signature", "token", "trid", "txsecret",
-        "txtime", "upsig", "volc_secret", "ws_secret", "wsecret", "ws_time", "wstime",
+        "txtime", "upsig", "volc_secret", "ws_secret", "wssecret", "wsecret", "ws_time", "wstime",
         "x-signature", "_auth", "_sign", "_token", "key", "pwd", "password", "sessdata",
     };
 
@@ -92,7 +92,7 @@ public static class SensitiveData
     /// 脱敏 Cookie 文本：只保留 Cookie 名，不保留值。
     /// </summary>
     /// <param name="cookie">Cookie 头内容。</param>
-    /// <returns>形如 <c>SESSDATA=<redacted>; bili_jct=<redacted></c> 的文本。</returns>
+    /// <returns>形如 <c>SESSDATA=&lt;redacted&gt;; bili_jct=&lt;redacted&gt;</c> 的文本。</returns>
     public static string RedactCookie(string? cookie)
     {
         if (string.IsNullOrWhiteSpace(cookie))

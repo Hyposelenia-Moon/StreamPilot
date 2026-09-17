@@ -1,5 +1,7 @@
 namespace StreamPilot.Core.Models;
 
+using StreamPilot.Core.Configuration;
+
 /// <summary>
 /// 录制请求。
 /// </summary>

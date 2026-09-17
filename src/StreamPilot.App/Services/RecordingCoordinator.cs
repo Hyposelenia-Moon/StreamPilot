@@ -1,5 +1,6 @@
 namespace StreamPilot.App.Services;
 
+using System.IO;
 using StreamPilot.Core.Configuration;
 using StreamPilot.Core.Http;
 using StreamPilot.Core.Logging;

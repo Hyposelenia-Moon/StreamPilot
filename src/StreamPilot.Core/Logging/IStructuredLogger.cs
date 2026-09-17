@@ -1,7 +1,7 @@
 namespace StreamPilot.Core.Logging;
 
 /// <summary>
-/// 结构化日志抽象。禁止字符串拼接，调用方通过 <paramref name="fields"/> 传递结构化字段。
+/// 结构化日志抽象。禁止字符串拼接，调用方通过 <c>fields</c> 参数传递结构化字段。
 /// </summary>
 /// <remarks>
 /// 敏感信息（Cookie、Token、签名 URL）禁止写入日志；写入前必须脱敏（见 <see cref="SensitiveData"/>）。

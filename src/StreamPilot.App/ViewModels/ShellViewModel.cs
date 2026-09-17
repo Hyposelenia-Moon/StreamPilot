@@ -2,6 +2,7 @@ namespace StreamPilot.App.ViewModels;
 
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Windows;
@@ -110,13 +111,13 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             new PlatformOption(PlatformId.Bigo, "Bigo Live", "https://www.bigo.tv/"),
         ];
 
-        ResolveCommand = new AsyncRelayCommand(_ => ResolveAsync(), HandleCommandErrorAsync, () => !IsBusy);
-        PlayCommand = new AsyncRelayCommand(_ => PlayAsync(), HandleCommandErrorAsync, () => _currentRoom is not null && !IsBusy);
-        StopCommand = new RelayCommand(_ => StopPlayback(), () => _isPlayerReady);
-        ChaseCommand = new RelayCommand(_ => SendToPlayer(new { type = HostChaseType, keepSeconds = 0.08 }), () => _isPlayerReady);
-        MpvCommand = new AsyncRelayCommand(_ => PlayWithMpvAsync(), HandleCommandErrorAsync, () => _currentRoom is not null);
-        StartRecordingCommand = new AsyncRelayCommand(_ => StartRecordingAsync(), HandleCommandErrorAsync, () => _currentRoom is not null && _recordingSession is null);
-        StopRecordingCommand = new AsyncRelayCommand(_ => StopRecordingAsync(), HandleCommandErrorAsync, () => _recordingSession is not null);
+        ResolveCommand = new AsyncRelayCommand(_ => ResolveAsync(), HandleCommandErrorAsync, _ => !IsBusy);
+        PlayCommand = new AsyncRelayCommand(_ => PlayAsync(), HandleCommandErrorAsync, _ => _currentRoom is not null && !IsBusy);
+        StopCommand = new RelayCommand(_ => StopPlayback(), _ => _isPlayerReady);
+        ChaseCommand = new RelayCommand(_ => SendToPlayer(new { type = HostChaseType, keepSeconds = 0.08 }), _ => _isPlayerReady);
+        MpvCommand = new AsyncRelayCommand(_ => PlayWithMpvAsync(), HandleCommandErrorAsync, _ => _currentRoom is not null);
+        StartRecordingCommand = new AsyncRelayCommand(_ => StartRecordingAsync(), HandleCommandErrorAsync, _ => _currentRoom is not null && _recordingSession is null);
+        StopRecordingCommand = new AsyncRelayCommand(_ => StopRecordingAsync(), HandleCommandErrorAsync, _ => _recordingSession is not null);
         SetTargetCommand = new RelayCommand(parameter => SetTarget(parameter), parameter => parameter is not null);
         OpenRecordingFolderCommand = new RelayCommand(_ => OpenRecordingFolder());
         OpenLogFolderCommand = new RelayCommand(_ => OpenFolder(AppPaths.LogDirectory));

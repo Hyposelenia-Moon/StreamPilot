@@ -6,6 +6,33 @@ Web 端负责低延迟观看，mpv 端负责超分 / HDR / 高画质，两者互
 
 ---
 
+## 摘要
+
+**StreamPilot 是一个 Windows 桌面直播客户端，把"低延迟观看、多平台解析、原始流录制"三件事做在同一个自研程序里**：WebView2 承载自研播放页负责低延迟播放（极限追帧最低 150 ms），C# 解析层负责 B站 / 抖音 / 虎牙 / 斗鱼 / YY / Bigo 六个平台的房间与直播流解析，录制层以字节级搬运方式保存平台原始 FLV / TS（**不转码**），内嵌回环桥接服务把当前流一键交给 mpv 以获得超分 / HDR 画质。三个参考项目（录播姬、Lsar、MultiLive）只作只读参考，源码 100% 自研，最终以自包含单文件产物发布，用户解压双击即用、无需安装任何环境。
+
+### 核心亮点
+
+- **五要素统一的解析契约**：所有平台都产出 `StreamCandidate`（流地址 / 格式 / CDN host / 编码 / 源索引），并区分八类失败（未开播、房间不存在、轮播中、解析错误、网络错误、平台拒绝、非法输入、不受支持），UI 提示与录制层对平台无感知。
+- **可量化的低延迟策略**：三档追帧目标 150 / 200 / 250 ms，CDN 候选**并行**探测（1.2 s 上限）后按延迟排序，首帧超时 6 / 8 s，卡顿判定 4 / 6.5 s（追帧档）与 6 / 9 s（稳定档），每候选重连 2 次（250 ms → 1000 ms）后自动切换线路。全部阈值集中定义于 `Web/player-core.js`，由 `node --test` 回归覆盖。
+- **真·原始流录制**：不转码、不重新编码；FLV 按视频关键帧分片并重写文件头 + `onMetaData` + 序列头、时间戳按分片首帧重定基，使每个分片可独立播放；HLS 按 TS 整包对齐并按 m3u8 边界切分；断流按 2/4/8/15/30 s 退避自动重连，编码参数变化时强制切分；每场录制写一份 JSON 侧车元数据（主播名 / 房间号 / 标题 / 分区 / 开播时间 / 时长 / 分片清单）。
+- **安全边界写进代码而非文档**：桥接服务只监听 `127.0.0.1`，由 `LoopbackOnlyGuard` 在启动前强制校验（出现 `+` / `*` / `0.0.0.0` 直接拒绝启动）；`Access-Control-Allow-Private-Network` 只出现在预检响应；日志写入前统一脱敏 Cookie 与 `wsSecret` / `txSecret` / `sign` / `token` 等签名参数，只记录不可逆指纹；不实现任何风控绕过（如抖音 `a_bogus`）。
+- **依赖极简 + 自研测试**：只引入 1 个 NuGet 运行时依赖（`Microsoft.Web.WebView2`），其余全部使用 BCL；测试用自研极简运行器，因此在**没有外网、无法还原 xunit** 的环境里也能跑回归测试。
+
+### 当前状态
+
+| 项 | 数值 / 结果 |
+|----|-------------|
+| 交付规模 | 135 个文件 / 1.58 MiB；C# 88 个文件 / 约 1.5 万行（其中 `src` 70 个文件、`tests` 18 个文件） |
+| 编译 | `dotnet build StreamPilot.slnx`（Debug 与 Release）**0 警告 / 0 错误** |
+| 测试 | C# 单元测试 **80 / 80 通过**；播放策略前端测试 **13 / 13 通过**；静态红线自检与离线结构分析均通过 |
+| 产物 | `StreamPilot.exe` 单文件 59.3 MiB，整包 61.3 MiB（含 `Web/`、`docs/`、`tools/README.md`） |
+| 运行时 | 已做冒烟验证：桥接 `/health` 返回 `{"status":"ok","version":"0.1.0","port":5566}`，播放页握手成功并报告 `HEVC: 支持，H.264: 支持` |
+| 尚未验证 | **真实平台直播链路的端到端**（解析真实房间 → 拉流播放 → 录制落盘）：需要联网与真实房间号，请在目标机器上实测 |
+
+技术栈：.NET 10（`net10.0-windows`）+ WPF + WebView2，产物为 win-x64 自包含单文件。架构决策见 [`docs/adr/`](docs/adr/)，平台实现细节见 [`docs/parsers/`](docs/parsers/README.md)。
+
+---
+
 ## 项目定位
 
 | 能力 | 说明 |
@@ -55,17 +82,32 @@ Web 端负责低延迟观看，mpv 端负责超分 / HDR / 高画质，两者互
 
 ```powershell
 # 开发运行（需要 .NET 10 SDK）
-pwsh -File build\run-dev.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File build\run-dev.ps1
 
-# 运行全部测试（C# + 前端纯函数）
-pwsh -File build\test.ps1
+# 运行全部测试：C# 单测 + 前端回归 + 静态红线自检 + 离线结构分析
+powershell -NoProfile -ExecutionPolicy Bypass -File build\test.ps1
 
 # 打包发布到 D:\文件\实用软件\b站插件\StreamPilot_publish
-pwsh -File build\publish.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File build\publish.ps1
 
-# 静态自检（红线检查、依赖方向、TODO 扫描）
-pwsh -File build\verify-tree.ps1
+# 仅静态红线检查（可附带第三方资产 SHA256）
+powershell -NoProfile -ExecutionPolicy Bypass -File build\verify-tree.ps1 -VerifyHashes
+
+# 仅离线 C# 结构分析（无 SDK 环境也能运行）
+node build\analyze-csharp.mjs
 ```
+
+### 当前验证状态（.NET SDK 10.0.401 实测）
+
+| 检查项 | 结果 |
+|--------|------|
+| `dotnet build StreamPilot.slnx`（Debug / Release） | 0 警告 / 0 错误 |
+| C# 单元测试 | **80 / 80 通过** |
+| 播放策略前端测试（`node --test`） | **13 / 13 通过** |
+| 静态红线自检 | 通过（无 TODO / Console / 依赖方向 / 通配监听 / 二进制混入） |
+| 离线 C# 结构分析 | 88 文件 / 15119 行 / 133 类型 / 504 方法，无结构性问题 |
+| 发布产物 | `StreamPilot.exe` 单文件 59.3 MiB，总包 61.3 MiB |
+| 运行时冒烟测试 | 启动正常；桥接 `/health` 返回 `{"status":"ok","version":"0.1.0","port":5566}`；日志出现 `播放器内核已就绪（HEVC: 支持，H.264: 支持）` 与 `播放页加载完成` |
 
 ## 目录结构
 
@@ -124,6 +166,18 @@ dotnet run --project tests/StreamPilot.Tests -- QueryStringParser   # 按类型�
 - [播放策略（追帧 / 探测 / 恢复）](docs/architecture/播放策略.md)
 - [测试与覆盖率矩阵](docs/testing/覆盖率矩阵.md)
 - [第三方依赖清单](THIRD-PARTY-NOTICES.md)
+
+## 参考项目
+
+StreamPilot 的三个能力方向分别参考了以下开源 / 公开项目。**均为只读参考：没有复用其源码，也没有修改其任何文件**；具体复用与重写边界见各 ADR。
+
+| 项目 | 地址 | 参考内容 | 本项目做法 |
+|------|------|----------|------------|
+| **录播姬**（BililiveRecorder） | <https://github.com/BililiveRecorder/BililiveRecorder> | 直播**原始流录制**的行为：FLV 标签级写入、分片触发条件、"断流后新分片总是重发文件头 + onMetaData + 序列头"、时间戳错位/跳变修复思路、侧车元数据 | 参考行为、**独立实现**（`src/StreamPilot.Recording`），见 [ADR 0004](docs/adr/0004-录制实现.md) |
+| **Lsar** | <https://github.com/alley-rs/lsar> | 多平台**解析思路**：统一结果结构、房间状态分类、各平台接口与签名算法（B站 / 抖音 / 虎牙 / 斗鱼 / YY / Bigo） | 参考思路、**用 C# 全部重写**（`src/StreamPilot.Parsers`），并修正其无超时、`unreachable!` panic、错误分类不一致等问题，见 [ADR 0003](docs/adr/0003-解析器实现.md) |
+| **MultiLive** | <https://www.bilibili.com/video/BV1y1tu66ERj/> | **低延迟播放**：WebView2 宿主与页面的消息契约、三档极限追帧参数、CDN 候选并行探测与切换、冻结恢复阈值、WebView2 虚拟主机映射 | 播放逻辑自研重写（`Web/player.html` + `player-core.js`），并复用其随包的 Apache-2.0 前端库 `mpegts.js 1.8.2` / `hls.js 1.6.16`；修正其 PNA 响应头位置错误，见 [ADR 0005](docs/adr/0005-桥接服务与打包发布.md) 与 [播放策略](docs/architecture/播放策略.md) |
+
+> 上述项目各自适用其自身的开源许可；StreamPilot 的分发物中只包含 `mpegts.js` 与 `hls.js` 两个 Apache-2.0 库（版本与 SHA256 登记于 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)）。
 
 ## 质量红线
 

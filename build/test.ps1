@@ -47,7 +47,7 @@ function Get-DotnetSdkPath {
     return $dotnet.Source
 }
 
-Write-Section '1/3 C# unit tests'
+Write-Section '1/4 C# unit tests'
 $dotnetPath = Get-DotnetSdkPath
 if ($null -eq $dotnetPath) {
     Write-Host 'SKIPPED: .NET 10 SDK is not available.' -ForegroundColor Yellow
@@ -65,7 +65,7 @@ else {
 }
 
 if (-not $SkipWeb) {
-    Write-Section '2/3 Player-core JS tests (node --test)'
+    Write-Section '2/4 Player-core JS tests (node --test)'
     $node = Get-Command node -ErrorAction SilentlyContinue
     if (-not $node) {
         Write-Host 'SKIPPED: node is not available.' -ForegroundColor Yellow
@@ -85,11 +85,28 @@ if (-not $SkipWeb) {
 }
 
 if (-not $SkipStatic) {
-    Write-Section '3/3 Static self-check'
+    Write-Section '3/4 Static self-check (red lines)'
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'verify-tree.ps1')
     if ($LASTEXITCODE -ne 0) {
         Write-Host 'Static self-check FAILED.' -ForegroundColor Red
         $failed = $true
+    }
+}
+
+Write-Section '4/4 Offline C# structural analysis'
+$analyzer = Join-Path $PSScriptRoot 'analyze-csharp.mjs'
+if ($null -eq $node -or -not (Test-Path $analyzer)) {
+    Write-Host 'SKIPPED: node or analyzer script is not available.' -ForegroundColor Yellow
+    $failed = $true
+}
+else {
+    & $node.Source $analyzer
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host 'Structural analysis FAILED.' -ForegroundColor Red
+        $failed = $true
+    }
+    else {
+        Write-Host 'Structural analysis passed.' -ForegroundColor Green
     }
 }
 
