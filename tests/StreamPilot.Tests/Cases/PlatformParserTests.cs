@@ -565,4 +565,19 @@ public sealed class PlatformParserTests
         Assert.Equal("hd", selected);
         Assert.Equal("ao", qualities[1].Key);
     }
+
+    /// <summary>抖音：风控/验证码中间页只用于把失败原因说清楚，不触发任何绕过逻辑。</summary>
+    [TestMethod("抖音：识别风控验证页但不绕过")]
+    public void DouyinDetectsSecurityChallengePage()
+    {
+        Assert.True(
+            DouyinParser.HasSecurityChallenge("""<html><script>document.cookie="__ac_nonce=0123abc";</script></html>"""),
+            "__ac_nonce 是风控中间页标记");
+        Assert.True(
+            DouyinParser.HasSecurityChallenge("<html><title>验证码中间页</title></html>"),
+            "验证码中间页文案同样是标记");
+        Assert.False(
+            DouyinParser.HasSecurityChallenge("""<script>self.__pace_f.push([1,"{\"roomStore\":{}}"])</script>"""),
+            "正常房间页不能被误判为风控页");
+    }
 }

@@ -123,8 +123,24 @@ internal sealed class DouyinParser : PlatformParserBase
     /// <summary><c>sec_uid</c> 在正则里的捕获组名。</summary>
     private const string SecUidGroupName = "sec";
 
+    /// <summary>
+    /// 风控/验证码中间页的判别标记。
+    /// </summary>
+    /// <remarks>
+    /// 参考实现（MultiLive v10.4.16 <c>DouyinLiveResolver</c>）用同样两个标记做诊断：
+    /// <c>__ac_nonce</c> 与"验证码中间页"文案。这里只用它生成可读的失败原因，
+    /// 不参与任何绕过逻辑。
+    /// </remarks>
+    private static readonly Regex SecurityChallengePattern = new(
+        "__ac_nonce|验证码中间页",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     /// <summary>页面与 reflow 接口均不可用时的提示。</summary>
     private const string NoStreamMessage = "抖音直播间页面与 reflow 接口均未返回可用播放地址。";
+
+    /// <summary>页面返回风控/验证码中间页且所有路径都失败时的提示。</summary>
+    private const string SecurityChallengeMessage =
+        "抖音返回了浏览器安全验证页（含 __ac_nonce），本程序不绕过验证码与风控；请稍后重试或改用官方直播页。";
 
     /// <summary>两条路径都拿到了状态但没有可用地址时的提示。</summary>
     private const string NoCandidateMessage = "抖音未返回可用播放地址。";
@@ -338,7 +354,11 @@ internal sealed class DouyinParser : PlatformParserBase
 
         if (room is null)
         {
-            throw Fail(ResolveFailure.ParseError, ReflowOperation, NoStreamMessage);
+            // 页面是风控/验证码中间页时，原因是"平台拒绝"而不是"接口结构变了"；
+            // 两种情况都不绕过验证，只是把失败原因说清楚（来源：参考实现的 hasSecurityChallenge）。
+            throw HasSecurityChallenge(html)
+                ? Fail(ResolveFailure.Rejected, RoomStateOperation, SecurityChallengeMessage)
+                : Fail(ResolveFailure.ParseError, ReflowOperation, NoStreamMessage);
         }
 
         if (builder.Count == 0)
@@ -859,6 +879,16 @@ internal sealed class DouyinParser : PlatformParserBase
         ArgumentNullException.ThrowIfNull(html);
         Match match = SecUidPattern.Match(html);
         return match.Success ? match.Groups[SecUidGroupName].Value : null;
+    }
+
+    /// <summary>判断页面是否是风控/验证码中间页。</summary>
+    /// <param name="html">页面 HTML。</param>
+    /// <returns>命中风控标记返回 <see langword="true"/>。</returns>
+    /// <remarks>只用于把失败原因说清楚，不做任何绕过验证码或风控的处理。</remarks>
+    internal static bool HasSecurityChallenge(string html)
+    {
+        ArgumentNullException.ThrowIfNull(html);
+        return SecurityChallengePattern.IsMatch(html);
     }
 
     /// <summary>解析 JSON 文本；非法 JSON 只记 Debug 日志并返回 <see langword="null"/>。</summary>
