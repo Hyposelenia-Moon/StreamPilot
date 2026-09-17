@@ -166,6 +166,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>自动识别平台失败时的提示（状态行使用）。</summary>
     private const string PlatformDetectionHint = "无法识别平台：请输入直播间链接，或在设置里指定默认平台。";
 
+    /// <summary>房间信息缺失时的占位文本（「当前直播」卡片使用）。</summary>
+    private const string PlaceholderText = "-";
+
     /// <summary>页面进入全屏的消息类型。</summary>
     private const string PlayerFullscreenEnterType = "fullscreen-enter";
 
@@ -216,6 +219,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     private string _roomTitle = "-";
     private string _roomAnchor = "-";
     private string _roomCategory = "-";
+    private string _liveStatus = ResolveMessages.LiveStatusUnknown;
     private string _recordingSummary = "未录制";
     private string _presetSummary = "暂无预设";
     private ResolvedRoom? _currentRoom;
@@ -497,6 +501,19 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         private set => SetField(ref _roomCategory, value);
     }
 
+    /// <summary>
+    /// 当前房间的开播状态词（直播中 / 未开播 / 轮播中 / 未知）。
+    /// </summary>
+    /// <remarks>
+    /// 取值来自解析结果：解析成功即为"直播中"（解析器只会为在播房间产出候选），
+    /// 失败时由 <see cref="ResolveMessages.DescribeLiveStatus"/> 把失败分类映射成状态词。
+    /// </remarks>
+    public string LiveStatus
+    {
+        get => _liveStatus;
+        private set => SetField(ref _liveStatus, value);
+    }
+
     /// <summary>录制状态摘要。</summary>
     public string RecordingSummary
     {
@@ -689,6 +706,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             {
                 _effectivePlatform = PlatformId.Unknown;
                 RaisePlatformChanged();
+                ClearRoomInfo();
                 StatusMessage = PlatformDetectionHint;
                 AppendLog("解析取消：" + PlatformDetectionHint);
                 return;
@@ -703,15 +721,14 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
             StatusMessage = "正在解析…";
             AppendLog("开始解析：" + _roomInput);
+            ClearRoomInfo();
 
             ResolveOutcome outcome = await _resolver.ResolveAsync(query, CancellationToken.None).ConfigureAwait(true);
             if (!outcome.Success || outcome.Room is null)
             {
                 _currentRoom = null;
                 StatusMessage = ResolveMessages.DescribeFailure(outcome.Failure);
-                RoomTitle = "-";
-                RoomAnchor = "-";
-                RoomCategory = "-";
+                ClearRoomInfo(ResolveMessages.DescribeLiveStatus(outcome.Failure));
                 AppendLog(StatusMessage);
                 RaiseCommandStates();
                 return;
@@ -720,9 +737,10 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             _currentRoom = outcome.Room;
             RoomTitle = outcome.Room.Title;
             RoomAnchor = outcome.Room.Anchor;
-            RoomCategory = string.IsNullOrWhiteSpace(outcome.Room.Category) ? "-" : outcome.Room.Category;
+            RoomCategory = string.IsNullOrWhiteSpace(outcome.Room.Category) ? PlaceholderText : outcome.Room.Category;
+            LiveStatus = ResolveMessages.LiveStatusLive;
             StatusMessage = $"解析成功：{outcome.Room.Anchor} / {outcome.Room.Title}"
-                + $"（状态：{ResolveMessages.LiveStatusLive}，共 {outcome.Room.Candidates.Count} 条线路）";
+                + $"（状态：{LiveStatus}，共 {outcome.Room.Candidates.Count} 条线路）";
             AppendLog(StatusMessage);
 
             PersistLastInput();
@@ -735,6 +753,22 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             IsBusy = false;
             RaiseCommandStates();
         }
+    }
+
+    /// <summary>
+    /// 把「当前直播」卡片重置为"未知"占位（解析前与解析失败时使用）。
+    /// </summary>
+    /// <param name="liveStatus">要显示的开播状态词；缺省为"未知"。</param>
+    /// <remarks>
+    /// 解析一开始就清空，避免上一轮解析残留的主播名/状态被当成这一轮的结果；
+    /// 状态词由调用方给出（失败时来自失败分类），不在 UI 层做任何判断。
+    /// </remarks>
+    private void ClearRoomInfo(string? liveStatus = null)
+    {
+        RoomTitle = PlaceholderText;
+        RoomAnchor = PlaceholderText;
+        RoomCategory = PlaceholderText;
+        LiveStatus = liveStatus ?? ResolveMessages.LiveStatusUnknown;
     }
 
     /// <summary>

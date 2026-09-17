@@ -52,7 +52,7 @@ public sealed class SegmentPolicy
         }
 
         long elapsedMs = Math.Max(0, timestampMs - _startTimestampMs);
-        return elapsedMs >= (long)_options.MaxDurationMinutes * 60_000L;
+        return elapsedMs >= (long)_options.MaxDurationMinutes * RecordingLimits.MillisecondsPerMinute;
     }
 
     /// <summary>

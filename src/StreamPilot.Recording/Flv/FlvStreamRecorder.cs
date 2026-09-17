@@ -1,5 +1,6 @@
 namespace StreamPilot.Recording.Flv;
 
+using StreamPilot.Core.Configuration;
 using StreamPilot.Core.Logging;
 using StreamPilot.Core.Models;
 using StreamPilot.Recording.Streams;
@@ -17,8 +18,8 @@ using StreamPilot.Recording.Streams;
 /// </remarks>
 public sealed class FlvStreamRecorder
 {
-    /// <summary>默认的最长录制时长（分钟）。</summary>
-    public const int DefaultMaxDurationMinutes = 360;
+    /// <summary>默认的最长录制时长（分钟，8 小时；与 <see cref="RecordingLimits.DefaultMaxRecordingMinutes"/> 一致）。</summary>
+    public const int DefaultMaxDurationMinutes = RecordingLimits.DefaultMaxRecordingMinutes;
 
     /// <summary>重连退避序列（秒），超出长度后复用最后一项。</summary>
     private static readonly int[] ReconnectBackoffSeconds = [2, 4, 8, 15, 30];
@@ -73,7 +74,7 @@ public sealed class FlvStreamRecorder
         Directory.CreateDirectory(outputDirectory);
 
         SessionState session = new() { RoomId = room.RoomId, FileExtension = RecordingFileNaming.ExtensionFor(format) };
-        long safeMaxDurationMs = Math.Max(1, maxDurationMinutes) * 60_000L;
+        long safeMaxDurationMs = Math.Max(1, maxDurationMinutes) * (long)RecordingLimits.MillisecondsPerMinute;
 
         try
         {

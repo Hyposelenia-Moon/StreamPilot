@@ -1,11 +1,7 @@
-using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
-using WpfApplication = System.Windows.Application;
 using WpfButton = System.Windows.Controls.Button;
-using WpfHorizontalAlignment = System.Windows.HorizontalAlignment;
-using WpfOrientation = System.Windows.Controls.Orientation;
 using WpfTextBox = System.Windows.Controls.TextBox;
 
 namespace StreamPilot.App.Views;
@@ -15,11 +11,23 @@ namespace StreamPilot.App.Views;
 /// </summary>
 public static class InputDialog
 {
-    /// <summary>对话框左右统一的边距。</summary>
-    private const double DialogPadding = 16;
+    /// <summary>对话框宽度。</summary>
+    private const double InputDialogWidth = 420;
 
     /// <summary>按钮最小宽度。</summary>
     private const double ButtonMinWidth = 84;
+
+    /// <summary>标签与下方控件之间的间距。</summary>
+    private const double LabelBottomMargin = 8;
+
+    /// <summary>按钮之间的间距。</summary>
+    private const double ButtonGap = 8;
+
+    /// <summary>确定按钮的常规文案。</summary>
+    private const string ConfirmText = "确定";
+
+    /// <summary>取消按钮的文案。</summary>
+    private const string CancelText = "取消";
 
     /// <summary>
     /// 弹出输入框。
@@ -40,67 +48,38 @@ public static class InputDialog
         string defaultValue = "",
         Func<string, Task<string?>>? validator = null)
     {
-        Window dialog = new()
-        {
-            Title = title,
-            Width = 420,
-            SizeToContent = SizeToContent.Height,
-            ResizeMode = ResizeMode.NoResize,
-            WindowStartupLocation = owner is null ? WindowStartupLocation.CenterScreen : WindowStartupLocation.CenterOwner,
-            ShowInTaskbar = false,
-            Background = (System.Windows.Media.Brush)WpfApplication.Current.Resources["WindowBackgroundBrush"],
-            Icon = (System.Windows.Media.ImageSource)WpfApplication.Current.Resources["AppIcon"],
-        };
+        Window dialog = DialogWindow.Create(owner, title, InputDialogWidth);
 
-        if (owner is not null)
+        Grid root = DialogLayout.CreateRoot(DialogLayout.Padding);
+        for (int index = 0; index < 4; index++)
         {
-            dialog.Owner = owner;
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         }
-
-        Grid root = new() { Margin = new Thickness(DialogPadding) };
-        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
         TextBlock label = new()
         {
             Text = prompt,
             TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(0, 0, 0, 8),
-            Foreground = (System.Windows.Media.Brush)WpfApplication.Current.Resources["TextBrush"],
+            Margin = new Thickness(0, 0, 0, LabelBottomMargin),
         };
+        label.SetResourceReference(TextBlock.ForegroundProperty, DialogLayout.TextBrushKey);
         Grid.SetRow(label, 0);
 
-        WpfTextBox input = new() { Text = defaultValue, Margin = new Thickness(0, 0, 0, 8) };
+        WpfTextBox input = new() { Text = defaultValue, Margin = new Thickness(0, 0, 0, LabelBottomMargin) };
         AutomationProperties.SetAutomationId(input, "InputDialogTextBox");
         Grid.SetRow(input, 1);
 
-        TextBlock failure = new()
-        {
-            TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(0, 0, 0, 10),
-        };
-        failure.SetResourceReference(TextBlock.ForegroundProperty, "ErrorBrush");
+        TextBlock failure = DialogLayout.CreateFailureText();
         Grid.SetRow(failure, 2);
 
-        StackPanel buttons = new()
-        {
-            Orientation = WpfOrientation.Horizontal,
-            HorizontalAlignment = WpfHorizontalAlignment.Right,
-        };
-
-        WpfButton confirm = new() { Content = "确定", MinWidth = ButtonMinWidth, IsDefault = true };
-        WpfButton cancel = new()
-        {
-            Content = "取消",
-            MinWidth = ButtonMinWidth,
-            Margin = new Thickness(8, 0, 0, 0),
-            IsCancel = true,
-        };
+        WpfButton confirm = DialogLayout.CreateButton(ConfirmText, ButtonMinWidth, isDefault: true);
+        confirm.SetResourceReference(FrameworkElement.StyleProperty, DialogLayout.PrimaryButtonKey);
+        WpfButton cancel = DialogLayout.CreateButton(CancelText, ButtonMinWidth, isDefault: false);
+        cancel.Margin = new Thickness(ButtonGap, 0, 0, 0);
+        cancel.IsCancel = true;
         cancel.Click += (_, _) => dialog.DialogResult = false;
-        buttons.Children.Add(confirm);
-        buttons.Children.Add(cancel);
+
+        StackPanel buttons = DialogLayout.CreateButtonRow(confirm, cancel);
         Grid.SetRow(buttons, 3);
 
         if (validator is null)
@@ -149,7 +128,7 @@ public static class InputDialog
         failure.Text = string.Empty;
         confirm.IsEnabled = false;
         cancel.IsEnabled = false;
-        confirm.Content = "校验中…";
+        confirm.Content = DialogLayout.ValidatingText;
         try
         {
             string? error = await validator(input.Text ?? string.Empty).ConfigureAwait(true);
@@ -163,7 +142,7 @@ public static class InputDialog
         }
         finally
         {
-            confirm.Content = "确定";
+            confirm.Content = ConfirmText;
             confirm.IsEnabled = true;
             cancel.IsEnabled = true;
         }

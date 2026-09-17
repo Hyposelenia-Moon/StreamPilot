@@ -127,39 +127,39 @@
 
             <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
               <StackPanel>
-                <TextBlock Text="账号 Cookie（可选）" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <TextBlock Text="填了才能拿最高画质（B站 4K/HDR、虎牙蓝光20M、抖音原画）"
+                <TextBlock Text="账号 Cookie" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
+                <TextBlock Text="用于解析接口的登录态，填写后可获取需要登录的高画质档位。仅保存在本机配置文件中，不写入日志，不随程序分发；播放地址与中继请求均不携带该凭据。"
                            Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,0,0,10" />
 
                 <TextBlock Text="哔哩哔哩 Cookie" Style="{StaticResource SettingLabel}" />
                 <TextBox Style="{StaticResource CookieBox}" Text="{Binding BilibiliCookie, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="只用于解析请求换取高画质；不会写进日志、不会发给 CDN"
+                         ToolTip="仅用于本次解析请求，用于换取需要登录的高画质档位；不写入日志，不随程序分发。"
                          AutomationProperties.AutomationId="BilibiliCookieBox" />
 
                 <TextBlock Text="抖音 Cookie" Style="{StaticResource SettingLabel}" />
                 <TextBox Style="{StaticResource CookieBox}" Text="{Binding DouyinCookie, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="只用于解析请求换取高画质；不会写进日志、不会发给 CDN"
+                         ToolTip="仅用于本次解析请求，用于换取需要登录的高画质档位；不写入日志，不随程序分发。"
                          AutomationProperties.AutomationId="DouyinCookieBox" />
 
                 <TextBlock Text="虎牙 Cookie" Style="{StaticResource SettingLabel}" />
                 <TextBox Style="{StaticResource CookieBox}" Text="{Binding HuyaCookie, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="只用于解析请求换取高画质；不会写进日志、不会发给 CDN"
+                         ToolTip="仅用于本次解析请求，用于换取需要登录的高画质档位；不写入日志，不随程序分发。"
                          AutomationProperties.AutomationId="HuyaCookieBox" />
 
                 <TextBlock Text="斗鱼 Cookie" Style="{StaticResource SettingLabel}" />
                 <TextBox Style="{StaticResource CookieBox}" Text="{Binding DouyuCookie, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="只用于解析请求换取高画质；不会写进日志、不会发给 CDN"
+                         ToolTip="仅用于本次解析请求，用于换取需要登录的高画质档位；不写入日志，不随程序分发。"
                          AutomationProperties.AutomationId="DouyuCookieBox" />
 
                 <TextBlock Text="YY Cookie" Style="{StaticResource SettingLabel}" />
                 <TextBox Style="{StaticResource CookieBox}" Text="{Binding YyCookie, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="只用于解析请求换取高画质；不会写进日志、不会发给 CDN"
+                         ToolTip="仅用于本次解析请求，用于换取需要登录的高画质档位；不写入日志，不随程序分发。"
                          AutomationProperties.AutomationId="YyCookieBox" />
 
                 <TextBlock Text="Bigo Cookie" Style="{StaticResource SettingLabel}" />
                 <TextBox Style="{StaticResource CookieBox}" Text="{Binding BigoCookie, UpdateSourceTrigger=PropertyChanged}"
                          Margin="0"
-                         ToolTip="只用于解析请求换取高画质；不会写进日志、不会发给 CDN"
+                         ToolTip="仅用于本次解析请求，用于换取需要登录的高画质档位；不写入日志，不随程序分发。"
                          AutomationProperties.AutomationId="BigoCookieBox" />
               </StackPanel>
             </Border>
@@ -225,14 +225,16 @@
                   </Grid.ColumnDefinitions>
 
                   <StackPanel Grid.Column="0">
-                    <TextBlock Text="分片大小上限（MiB）" Style="{StaticResource SettingLabel}" />
-                    <TextBox Text="{Binding SegmentMaxMegabytes}" Style="{StaticResource SettingFieldBox}"
+                    <TextBlock Text="分片大小上限（GiB）" Style="{StaticResource SettingLabel}" />
+                    <TextBox Text="{Binding SegmentMaxGibibytes}" Style="{StaticResource SettingFieldBox}"
+                             ToolTip="达到该大小后在下一个关键帧处切分；1 GiB = 1024 MiB，可填小数，没有上限"
                              AutomationProperties.AutomationId="SegmentMaxMegabytesBox" />
                   </StackPanel>
 
                   <StackPanel Grid.Column="1">
-                    <TextBlock Text="分片时长上限（分钟）" Style="{StaticResource SettingLabel}" />
-                    <TextBox Text="{Binding SegmentMaxMinutes}" Style="{StaticResource SettingFieldBox}"
+                    <TextBlock Text="分片时长上限（小时）" Style="{StaticResource SettingLabel}" />
+                    <TextBox Text="{Binding SegmentMaxHours}" Style="{StaticResource SettingFieldBox}"
+                             ToolTip="达到该时长后同样在下一个关键帧处切分；可填小数，没有上限"
                              AutomationProperties.AutomationId="SegmentMaxMinutesBox" />
                   </StackPanel>
                 </Grid>
@@ -256,8 +258,9 @@
                   </Grid.ColumnDefinitions>
 
                   <StackPanel Grid.Column="0">
-                    <TextBlock Text="最长录制时长（分钟）" Style="{StaticResource SettingLabel}" />
-                    <TextBox Text="{Binding MaxDurationMinutes}" Style="{StaticResource SettingFieldBox}"
+                    <TextBlock Text="最长录制时长（小时）" Style="{StaticResource SettingLabel}" />
+                    <TextBox Text="{Binding MaxDurationHours}" Style="{StaticResource SettingFieldBox}"
+                             ToolTip="单次录制达到该时长即自动结束；可填小数，没有上限"
                              AutomationProperties.AutomationId="MaxDurationMinutesBox" />
                   </StackPanel>
 

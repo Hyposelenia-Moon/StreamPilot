@@ -44,11 +44,13 @@
 
 | 配置项 | 默认 | 取值范围 | 说明 |
 |---|---|---|---|
-| `SegmentMaxBytes` | 1 GiB | 64 MiB ~ 16 GiB | 达到上限后在**下一个视频关键帧**处切分 |
-| `SegmentMaxDuration` | 30 分钟 | 1 ~ 480 分钟 | 达到上限后同样在下一个关键帧处切分 |
+| `SegmentMaxBytes` | 10 GiB | > 0，**无上限** | 达到上限后在**下一个视频关键帧**处切分 |
+| `SegmentMaxDuration` | 480 分钟（8 小时） | > 0，**无上限** | 达到上限后同样在下一个关键帧处切分 |
 | `SegmentMinBytes` | 8 MiB | — | 防止"刚开播就切出一堆小文件" |
 | `SplitOnKeyFrameOnly` | true | — | FLV 必须按关键帧；TS 按分片边界 |
 | `FileNameTemplate` | `{anchor}-{roomId}-{startTime}-{index}` | — | 见下 |
+
+- **不设上限**：设置界面按 GiB / 小时填写并换算成字节 / 分钟；`SegmentPolicyOptions.Normalize()` 只把非法值（0、负数、小于 64 MiB 的字节上限、小于 1 分钟的时长上限）回退到默认值，不再夹取大值，因此用户可以按需把分片调得很大。
 
 - **FLV 关键帧判定**：`VideoTag`（tagType=9）且 `AVCPacketType == 1`，且首字节低 4 位 `FrameType == 1`（keyframe）。切分点必须在**该帧的 tag 起始处**，保证新分片首帧可解码。
 - **FLV 分片头**：新分片写入
@@ -70,7 +72,7 @@
 - **断流判定**：`ReadAsync` 返回 0（EOF）或连续 `StallTimeoutSeconds`（默认 12 秒）无字节到达。
 - **重连退避**：`2s, 4s, 8s, 15s, 30s`（上限 30 秒），最多 `MaxReconnectAttempts = 8` 次；每次重连前重新校验 URL 有效期，过期则回调 `IRoomResolver` 重新解析（最多 3 次，与播放侧一致）。
 - **关键帧一致性**：重连后若检测到 `SPS/PPS` 变化（FLV `AVC sequence header` 内容不同），**必须切分新分片**（编码参数变化不能混在同一文件），并在元数据中记录 `codecChangeAt`。
-- **不无限重试**（`CLAUDE.md` 红线 7）：重连次数与总时长（默认 6 小时）双上限，任一触发即结束会话并写 `Info` 日志。
+- **不无限重试**（`CLAUDE.md` 红线 7）：重连次数与总时长（默认 8 小时，用户可自行调整且不设上限）双上限，任一触发即结束会话并写 `Info` 日志。
 
 ### 5. 元数据记录
 

@@ -84,8 +84,8 @@ public sealed record RecordingOptions
     /// <summary>分片策略。</summary>
     public SegmentPolicyOptions Segment { get; init; } = new();
 
-    /// <summary>最长录制时长（分钟）。</summary>
-    public int MaxDurationMinutes { get; init; } = 360;
+    /// <summary>最长录制时长（分钟，默认 480 分钟即 8 小时）。</summary>
+    public int MaxDurationMinutes { get; init; } = RecordingLimits.DefaultMaxRecordingMinutes;
 
     /// <summary>无数据到达多少秒后判定断流。</summary>
     public int StallTimeoutSeconds { get; init; } = 12;

@@ -2,11 +2,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
-using System.Windows.Media;
-using WpfApplication = System.Windows.Application;
 using WpfButton = System.Windows.Controls.Button;
-using WpfHorizontalAlignment = System.Windows.HorizontalAlignment;
-using WpfOrientation = System.Windows.Controls.Orientation;
 using WpfTextBox = System.Windows.Controls.TextBox;
 
 namespace StreamPilot.App.Views;
@@ -18,20 +14,16 @@ namespace StreamPilot.App.Views;
 /// 不依赖"直播源"卡片里的输入，预设内容完全来自本对话框的两个字段。
 /// 校验由调用方以异步回调提供：返回 <see langword="null"/> 表示通过并关闭对话框，
 /// 返回提示文本表示不通过（对话框保持打开，用户可修正后重试）。
+/// 外观（背景、字号、间距、按钮样式）与 <see cref="InputDialog"/> 共用
+/// <see cref="DialogLayout"/> / <see cref="DialogWindow"/>，避免两个对话框风格不一致。
 /// </remarks>
 public static class PresetDialog
 {
-    /// <summary>对话框左右统一的边距。</summary>
-    private const double DialogPadding = 16;
+    /// <summary>对话框宽度。</summary>
+    private const double PresetDialogWidth = 460;
 
-    /// <summary>字段标签与控件之间的间距。</summary>
-    private const double LabelBottomMargin = 4;
-
-    /// <summary>字段组之间的间距。</summary>
-    private const double FieldGap = 12;
-
-    /// <summary>按钮最小宽度。</summary>
-    private const double ButtonMinWidth = 84;
+    /// <summary>字段数量（主播名称 + 直播链接）。</summary>
+    private const int FieldCount = 2;
 
     /// <summary>确定按钮在校验期间的文案。</summary>
     private const string ConfirmingText = "解析中…";
@@ -39,8 +31,26 @@ public static class PresetDialog
     /// <summary>确定按钮的常规文案。</summary>
     private const string ConfirmText = "确定";
 
-    /// <summary>标签文字字号（比正文略小，与主界面的次要文字一致）。</summary>
-    private const double LabelFontSize = 13;
+    /// <summary>取消按钮的文案。</summary>
+    private const string CancelText = "取消";
+
+    /// <summary>主播名称输入框的自动化标识。</summary>
+    private const string AnchorNameAutomationId = "PresetAnchorNameBox";
+
+    /// <summary>直播链接输入框的自动化标识。</summary>
+    private const string LinkAutomationId = "PresetLinkBox";
+
+    /// <summary>主播名称字段的标签。</summary>
+    private const string AnchorNameLabel = "主播名称";
+
+    /// <summary>直播链接字段的标签。</summary>
+    private const string LinkLabel = "直播链接";
+
+    /// <summary>确定按钮的自动化标识。</summary>
+    private const string ConfirmAutomationId = "PresetConfirmButton";
+
+    /// <summary>取消按钮的自动化标识。</summary>
+    private const string CancelAutomationId = "PresetCancelButton";
 
     /// <summary>
     /// 弹出「新增预设」对话框。
@@ -54,68 +64,33 @@ public static class PresetDialog
     {
         ArgumentNullException.ThrowIfNull(validator);
 
-        Window dialog = new()
-        {
-            Title = "新增预设",
-            Width = 460,
-            SizeToContent = SizeToContent.Height,
-            ResizeMode = ResizeMode.NoResize,
-            WindowStartupLocation = owner is null ? WindowStartupLocation.CenterScreen : WindowStartupLocation.CenterOwner,
-            ShowInTaskbar = false,
-            Background = (System.Windows.Media.Brush)WpfApplication.Current.Resources["WindowBackgroundSystem.Windows.Media.Brush"],
-            Icon = (ImageSource)WpfApplication.Current.Resources["AppIcon"],
-        };
+        Window dialog = DialogWindow.Create(owner, "新增预设", PresetDialogWidth);
 
-        if (owner is not null)
-        {
-            dialog.Owner = owner;
-        }
-
-        Grid root = new() { Margin = new Thickness(DialogPadding) };
-        for (int index = 0; index < 4; index++)
+        Grid root = DialogLayout.CreateRoot(DialogLayout.Padding);
+        for (int index = 0; index <= FieldCount + 1; index++)
         {
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         }
 
-        WpfTextBox nameBox = AddField(root, 0, "主播名称", "PresetAnchorNameBox", FieldGap);
-        WpfTextBox linkBox = AddField(root, 1, "直播链接", "PresetLinkBox", FieldGap);
+        WpfTextBox nameBox = AddField(root, 0, AnchorNameLabel, AnchorNameAutomationId);
+        WpfTextBox linkBox = AddField(root, 1, LinkLabel, LinkAutomationId);
 
-        TextBlock failure = new()
-        {
-            TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(0, 0, 0, 10),
-            Foreground = (System.Windows.Media.Brush)WpfApplication.Current.Resources["ErrorSystem.Windows.Media.Brush"],
-        };
-        Grid.SetRow(failure, 2);
+        TextBlock failure = DialogLayout.CreateFailureText();
+        Grid.SetRow(failure, FieldCount);
 
-        StackPanel buttons = new()
-        {
-            Orientation = WpfOrientation.Horizontal,
-            HorizontalAlignment = WpfHorizontalAlignment.Right,
-        };
-
-        WpfButton confirm = new()
-        {
-            Content = ConfirmText,
-            MinWidth = ButtonMinWidth,
-            IsDefault = true,
-            Style = WpfApplication.Current.TryFindResource("PrimaryButton") as Style,
-        };
-        AutomationProperties.SetAutomationId(confirm, "PresetConfirmButton");
-        WpfButton cancel = new()
-        {
-            Content = "取消",
-            MinWidth = ButtonMinWidth,
-            Margin = new Thickness(8, 0, 0, 0),
-            IsCancel = true,
-        };
-        AutomationProperties.SetAutomationId(cancel, "PresetCancelButton");
+        WpfButton confirm = DialogLayout.CreateButton(ConfirmText, DialogLayout.ButtonMinWidth, isDefault: true);
+        confirm.SetResourceReference(FrameworkElement.StyleProperty, DialogLayout.PrimaryButtonKey);
+        AutomationProperties.SetAutomationId(confirm, ConfirmAutomationId);
+        WpfButton cancel = DialogLayout.CreateButton(CancelText, DialogLayout.ButtonMinWidth, isDefault: false);
+        cancel.Margin = new Thickness(DialogLayout.ButtonGap, 0, 0, 0);
+        cancel.IsCancel = true;
+        AutomationProperties.SetAutomationId(cancel, CancelAutomationId);
 
         cancel.Click += (_, _) => dialog.DialogResult = false;
         confirm.Click += async (_, _) => await ConfirmAsync(dialog, confirm, cancel, nameBox, linkBox, failure, validator);
-        buttons.Children.Add(confirm);
-        buttons.Children.Add(cancel);
-        Grid.SetRow(buttons, 3);
+
+        StackPanel buttons = DialogLayout.CreateButtonRow(confirm, cancel);
+        Grid.SetRow(buttons, FieldCount + 1);
 
         root.Children.Add(failure);
         root.Children.Add(buttons);
@@ -135,23 +110,13 @@ public static class PresetDialog
     /// <param name="row">该字段要占用的网格行（标签与输入框同处一行内的堆叠面板）。</param>
     /// <param name="label">字段标签。</param>
     /// <param name="automationId">输入框的自动化标识。</param>
-    /// <param name="bottomMargin">字段底部间距。</param>
     /// <returns>创建出的输入框。</returns>
-    private static WpfTextBox AddField(Grid root, int row, string label, string automationId, double bottomMargin)
+    private static WpfTextBox AddField(Grid root, int row, string label, string automationId)
     {
-        TextBlock labelText = new()
-        {
-            Text = label,
-            Margin = new Thickness(0, 0, 0, LabelBottomMargin),
-            FontSize = LabelFontSize,
-            Foreground = (System.Windows.Media.Brush)WpfApplication.Current.Resources["MutedTextSystem.Windows.Media.Brush"],
-        };
+        WpfTextBox box = DialogLayout.CreateField(automationId);
 
-        WpfTextBox box = new();
-        AutomationProperties.SetAutomationId(box, automationId);
-
-        StackPanel field = new() { Margin = new Thickness(0, 0, 0, bottomMargin) };
-        field.Children.Add(labelText);
+        StackPanel field = new() { Margin = new Thickness(0, 0, 0, DialogLayout.FieldGap) };
+        field.Children.Add(DialogLayout.CreateLabel(label));
         field.Children.Add(box);
         Grid.SetRow(field, row);
 

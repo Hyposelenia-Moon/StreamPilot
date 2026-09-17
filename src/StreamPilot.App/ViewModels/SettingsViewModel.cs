@@ -25,6 +25,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private readonly IStructuredLogger _logger;
     private readonly string _moduleName = "App.Settings";
 
+    /// <summary>分片最小字节数的界面输入上限（MiB）：只是输入框的合理范围，不是分片上限。</summary>
+    private const int MaxSegmentMinMegabytes = 1024;
+
     private string _mpvPath = string.Empty;
     private int _extremeTargetMs = PlaybackRequest.DefaultExtremeTargetMs;
     private PlatformOption _selectedDefaultPlatform = PlatformOption.All[0];
@@ -38,10 +41,10 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private string _yyCookie = string.Empty;
     private string _bigoCookie = string.Empty;
     private string _recordingDirectory = string.Empty;
-    private int _segmentMaxMinutes = 30;
-    private int _segmentMaxMegabytes = 1024;
-    private int _segmentMinMegabytes = 8;
-    private int _maxDurationMinutes = 360;
+    private string _segmentMaxGibibytes = RecordingLimitUnits.FormatGibibytes(RecordingLimits.DefaultSegmentMaxBytes);
+    private string _segmentMaxHours = RecordingLimitUnits.FormatHours(RecordingLimits.DefaultSegmentMaxDurationMinutes);
+    private int _segmentMinMegabytes = (int)(RecordingLimits.DefaultSegmentMinBytes / RecordingLimits.BytesPerMebibyte);
+    private string _maxDurationHours = RecordingLimitUnits.FormatHours(RecordingLimits.DefaultMaxRecordingMinutes);
     private int _stallTimeoutSeconds = 12;
     private int _maxReconnectAttempts = 8;
     private string _proxy = string.Empty;
@@ -224,18 +227,18 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         set => SetField(ref _recordingDirectory, value ?? string.Empty);
     }
 
-    /// <summary>分片时长上限（分钟）。</summary>
-    public int SegmentMaxMinutes
+    /// <summary>分片大小上限（GiB；界面按 GiB 填写，保存时换算为字节，无上限）。</summary>
+    public string SegmentMaxGibibytes
     {
-        get => _segmentMaxMinutes;
-        set => SetField(ref _segmentMaxMinutes, value);
+        get => _segmentMaxGibibytes;
+        set => SetField(ref _segmentMaxGibibytes, value ?? string.Empty);
     }
 
-    /// <summary>分片大小上限（MiB）。</summary>
-    public int SegmentMaxMegabytes
+    /// <summary>分片时长上限（小时；界面按小时填写，保存时换算为分钟，无上限）。</summary>
+    public string SegmentMaxHours
     {
-        get => _segmentMaxMegabytes;
-        set => SetField(ref _segmentMaxMegabytes, value);
+        get => _segmentMaxHours;
+        set => SetField(ref _segmentMaxHours, value ?? string.Empty);
     }
 
     /// <summary>分片最小字节数（MiB），避免切出大量小文件。</summary>
@@ -245,11 +248,11 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         set => SetField(ref _segmentMinMegabytes, value);
     }
 
-    /// <summary>最长录制时长（分钟）。</summary>
-    public int MaxDurationMinutes
+    /// <summary>最长录制时长（小时；界面按小时填写，保存时换算为分钟，无上限）。</summary>
+    public string MaxDurationHours
     {
-        get => _maxDurationMinutes;
-        set => SetField(ref _maxDurationMinutes, value);
+        get => _maxDurationHours;
+        set => SetField(ref _maxDurationHours, value ?? string.Empty);
     }
 
     /// <summary>断流判定超时（秒）。</summary>
@@ -343,10 +346,12 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
         RecordingDirectory = options.Recording.OutputDirectory;
         SegmentPolicyOptions segment = options.Recording.Segment.Normalize();
-        SegmentMaxMegabytes = (int)Math.Clamp(segment.MaxBytes / (1024L * 1024L), 64, 16384);
-        SegmentMaxMinutes = segment.MaxDurationMinutes;
-        SegmentMinMegabytes = (int)Math.Clamp(segment.MinBytes / (1024L * 1024L), 0, 1024);
-        MaxDurationMinutes = Clamp(options.Recording.MaxDurationMinutes, 1, 1440, 360);
+        SegmentMaxGibibytes = RecordingLimitUnits.FormatGibibytes(segment.MaxBytes);
+        SegmentMaxHours = RecordingLimitUnits.FormatHours(segment.MaxDurationMinutes);
+        SegmentMinMegabytes = (int)Math.Clamp(segment.MinBytes / RecordingLimits.BytesPerMebibyte, 0, MaxSegmentMinMegabytes);
+        MaxDurationHours = RecordingLimitUnits.FormatHours(UseOrFallback(
+            options.Recording.MaxDurationMinutes,
+            RecordingLimits.DefaultMaxRecordingMinutes));
         StallTimeoutSeconds = Clamp(options.Recording.StallTimeoutSeconds, 2, 120, 12);
         MaxReconnectAttempts = Clamp(options.Recording.MaxReconnectAttempts, 1, 50, 8);
 
@@ -386,6 +391,18 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         string recordingDirectory = RecordingDirectory.Trim();
         string resolvedMpv = MpvPath.Trim();
 
+        if (!RecordingLimitUnits.TryParseLimits(
+                SegmentMaxGibibytes,
+                SegmentMaxHours,
+                MaxDurationHours,
+                out RecordingLimitInput? limits,
+                out string? limitError)
+            || limits is null)
+        {
+            StatusMessage = limitError ?? "录制上限不合法，请检查后重试。";
+            return false;
+        }
+
         result = baseOptions with
         {
             DefaultPlatform = SelectedDefaultPlatform.Id,
@@ -402,12 +419,12 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 OutputDirectory = recordingDirectory,
                 Segment = new SegmentPolicyOptions
                 {
-                    MaxBytes = SegmentMaxMegabytes * 1024L * 1024L,
-                    MaxDurationMinutes = SegmentMaxMinutes,
-                    MinBytes = SegmentMinMegabytes * 1024L * 1024L,
+                    MaxBytes = limits.SegmentMaxBytes,
+                    MaxDurationMinutes = limits.SegmentMaxMinutes,
+                    MinBytes = SegmentMinMegabytes * RecordingLimits.BytesPerMebibyte,
                     SplitOnKeyFrameOnly = true,
                 },
-                MaxDurationMinutes = MaxDurationMinutes,
+                MaxDurationMinutes = limits.MaxRecordingMinutes,
                 StallTimeoutSeconds = StallTimeoutSeconds,
                 MaxReconnectAttempts = MaxReconnectAttempts,
             },
@@ -525,6 +542,12 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     private static int Clamp(int value, int min, int max, int fallback) =>
         value < min || value > max ? fallback : value;
+
+    /// <summary>取配置值；缺失或非法（0、负数）时回退到默认值。</summary>
+    /// <param name="value">配置里的值。</param>
+    /// <param name="fallback">默认值。</param>
+    /// <returns>可用的值。</returns>
+    private static int UseOrFallback(int value, int fallback) => value > 0 ? value : fallback;
 
     private static int NormalizeTarget(int value)
     {

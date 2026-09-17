@@ -179,7 +179,7 @@
             </Border>
 
             <!-- ===== 当前直播 =====
-                 只显示主播 / 标题 / 分区三行：宿主状态文字在画面下方状态行显示，
+                 显示开播状态 / 主播 / 标题 / 分区四行：宿主状态文字在画面下方状态行显示，
                  候选线路摘要与桥接状态不再进卡片（避免与状态行重复）。 -->
             <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
               <StackPanel>
@@ -194,30 +194,32 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                   </Grid.RowDefinitions>
 
-                  <TextBlock Grid.Row="0" Grid.Column="0" Text="主播：" Style="{StaticResource MutedText}" Margin="0,0,0,2" />
-                  <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding RoomAnchor}" Style="{StaticResource ValueLine}"
+                  <TextBlock Grid.Row="0" Grid.Column="0" Text="开播状态：" Style="{StaticResource MutedText}" Margin="0,0,0,2" />
+                  <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding LiveStatus}" FontWeight="Bold"
+                             Style="{StaticResource ValueLine}" ToolTip="{Binding LiveStatus}" Margin="0,0,0,2" />
+
+                  <TextBlock Grid.Row="1" Grid.Column="0" Text="主播：" Style="{StaticResource MutedText}" Margin="0,0,0,2" />
+                  <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding RoomAnchor}" Style="{StaticResource ValueLine}"
                              ToolTip="{Binding RoomAnchor}" Margin="0,0,0,2" />
 
-                  <TextBlock Grid.Row="1" Grid.Column="0" Text="标题：" Style="{StaticResource MutedText}" Margin="0,0,0,2" />
-                  <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding RoomTitle}" Style="{StaticResource ValueLine}"
+                  <TextBlock Grid.Row="2" Grid.Column="0" Text="标题：" Style="{StaticResource MutedText}" Margin="0,0,0,2" />
+                  <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding RoomTitle}" Style="{StaticResource ValueLine}"
                              ToolTip="{Binding RoomTitle}" Margin="0,0,0,2" />
 
-                  <TextBlock Grid.Row="2" Grid.Column="0" Text="分区：" Style="{StaticResource MutedText}" />
-                  <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding RoomCategory}" Style="{StaticResource ValueLine}"
+                  <TextBlock Grid.Row="3" Grid.Column="0" Text="分区：" Style="{StaticResource MutedText}" />
+                  <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding RoomCategory}" Style="{StaticResource ValueLine}"
                              ToolTip="{Binding RoomCategory}" />
                 </Grid>
-
-                <TextBlock Text="当前线路卡顿会自动切换到下一条候选" Style="{StaticResource MutedText}"
-                           TextWrapping="Wrap" Margin="0,6,0,0" />
               </StackPanel>
             </Border>
 
             <!-- ===== 录制 ===== -->
             <TextBlock Text="直播回放录制" Style="{StaticResource SectionTitle}" Margin="0,14,0,4" />
 
-            <TextBlock Text="想拿最高画质（B站 4K/HDR、虎牙蓝光20M 等）需要在设置里填写对应平台的 Cookie。（设置 → 高级 → 账号）"
+            <TextBlock Text="原样保存直播流，不转码、自动分段、断流重连。需要最高画质请在设置中填写对应平台的 Cookie。"
                        Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,0,0,8" />
 
             <StackPanel Orientation="Horizontal" Margin="0,2,0,0">

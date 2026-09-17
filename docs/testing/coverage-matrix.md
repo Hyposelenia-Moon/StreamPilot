@@ -51,7 +51,7 @@
 | `Core.Parsers.PlatformParserBase` | 房间号格式校验、域名校验（含子域/非法 scheme）、平台不匹配、空候选→未开播、未预期异常包装、取消透传、从链接提取房间号 | `ParserBaseTests`（7 个） |
 | `Parsers.Bilibili.IsRiskControlCode` / `Parsers.Yy.ParseRoomPage` / `Parsers.Bigo.CollectCandidates` | 风控码与"房间不存在"区分、YY 房间页字段抽取（含短号→`sid` 与 404 页）、Bigo"有地址即开播"与需要登录时的 `Rejected` 归类 | `PlatformParserTests`（7 个） |
 | 各平台画质档位（`QualityOption`） | 档位列表构造（官方档位名 / 码率 / HDR 标记）、按 `PreferredQualityKey` 取档、未知键回退最高档、单档平台只给一项 | `PlatformParserTests`（画质用例，见文件内 `[TestMethod]`） |
-| `Recording.SegmentPolicy` | 按字节/时长切分、未开始与时间戳回退、非法配置归一化、最小字节判定 | `SegmentPolicyTests`（5 个） |
+| `Recording.SegmentPolicy` | 按字节/时长切分、未开始与时间戳回退、非法配置归一化、超大取值不被夹取（无上限）、默认值 10 GiB / 480 分钟、最小字节判定 | `SegmentPolicyTests`（8 个） |
 | `Recording.RecordingFileNaming` | 命名格式、非法字符与路径穿越、超长截断、扩展名映射、冲突不覆盖、元数据路径 | `RecordingFileNamingTests`（6 个） |
 | `Recording.Flv.FlvTagReader` / `FlvTimestamp` | 正常序列、关键帧判定、签名非法、未知标签类型、载荷截断、时间戳边界与截断、缓冲区过短 | `FlvTagReaderTests`（7 个） |
 | `Recording.Flv.FlvSegmentWriter` | 文件头字节、载荷逐字节一致、时间戳重定基、序列头重放、分片元数据、释放后拒绝写入 | `FlvSegmentWriterTests`（6 个） |
