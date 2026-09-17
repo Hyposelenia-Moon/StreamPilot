@@ -100,6 +100,10 @@
     const rows = groupRows(boxes);
     return {
       controlsHeight: Math.round(anchor.height),
+      lines: countVisualLines(controls),
+      fsSameLineAsPlay: isSameVisualLine(
+        document.getElementById('fsBtn'),
+        document.getElementById('playBtn')),
       rows: rows.map(function rowIds(row) {
         return row.map(function id(item) {
           return item.id + '(' + item.width + ')';
@@ -108,6 +112,46 @@
       collisions: collisions,
       statusOverflow: Math.max(0, statusLine.scrollWidth - Math.round(statusLine.getBoundingClientRect().width)),
     };
+  }
+
+  /**
+   * 取元素的纵向中心（相对视口）。
+   *
+   * `#controls` 用 `align-items:center`，同一行里高度不同的元素 `top` 并不相等，
+   * 直接按 `top` 归行会得出错误的"多行"结论，因此判断是否同行的口径必须是中心线。
+   * @param {Element} element 目标元素。
+   * @returns {number} 纵向中心像素值。
+   */
+  function centerY(element) {
+    const rect = element.getBoundingClientRect();
+    return (rect.top + rect.bottom) / 2;
+  }
+
+  /**
+   * 判断两个控件是否位于同一视觉行。
+   * @param {Element} a 控件 A。
+   * @param {Element} b 控件 B。
+   * @returns {boolean} 中心线差值在容差内则为 true。
+   */
+  function isSameVisualLine(a, b) {
+    return a !== null && b !== null && Math.abs(centerY(a) - centerY(b)) <= SAME_ROW_TOLERANCE_PX;
+  }
+
+  /**
+   * 统计控件区实际占用的视觉行数（按中心线归并）。
+   * @param {Element} controls 控制条容器。
+   * @returns {number} 视觉行数。
+   */
+  function countVisualLines(controls) {
+    const centers = Array.prototype.map.call(controls.children, function toCenter(child) {
+      return Math.round(centerY(child));
+    }).sort(function ascending(a, b) {
+      return a - b;
+    });
+
+    return centers.reduce(function pushLine(count, center, index) {
+      return index > 0 && center - centers[index - 1] <= SAME_ROW_TOLERANCE_PX ? count : count + 1;
+    }, 0);
   }
 
   /** 采集结果并按"宽度 文案 状态行长度"逐行输出到 #probeOut。 */

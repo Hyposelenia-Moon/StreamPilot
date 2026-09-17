@@ -102,11 +102,10 @@
       appearance: none;
     }
 
-    /* range 滑块：加大对比度，避免在某些主题下"看不见" */
+    /* range 滑块：加大对比度，避免在某些主题下"看不见"（音量条宽度见 #volume） */
     input[type="range"] {
       padding: 0;
       height: 20px;
-      width: 140px;
       background: transparent;
       border: none;
       accent-color: #2f6feb;
@@ -369,6 +368,16 @@
 
     #statusLine[data-level="error"] {
       color: #c0392b;
+    }
+
+    /*
+      音量条固定 90px：它是控制条里最宽的单件（原 140px）。
+      缩短后控制条在 860px 宽的窗口起就只占一行，「全屏」与其它按钮同行；
+      改回更宽会让「全屏」被挤到下一行、看起来像右下角多出一块。
+      音量读数另有 #volumeLabel 文字，缩短滑块不影响读数。
+    */
+    #volume {
+      width: 90px;
     }
 
     #volumeLabel {

@@ -679,6 +679,23 @@ test('追帧按钮必须预留最长文案的固定宽度，文案切换不再�
   assert.equal(/border:\s*1px\s+solid/.test(extractRule(html, 'button')), true);
 });
 
+/** 音量条宽度上限（像素）。超过它，「全屏」就会在常见窗口宽度下被挤到下一行。 */
+const MAX_VOLUME_SLIDER_WIDTH_PX = 90;
+
+test('音量条必须足够短，「全屏」才能留在同一行', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+  const volumeRule = extractRule(html, '#volume');
+  const volumeWidthPx = Number(/width:\s*(\d+(?:\.\d+)?)px/.exec(volumeRule)?.[1]);
+
+  // 实测依据（无头 Edge 真实渲染，node tests/web/layout-probe/run-probe.js）：
+  // 音量条 140px 时，900px 窗口下控制条仍要两行、「全屏」被挤到第二行；
+  // 缩到 90px 后 860px 起即为单行且无重叠。锁住上限，防止宽度被调宽导致复发。
+  assert.ok(Number.isFinite(volumeWidthPx), '#volume 必须显式声明宽度，否则滑块会按浏览器默认宽度撑开控制条');
+  assert.ok(
+    volumeWidthPx <= MAX_VOLUME_SLIDER_WIDTH_PX,
+    '音量条宽度 ' + volumeWidthPx + 'px 不得超过 ' + MAX_VOLUME_SLIDER_WIDTH_PX + 'px，否则「全屏」会被挤到下一行');
+});
+
 test('底部控制条允许换行且不得用绝对定位把控件叠在一起', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
   const controlsRule = extractRule(html, '#controls');

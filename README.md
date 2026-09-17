@@ -214,12 +214,12 @@ StreamPilot/
 | `dotnet build StreamPilot.slnx -c Debug` | **0 警告 / 0 错误**（`TreatWarningsAsErrors=true`） |
 | `build\test.ps1` | **四个阶段全部通过** |
 | C# 单元测试 | **131 / 131 通过**（`tests/StreamPilot.Tests/Cases/*.cs`） |
-| 前端回归测试 | **50 / 50 通过**（`tests/web/player-core.test.js`，`node --test`） |
+| 前端回归测试 | **51 / 51 通过**（`tests/web/player-core.test.js`，`node --test`） |
 | 静态红线自检 | 通过 |
 | `node build/analyze-csharp.mjs` | **101 文件 / 23282 行 / 156 类型 / 749 方法**，未发现结构性问题 |
 | 发布产物 | `StreamPilot-windows-v0.1.0.zip`（附校验值文件，见 `build\publish.ps1`） |
 | 真实房间实测（B站 814） | 解析 12 条候选；**经真实中继 12/12 返回媒体数据**（FLV 文件头、HLS 播放列表改写后的切片、TS 同步字节） |
-| 播放页控制条几何实测 | 无头 Edge 渲染真实页面（`node tests/web/layout-probe/run-probe.js`），900→480 px 逐档切换「追帧 / 停止追帧」与长状态行：**0 处重叠、控件行数不变** |
+| 播放页控制条几何实测 | 无头 Edge 渲染真实页面（`node tests/web/layout-probe/run-probe.js`），1280→480 px 逐档切换「追帧 / 停止追帧」与长状态行：**0 处重叠**；音量条缩短后 **860 px 起「全屏」与其它按钮同行（单行）** |
 
 > 真实房间实测的做法：将解析出的候选线路注册进真实中继（`BridgeHost`）后，像播放页一样只请求本机中继地址完成，覆盖「解析 → 中继 → CDN → 媒体字节」整条链路；它不等于 WebView2 中出画，出画仍需在真机上肉眼确认。
 
