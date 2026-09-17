@@ -7,6 +7,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Input;
+using StreamPilot.App.Services;
 using StreamPilot.Core.Configuration;
 using StreamPilot.Core.Logging;
 using StreamPilot.Core.Models;
@@ -64,10 +65,14 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     private readonly IPlaybackBridge _bridge;
     private readonly IStructuredLogger _logger;
     private readonly Action<StreamPilotOptions> _saveOptions;
+    private readonly PresetStore _presetStore;
+    private readonly Func<string?, string?> _resolveMpvPath;
+    private readonly Func<SettingsViewModel, bool> _showSettingsDialog;
     private readonly string _moduleName = "App.Shell";
 
     private StreamPilotOptions _options;
-    private PlatformId _selectedPlatform;
+    private PlatformOption _selectedPlatformOption = null!;
+    private RoomPreset? _selectedPreset;
     private string _roomInput = string.Empty;
     private int _extremeTargetMs;
     private int _volume;
@@ -95,8 +100,10 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         _logger = dependencies.Logger;
         _options = dependencies.Options;
         _saveOptions = dependencies.SaveOptions;
+        _presetStore = dependencies.Presets;
+        _resolveMpvPath = dependencies.ResolveMpvPath;
+        _showSettingsDialog = dependencies.ShowSettingsDialog;
 
-        _selectedPlatform = _options.LastPlatform == PlatformId.Unknown ? PlatformId.Bilibili : _options.LastPlatform;
         _roomInput = _options.LastRoomInput;
         _extremeTargetMs = NormalizeTarget(_options.Playback.ExtremeTargetMs);
         _volume = Math.Clamp(_options.Playback.Volume, 0, 100);
@@ -111,6 +118,18 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             new PlatformOption(PlatformId.Bigo, "Bigo Live", "https://www.bigo.tv/"),
         ];
 
+        // 按上次使用的平台预选；找不到时回落到第一个，避免 SelectedItem 绑定拿不到实例。
+        PlatformId initialPlatform = _options.LastPlatform == PlatformId.Unknown ? PlatformId.Bilibili : _options.LastPlatform;
+        _selectedPlatformOption = Platforms.FirstOrDefault(option => option.Id == initialPlatform) ?? Platforms[0];
+
+        foreach (RoomPreset preset in _presetStore.Items)
+        {
+            Presets.Add(preset);
+        }
+
+        SelectedPreset = Presets.Count > 0 ? Presets[0] : null;
+        UpdateRoomUrlHint();
+
         ResolveCommand = new AsyncRelayCommand(_ => ResolveAsync(), HandleCommandErrorAsync, _ => !IsBusy);
         PlayCommand = new AsyncRelayCommand(_ => PlayAsync(), HandleCommandErrorAsync, _ => _currentRoom is not null && !IsBusy);
         StopCommand = new RelayCommand(_ => StopPlayback(), _ => _isPlayerReady);
@@ -121,7 +140,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         SetTargetCommand = new RelayCommand(parameter => SetTarget(parameter), parameter => parameter is not null);
         OpenRecordingFolderCommand = new RelayCommand(_ => OpenRecordingFolder());
         OpenLogFolderCommand = new RelayCommand(_ => OpenFolder(AppPaths.LogDirectory));
-        SaveSettingsCommand = new RelayCommand(_ => ApplySettings());
+        OpenSettingsCommand = new RelayCommand(_ => OpenSettings());
+        ApplyPresetCommand = new AsyncRelayCommand(parameter => ApplyPresetAsync(parameter), HandleCommandErrorAsync, parameter => parameter is not null);
+        DeletePresetCommand = new RelayCommand(parameter => DeletePreset(parameter), parameter => parameter is not null);
     }
 
     /// <summary>视图模型依赖集合（由组合根构造）。</summary>
@@ -129,17 +150,23 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <param name="Playback">播放编排服务。</param>
     /// <param name="Recording">录制编排服务。</param>
     /// <param name="Bridge">桥接服务。</param>
+    /// <param name="Presets">预设存储。</param>
+    /// <param name="ResolveMpvPath">mpv 路径解析回调（返回绝对路径，未找到返回 null）。</param>
     /// <param name="Logger">结构化日志。</param>
     /// <param name="Options">初始配置。</param>
     /// <param name="SaveOptions">配置保存回调。</param>
+    /// <param name="ShowSettingsDialog">打开设置窗口的回调（返回 true 表示用户点了保存）。</param>
     public sealed record Dependencies(
         IRoomResolver Resolver,
         IPlaybackCoordinator Playback,
         IRecordingCoordinator Recording,
         IPlaybackBridge Bridge,
+        PresetStore Presets,
+        Func<string?, string?> ResolveMpvPath,
         IStructuredLogger Logger,
         StreamPilotOptions Options,
-        Action<StreamPilotOptions> SaveOptions);
+        Action<StreamPilotOptions> SaveOptions,
+        Func<SettingsViewModel, bool> ShowSettingsDialog);
 
     /// <summary>页面消息到达事件（宿主 → 页面方向的发送由该事件提供通道）。</summary>
     public event EventHandler<string>? SendMessageRequested;
@@ -186,38 +213,60 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>打开日志目录命令。</summary>
     public ICommand OpenLogFolderCommand { get; }
 
-    /// <summary>保存设置命令。</summary>
-    public ICommand SaveSettingsCommand { get; }
+    /// <summary>打开设置窗口命令。</summary>
+    public ICommand OpenSettingsCommand { get; }
 
-    /// <summary>当前选中的平台。</summary>
-    public PlatformId SelectedPlatform
+    /// <summary>应用预设命令（参数为预设对象）。</summary>
+    public ICommand ApplyPresetCommand { get; }
+
+    /// <summary>删除预设命令（参数为预设对象）。</summary>
+    public ICommand DeletePresetCommand { get; }
+
+    /// <summary>预设列表（下拉可选、可删除）。</summary>
+    public ObservableCollection<RoomPreset> Presets { get; } = [];
+
+    /// <summary>当前选中的预设。</summary>
+    public RoomPreset? SelectedPreset
     {
-        get => _selectedPlatform;
+        get => _selectedPreset;
         set
         {
-            if (SetField(ref _selectedPlatform, value))
+            if (SetField(ref _selectedPreset, value))
             {
-                OnPropertyChanged(nameof(RoomUrlHint));
+                OnPropertyChanged(nameof(HasSelectedPreset));
             }
         }
     }
+
+    /// <summary>是否存在选中预设（用于按钮可用性判断）。</summary>
+    public bool HasSelectedPreset => _selectedPreset is not null;
+
+    /// <summary>当前选中的平台选项（下拉直接绑定对象，避免 SelectedValue 更新时序问题）。</summary>
+    public PlatformOption SelectedPlatformOption
+    {
+        get => _selectedPlatformOption;
+        set
+        {
+            if (value is null)
+            {
+                return;
+            }
+
+            if (SetField(ref _selectedPlatformOption, value))
+            {
+                OnPropertyChanged(nameof(SelectedPlatform));
+                UpdateRoomUrlHint();
+            }
+        }
+    }
+
+    /// <summary>当前选中的平台标识。</summary>
+    public PlatformId SelectedPlatform => _selectedPlatformOption.Id;
 
     /// <summary>当前平台的链接前缀提示。</summary>
-    public string RoomUrlHint
-    {
-        get
-        {
-            foreach (PlatformOption option in Platforms)
-            {
-                if (option.Id == _selectedPlatform)
-                {
-                    return "支持房间号或链接，例如：" + option.UrlPrefix;
-                }
-            }
+    public string RoomUrlHint => "支持房间号或链接，例如：" + _selectedPlatformOption.UrlPrefix;
 
-            return "支持房间号或链接。";
-        }
-    }
+    private void UpdateRoomUrlHint() => OnPropertyChanged(nameof(RoomUrlHint));
 
     /// <summary>房间号或链接输入。</summary>
     public string RoomInput
@@ -331,56 +380,16 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         ? "桥接：" + _bridge.BaseAddress
         : "桥接：未启动（mpv 外挂播放不可用）";
 
-    /// <summary>录制输出目录（设置面板展示用）。</summary>
+    /// <summary>刷新桥接状态文本（桥接在窗口显示之后才启动，需要主动通知一次）。</summary>
+    public void RefreshBridgeStatus() => OnPropertyChanged(nameof(BridgeStatus));
+
+    /// <summary>录制输出目录（主界面展示用）。</summary>
     public string RecordingDirectory
     {
         get
         {
             string configured = _options.Recording.OutputDirectory;
             return string.IsNullOrWhiteSpace(configured) ? AppPaths.DefaultRecordingDirectory : configured;
-        }
-    }
-
-    /// <summary>B站 Cookie（设置面板；仅本地保存，禁止写日志）。</summary>
-    public string BilibiliCookie
-    {
-        get => _options.Platforms.BilibiliCookie;
-        set
-        {
-            _options = _options with
-            {
-                Platforms = _options.Platforms with { BilibiliCookie = value },
-            };
-            OnPropertyChanged();
-        }
-    }
-
-    /// <summary>mpv 路径（设置面板）。</summary>
-    public string MpvPath
-    {
-        get => _options.Playback.MpvPath;
-        set
-        {
-            _options = _options with
-            {
-                Playback = _options.Playback with { MpvPath = value },
-            };
-            OnPropertyChanged();
-        }
-    }
-
-    /// <summary>录制输出目录（设置面板可编辑）。</summary>
-    public string OutputDirectoryInput
-    {
-        get => _options.Recording.OutputDirectory;
-        set
-        {
-            _options = _options with
-            {
-                Recording = _options.Recording with { OutputDirectory = value },
-            };
-            OnPropertyChanged();
-            OnPropertyChanged(nameof(RecordingDirectory));
         }
     }
 
@@ -431,7 +440,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                     StatusMessage = "播放器已就绪。";
                     AppendLog("播放器内核已就绪（HEVC: " + ReadFlag(root, "hevc") + "，H.264: " + ReadFlag(root, "avc") + "）");
                     SendBridgeInfo();
-                    SendPresets();
                     SendToPlayer(new { type = "volume", value = _volume });
                     break;
 
@@ -441,15 +449,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
                 case PlayerStatusType:
                     StatusMessage = message.Length == 0 ? StatusMessage : message;
-                    if (message.Contains(PlayerPresetRequestMarker, StringComparison.Ordinal))
-                    {
-                        SendPresets();
-                    }
-                    else
-                    {
-                        AppendLog(message);
-                    }
-
+                    AppendLog(message);
                     break;
 
                 case PlayerErrorType:
@@ -722,8 +722,8 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             || input.Contains('/', StringComparison.Ordinal);
 
         return looksLikeUrl
-            ? RoomQuery.FromUrl(_selectedPlatform, input)
-            : RoomQuery.FromRoomId(_selectedPlatform, input) with
+            ? RoomQuery.FromUrl(SelectedPlatform, input)
+            : RoomQuery.FromRoomId(SelectedPlatform, input) with
             {
                 BilibiliCookie = _options.Platforms.BilibiliCookie,
             };
@@ -755,28 +755,115 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         AppendLog("追帧档位切换为 " + ExtremeTargetMs + " ms（下次播放生效）");
     }
 
-    private void ApplySettings()
+    /// <summary>打开独立的设置窗口，保存后立即生效并把新音量下发给播放页。</summary>
+    private void OpenSettings()
     {
-        PersistPlaybackSettings();
-        _options = _options with
+        try
         {
-            Recording = _options.Recording with
+            SettingsViewModel settings = new(_presetStore, _resolveMpvPath, _logger);
+            settings.Load(_options);
+            AppendLog("打开设置窗口。");
+
+            if (!_showSettingsDialog(settings))
             {
-                OutputDirectory = _options.Recording.OutputDirectory.Trim(),
-            },
-        };
-        _saveOptions(_options);
-        OnPropertyChanged(nameof(RecordingDirectory));
-        StatusMessage = "设置已保存。";
-        AppendLog("设置已保存");
-        SendToPlayer(new { type = "volume", value = _volume });
+                StatusMessage = "已取消设置。";
+                return;
+            }
+
+            if (!settings.TryBuildOptions(_options, out StreamPilotOptions updated))
+            {
+                StatusMessage = settings.StatusMessage;
+                AppendLog("设置未保存：" + settings.StatusMessage);
+                return;
+            }
+
+            _options = updated;
+            _saveOptions(_options);
+            settings.SavePresets();
+
+            _extremeTargetMs = NormalizeTarget(_options.Playback.ExtremeTargetMs);
+            _volume = Math.Clamp(_options.Playback.Volume, 0, 100);
+            OnPropertyChanged(nameof(ExtremeTargetMs));
+            OnPropertyChanged(nameof(IsTarget150));
+            OnPropertyChanged(nameof(IsTarget200));
+            OnPropertyChanged(nameof(IsTarget250));
+            OnPropertyChanged(nameof(Volume));
+            OnPropertyChanged(nameof(RecordingDirectory));
+
+            RefreshPresets();
+            SendToPlayer(new { type = "volume", value = _volume });
+
+            StatusMessage = "设置已保存。";
+            AppendLog("设置已保存");
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
+        {
+            _logger.LogError(LogLevel.Error, _moduleName, "打开或保存设置失败。", exception);
+            StatusMessage = "设置操作失败：" + exception.Message;
+            AppendLog("设置操作失败：" + exception.Message);
+        }
+    }
+
+    /// <summary>刷新预设列表（以存储内容为准）。</summary>
+    private void RefreshPresets()
+    {
+        Presets.Clear();
+        foreach (RoomPreset preset in _presetStore.Items)
+        {
+            Presets.Add(preset);
+        }
+
+        SelectedPreset = Presets.Count > 0 ? Presets[0] : null;
+    }
+
+    /// <summary>选中预设后填入平台与房间号并立即解析。</summary>
+    /// <param name="parameter">预设对象。</param>
+    /// <returns>异步任务。</returns>
+    private async Task ApplyPresetAsync(object? parameter)
+    {
+        if (parameter is not RoomPreset preset)
+        {
+            return;
+        }
+
+        PlatformOption? option = Platforms.FirstOrDefault(item => item.Id == preset.Platform);
+        if (option is not null)
+        {
+            SelectedPlatformOption = option;
+        }
+
+        RoomInput = preset.RoomInput;
+        AppendLog("载入预设：" + preset.Name);
+        await ResolveAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>删除预设（同时更新存储）。</summary>
+    /// <param name="parameter">预设对象。</param>
+    private void DeletePreset(object? parameter)
+    {
+        if (parameter is not RoomPreset preset)
+        {
+            return;
+        }
+
+        if (_presetStore.Remove(preset.Name))
+        {
+            AppendLog("已删除预设：" + preset.Name);
+        }
+        else
+        {
+            AppendLog("删除预设失败：" + preset.Name);
+        }
+
+        RefreshPresets();
+        StatusMessage = "已删除预设「" + preset.Name + "」。";
     }
 
     private void PersistPlaybackSettings()
     {
         _options = _options with
         {
-            LastPlatform = _selectedPlatform,
+            LastPlatform = SelectedPlatform,
             LastRoomInput = _roomInput,
             Playback = _options.Playback with
             {
@@ -791,7 +878,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     {
         _options = _options with
         {
-            LastPlatform = _selectedPlatform,
+            LastPlatform = SelectedPlatform,
             LastRoomInput = _roomInput,
         };
         _saveOptions(_options);
@@ -803,16 +890,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         {
             type = HostBridgeInfoType,
             baseAddress = _bridge.BaseAddress,
-        });
-    }
-
-    private void SendPresets()
-    {
-        List<object> items = [];
-        SendToPlayer(new
-        {
-            type = HostPresetsType,
-            items,
         });
     }
 

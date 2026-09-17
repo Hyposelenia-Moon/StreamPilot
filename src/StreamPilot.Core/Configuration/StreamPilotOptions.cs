@@ -58,8 +58,11 @@ public sealed record PlaybackOptions
     /// <summary>mpv 可执行文件路径；为空时按工具查找顺序自动探测。</summary>
     public string MpvPath { get; init; } = string.Empty;
 
-    /// <summary>mpv 附加参数（在默认参数之后追加）。</summary>
-    public string MpvExtraArguments { get; init; } = string.Empty;
+    /// <summary>mpv 启动参数（在默认参数之后追加，按空格分隔）。</summary>
+    public string MpvArguments { get; init; } = string.Empty;
+
+    /// <summary>解析成功后是否自动开始播放。</summary>
+    public bool AutoPlayOnResolve { get; init; } = true;
 }
 
 /// <summary>录制设置。</summary>

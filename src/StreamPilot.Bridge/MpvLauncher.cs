@@ -69,10 +69,14 @@ public sealed class MpvLauncher
     /// <returns>可执行文件路径；未找到时返回 <see langword="null"/>。</returns>
     public string? ResolveExecutable(string? configuredPath)
     {
-        if (!string.IsNullOrWhiteSpace(configuredPath) && File.Exists(configuredPath))
+        // 配置里的路径允许是绝对路径、相对程序目录的路径，或仅文件名（在 PATH 中查找）。
+        foreach (string candidate in ExpandConfiguredPath(configuredPath))
         {
-            ResolvedPath = configuredPath;
-            return ResolvedPath;
+            if (File.Exists(candidate))
+            {
+                ResolvedPath = Path.GetFullPath(candidate);
+                return ResolvedPath;
+            }
         }
 
         foreach (string relative in FallbackRelativePaths)
@@ -155,7 +159,7 @@ public sealed class MpvLauncher
             arguments.Add("--http-header-fields=Referer: " + referer);
         }
 
-        foreach (string extra in SplitExtraArguments(playbackOptions.MpvExtraArguments))
+        foreach (string extra in SplitExtraArguments(playbackOptions.MpvArguments))
         {
             arguments.Add(extra);
         }
@@ -202,6 +206,35 @@ public sealed class MpvLauncher
 
     private static string BuildTitle(string? title) =>
         string.IsNullOrWhiteSpace(title) ? "StreamPilot" : "StreamPilot - " + title;
+
+    /// <summary>
+    /// 展开配置中的 mpv 路径：支持绝对路径、相对程序目录的路径、以及仅文件名（由 PATH 查找）。
+    /// </summary>
+    /// <param name="configuredPath">配置值，可为空。</param>
+    /// <returns>按优先级排列的候选路径。</returns>
+    private static IEnumerable<string> ExpandConfiguredPath(string? configuredPath)
+    {
+        if (string.IsNullOrWhiteSpace(configuredPath))
+        {
+            yield break;
+        }
+
+        string trimmed = configuredPath.Trim().Trim('"');
+        yield return trimmed;
+
+        if (Path.IsPathRooted(trimmed))
+        {
+            yield break;
+        }
+
+        yield return Path.Combine(AppPaths.ApplicationDirectory, trimmed);
+
+        string? fromPath = FindOnPath(trimmed);
+        if (fromPath is not null)
+        {
+            yield return fromPath;
+        }
+    }
 
     private static IEnumerable<string> SplitExtraArguments(string? extra)
     {

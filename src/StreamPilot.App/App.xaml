@@ -348,6 +348,71 @@
         </Setter>
       </Style>
 
+      <!-- 表格：表头与单元格默认是系统浅色主题，必须显式覆盖 -->
+      <Style TargetType="DataGrid">
+        <Setter Property="Background" Value="#141A22" />
+        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+        <Setter Property="RowBackground" Value="#141A22" />
+        <Setter Property="AlternatingRowBackground" Value="#171D25" />
+        <Setter Property="HorizontalGridLinesBrush" Value="{StaticResource BorderBrushSoft}" />
+        <Setter Property="VerticalGridLinesBrush" Value="{StaticResource BorderBrushSoft}" />
+        <Setter Property="RowHeaderWidth" Value="0" />
+      </Style>
+
+      <Style TargetType="DataGridColumnHeader">
+        <Setter Property="Background" Value="{StaticResource ControlBackgroundBrush}" />
+        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+        <Setter Property="BorderThickness" Value="0,0,1,1" />
+        <Setter Property="Padding" Value="8,6" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="HorizontalContentAlignment" Value="Left" />
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="DataGridColumnHeader">
+              <Border Background="{TemplateBinding Background}"
+                      BorderBrush="{TemplateBinding BorderBrush}"
+                      BorderThickness="{TemplateBinding BorderThickness}"
+                      Padding="{TemplateBinding Padding}">
+                <ContentPresenter VerticalAlignment="Center" HorizontalAlignment="Left" />
+              </Border>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+
+      <Style TargetType="DataGridRow">
+        <Setter Property="Background" Value="#141A22" />
+        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      </Style>
+
+      <Style TargetType="DataGridCell">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+        <Setter Property="BorderBrush" Value="Transparent" />
+        <Setter Property="Padding" Value="6,4" />
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="DataGridCell">
+              <Border x:Name="Root"
+                      Background="{TemplateBinding Background}"
+                      BorderBrush="{TemplateBinding BorderBrush}"
+                      BorderThickness="{TemplateBinding BorderThickness}"
+                      Padding="{TemplateBinding Padding}">
+                <ContentPresenter VerticalAlignment="Center" />
+              </Border>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsSelected" Value="True">
+                  <Setter TargetName="Root" Property="Background" Value="{StaticResource SelectionBackgroundBrush}" />
+                  <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+                </Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+
       <!-- 悬浮提示 -->
       <Style TargetType="ToolTip">
         <Setter Property="Background" Value="{StaticResource ControlBackgroundBrush}" />

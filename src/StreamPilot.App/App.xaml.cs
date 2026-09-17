@@ -20,6 +20,9 @@ using StreamPilot.Parsers.Douyu;
 using StreamPilot.Parsers.Huya;
 using StreamPilot.Parsers.Yy;
 
+using WpfApplication = System.Windows.Application;
+using WpfMessageBox = System.Windows.MessageBox;
+
 namespace StreamPilot.App;
 
 /// <summary>
@@ -29,7 +32,7 @@ namespace StreamPilot.App;
 /// 组合根是唯一允许引用全部工程的位置（见 docs/adr/0002-architecture-layering.md）。
 /// 所有耗时初始化都在窗口显示后进行，避免在 UI 线程执行阻塞操作。
 /// </remarks>
-public partial class App : Application
+public partial class App : WpfApplication
 {
     /// <summary>JSON 序列化设置（宿主 ↔ 页面消息与配置统一使用 camelCase）。</summary>
     internal static readonly JsonSerializerOptions JsonOptions = new()
@@ -44,6 +47,8 @@ public partial class App : Application
     private ServiceRegistry? _services;
     private BridgeHost? _bridge;
     private HttpClientFactory? _httpClients;
+    private PresetStore? _presetStore;
+    private MpvLauncher? _mpvLauncher;
 
     /// <summary>当前生效的配置（供 UI 与桥接读取最新值）。</summary>
     internal StreamPilotOptions Options => _optionsStore?.Current ?? new StreamPilotOptions();
@@ -79,19 +84,22 @@ public partial class App : Application
             _services = BuildServices(options);
 
             WebPlayerHost playerHost = new(_logger);
+            ShellViewModel shell = new(BuildShellDependencies(options));
             MainWindow window = new(playerHost)
             {
-                DataContext = new ShellViewModel(BuildShellDependencies(options)),
+                DataContext = shell,
             };
             MainWindow = window;
             window.Show();
 
             StartBridgeIfEnabled(options);
+            shell.RefreshBridgeStatus();
+            TryPersistDetectedMpvPath();
         }
         catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
         {
             _logger.LogError(LogLevel.Error, "App", "启动失败。", exception);
-            MessageBox.Show(
+            WpfMessageBox.Show(
                 "StreamPilot 启动失败：" + exception.Message + Environment.NewLine + "详细日志位于：" + AppPaths.LogDirectory,
                 "StreamPilot",
                 MessageBoxButton.OK,
@@ -131,9 +139,70 @@ public partial class App : Application
         Resolve<IPlaybackCoordinator>(),
         Resolve<IRecordingCoordinator>(),
         Resolve<IPlaybackBridge>(),
+        _presetStore!,
+        ResolveMpvPath,
         _logger,
         options,
-        SaveOptions);
+        SaveOptions,
+        ShowSettingsDialog);
+
+    /// <summary>解析 mpv 可执行文件路径；未指定时按默认顺序自动探测。</summary>
+    /// <param name="configuredPath">配置中的路径，可为空。</param>
+    /// <returns>绝对路径；未找到返回 <see langword="null"/>。</returns>
+    private string? ResolveMpvPath(string? configuredPath) =>
+        _mpvLauncher?.ResolveExecutable(configuredPath);
+
+    /// <summary>
+    /// 以模态方式打开设置窗口。
+    /// </summary>
+    /// <param name="settings">设置视图模型。</param>
+    /// <returns>用户点击保存返回 <see langword="true"/>。</returns>
+    private bool ShowSettingsDialog(SettingsViewModel settings)
+    {
+        SettingsWindow window = new(settings);
+        if (MainWindow is { } owner && !ReferenceEquals(owner, window))
+        {
+            window.Owner = owner;
+        }
+
+        return window.ShowDialog() == true;
+    }
+
+    /// <summary>
+    /// 启动时自动探测 mpv 并把绝对路径写回配置，避免用户手动填写。
+    /// </summary>
+    private void TryPersistDetectedMpvPath()
+    {
+        if (_mpvLauncher is null || _optionsStore is null)
+        {
+            return;
+        }
+
+        string? detected = _mpvLauncher.ResolveExecutable(_optionsStore.Current.Playback.MpvPath);
+        if (detected is null)
+        {
+            _logger.Warn("App", "未找到 mpv，外挂播放暂不可用。", new Dictionary<string, object?>
+            {
+                ["tools"] = AppPaths.ToolsDirectory,
+            });
+            return;
+        }
+
+        if (string.Equals(detected, _optionsStore.Current.Playback.MpvPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        StreamPilotOptions updated = _optionsStore.Current with
+        {
+            Playback = _optionsStore.Current.Playback with { MpvPath = detected },
+        };
+        _optionsStore.Save(updated);
+        _logger.Info("App", "已自动识别 mpv 路径。", new Dictionary<string, object?>
+        {
+            ["path"] = detected,
+        });
+    }
 
     private ServiceRegistry BuildServices(StreamPilotOptions options)
     {
@@ -143,6 +212,13 @@ public partial class App : Application
         // 日志与配置
         registry.RegisterInstance(_optionsStore!);
         registry.RegisterSingleton<IOptionsStore>(static context => context.GetRequired<JsonOptionsStore>());
+
+        // 用户数据：预设与 mpv 定位
+        _presetStore = new PresetStore(_logger);
+        _presetStore.Load();
+        registry.RegisterInstance(_presetStore);
+        _mpvLauncher = new MpvLauncher(_logger);
+        registry.RegisterInstance(_mpvLauncher);
 
         // HTTP
         HttpClientFactory factory = new(options.Network, _logger);

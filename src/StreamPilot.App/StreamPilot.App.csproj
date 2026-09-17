@@ -10,6 +10,10 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <!-- 仅用于设置窗口的"浏览文件/文件夹"对话框（OpenFileDialog / FolderBrowserDialog） -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <!-- WinForms 分析器要求 DPI 由项目属性统一配置（app.manifest 中仍保留 PerMonitorV2） -->
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <RootNamespace>StreamPilot.App</RootNamespace>
     <AssemblyName>StreamPilot</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>

@@ -1,0 +1,632 @@
+namespace StreamPilot.App.ViewModels;
+
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.CompilerServices;
+using System.Windows;
+using StreamPilot.App.Services;
+using StreamPilot.Core.Configuration;
+using StreamPilot.Core.Logging;
+using StreamPilot.Core.Models;
+using WinFormsDialogResult = System.Windows.Forms.DialogResult;
+using WinFormsFolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
+using WinFormsOpenFileDialog = System.Windows.Forms.OpenFileDialog;
+
+/// <summary>
+/// 设置窗口的视图模型：承载全部可编辑配置项、预设管理与 mpv 路径探测。
+/// </summary>
+/// <remarks>
+/// 只负责表单状态与校验，不做任何持久化（保存由调用方通过 <see cref="TryBuildOptions"/> 取回结果后写入），
+/// 因此"取消"天然不会产生副作用。
+/// </remarks>
+public sealed class SettingsViewModel : INotifyPropertyChanged
+{
+    private readonly PresetStore _presetStore;
+    private readonly Func<string?, string?> _resolveMpvPath;
+    private readonly IStructuredLogger _logger;
+    private readonly string _moduleName = "App.Settings";
+
+    private string _mpvPath = string.Empty;
+    private string _mpvArguments = string.Empty;
+    private bool _useLowLatencyMpvArguments = true;
+    private int _extremeTargetMs = PlaybackRequest.DefaultExtremeTargetMs;
+    private int _volume = 70;
+    private bool _autoPlayOnResolve = true;
+    private bool _autoLaunchMpv;
+    private string _bilibiliCookie = string.Empty;
+    private string _recordingDirectory = string.Empty;
+    private int _segmentMaxMinutes = 30;
+    private int _segmentMaxMegabytes = 1024;
+    private int _segmentMinMegabytes = 8;
+    private int _maxDurationMinutes = 360;
+    private int _stallTimeoutSeconds = 12;
+    private int _maxReconnectAttempts = 8;
+    private string _proxy = string.Empty;
+    private int _requestTimeoutSeconds = 8;
+    private int _maxAttempts = 3;
+    private string _userAgent = string.Empty;
+    private int _bridgePort = BridgeConstants.DefaultPort;
+    private bool _bridgeAutoStart = true;
+    private bool _verboseDiagnostics;
+    private int _logRetainDays = 5;
+    private string _statusMessage = string.Empty;
+    private PresetItem? _selectedPreset;
+
+    /// <summary>初始化设置视图模型。</summary>
+    /// <param name="presetStore">预设存储。</param>
+    /// <param name="resolveMpvPath">mpv 路径解析函数（返回解析后的绝对路径，未找到返回 <see langword="null"/>）。</param>
+    /// <param name="logger">结构化日志。</param>
+    public SettingsViewModel(PresetStore presetStore, Func<string?, string?> resolveMpvPath, IStructuredLogger logger)
+    {
+        ArgumentNullException.ThrowIfNull(presetStore);
+        ArgumentNullException.ThrowIfNull(resolveMpvPath);
+        ArgumentNullException.ThrowIfNull(logger);
+        _presetStore = presetStore;
+        _resolveMpvPath = resolveMpvPath;
+        _logger = logger;
+
+        Platforms = SettingsPlatforms.CreateOptions();
+        Presets = [];
+
+        BrowseMpvCommand = new RelayCommand(_ => BrowseMpv());
+        DetectMpvCommand = new RelayCommand(_ => DetectMpv());
+        ClearMpvCommand = new RelayCommand(_ => ClearMpv());
+        SetTargetCommand = new RelayCommand(parameter => SetTarget(parameter), parameter => parameter is not null);
+        AddPresetCommand = new RelayCommand(_ => AddPreset());
+        RemovePresetCommand = new RelayCommand(_ => RemovePreset(), _ => SelectedPreset is not null);
+        BrowseRecordingDirectoryCommand = new RelayCommand(_ => BrowseRecordingDirectory());
+        OpenConfigFolderCommand = new RelayCommand(_ => OpenFolder(Path.GetDirectoryName(AppPaths.ConfigFile) ?? AppPaths.UserDataDirectory));
+        OpenLogFolderCommand = new RelayCommand(_ => OpenFolder(AppPaths.LogDirectory));
+        OpenRecordingFolderCommand = new RelayCommand(_ => OpenFolder(EffectiveRecordingDirectory));
+    }
+
+    /// <inheritdoc />
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    /// <summary>可选平台列表。</summary>
+    public IReadOnlyList<PlatformOption> Platforms { get; }
+
+    /// <summary>预设列表（可编辑）。</summary>
+    public ObservableCollection<PresetItem> Presets { get; }
+
+    /// <summary>浏览 mpv 可执行文件。</summary>
+    public RelayCommand BrowseMpvCommand { get; }
+
+    /// <summary>自动探测 mpv 并填入绝对路径。</summary>
+    public RelayCommand DetectMpvCommand { get; }
+
+    /// <summary>清空 mpv 路径（回到自动探测）。</summary>
+    public RelayCommand ClearMpvCommand { get; }
+
+    /// <summary>设置追帧档位（参数为毫秒字符串）。</summary>
+    public RelayCommand SetTargetCommand { get; }
+
+    /// <summary>新增空白预设行。</summary>
+    public RelayCommand AddPresetCommand { get; }
+
+    /// <summary>删除选中预设。</summary>
+    public RelayCommand RemovePresetCommand { get; }
+
+    /// <summary>选择录制输出目录。</summary>
+    public RelayCommand BrowseRecordingDirectoryCommand { get; }
+
+    /// <summary>打开配置目录。</summary>
+    public RelayCommand OpenConfigFolderCommand { get; }
+
+    /// <summary>打开日志目录。</summary>
+    public RelayCommand OpenLogFolderCommand { get; }
+
+    /// <summary>打开录制目录。</summary>
+    public RelayCommand OpenRecordingFolderCommand { get; }
+
+    /// <summary>是否选中 150 ms 档。</summary>
+    public bool IsTarget150 => ExtremeTargetMs == PlaybackRequest.ExtremeTargetsMs[0];
+
+    /// <summary>是否选中 200 ms 档。</summary>
+    public bool IsTarget200 => ExtremeTargetMs == PlaybackRequest.ExtremeTargetsMs[1];
+
+    /// <summary>是否选中 250 ms 档。</summary>
+    public bool IsTarget250 => ExtremeTargetMs == PlaybackRequest.ExtremeTargetsMs[2];
+
+    /// <summary>实际生效的录制目录（留空时为默认目录）。</summary>
+    public string EffectiveRecordingDirectory =>
+        string.IsNullOrWhiteSpace(RecordingDirectory) ? AppPaths.DefaultRecordingDirectory : RecordingDirectory;
+
+    /// <summary>当前选中的预设行（用于删除）。</summary>
+    public PresetItem? SelectedPreset
+    {
+        get => _selectedPreset;
+        set
+        {
+            if (SetField(ref _selectedPreset, value))
+            {
+                RemovePresetCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    /// <summary>窗口底部状态提示。</summary>
+    public string StatusMessage
+    {
+        get => _statusMessage;
+        private set => SetField(ref _statusMessage, value);
+    }
+
+    /// <summary>mpv 可执行文件路径。</summary>
+    public string MpvPath
+    {
+        get => _mpvPath;
+        set => SetField(ref _mpvPath, value ?? string.Empty);
+    }
+
+    /// <summary>mpv 启动参数（空格分隔）。</summary>
+    public string MpvArguments
+    {
+        get => _mpvArguments;
+        set => SetField(ref _mpvArguments, value ?? string.Empty);
+    }
+
+    /// <summary>是否使用内置低延迟 mpv 参数。</summary>
+    public bool UseLowLatencyMpvArguments
+    {
+        get => _useLowLatencyMpvArguments;
+        set => SetField(ref _useLowLatencyMpvArguments, value);
+    }
+
+    /// <summary>默认追帧档位（毫秒）。</summary>
+    public int ExtremeTargetMs
+    {
+        get => _extremeTargetMs;
+        set
+        {
+            if (SetField(ref _extremeTargetMs, value))
+            {
+                OnPropertyChanged(nameof(IsTarget150));
+                OnPropertyChanged(nameof(IsTarget200));
+                OnPropertyChanged(nameof(IsTarget250));
+            }
+        }
+    }
+
+    /// <summary>默认音量。</summary>
+    public int Volume
+    {
+        get => _volume;
+        set => SetField(ref _volume, value);
+    }
+
+    /// <summary>解析成功后自动播放。</summary>
+    public bool AutoPlayOnResolve
+    {
+        get => _autoPlayOnResolve;
+        set => SetField(ref _autoPlayOnResolve, value);
+    }
+
+    /// <summary>解析成功后自动外挂 mpv。</summary>
+    public bool AutoLaunchMpv
+    {
+        get => _autoLaunchMpv;
+        set => SetField(ref _autoLaunchMpv, value);
+    }
+
+    /// <summary>B站 Cookie（可留空）。</summary>
+    public string BilibiliCookie
+    {
+        get => _bilibiliCookie;
+        set => SetField(ref _bilibiliCookie, value ?? string.Empty);
+    }
+
+    /// <summary>录制输出根目录。</summary>
+    public string RecordingDirectory
+    {
+        get => _recordingDirectory;
+        set => SetField(ref _recordingDirectory, value ?? string.Empty);
+    }
+
+    /// <summary>分片时长上限（分钟）。</summary>
+    public int SegmentMaxMinutes
+    {
+        get => _segmentMaxMinutes;
+        set => SetField(ref _segmentMaxMinutes, value);
+    }
+
+    /// <summary>分片大小上限（MiB）。</summary>
+    public int SegmentMaxMegabytes
+    {
+        get => _segmentMaxMegabytes;
+        set => SetField(ref _segmentMaxMegabytes, value);
+    }
+
+    /// <summary>分片最小字节数（MiB），避免切出大量小文件。</summary>
+    public int SegmentMinMegabytes
+    {
+        get => _segmentMinMegabytes;
+        set => SetField(ref _segmentMinMegabytes, value);
+    }
+
+    /// <summary>最长录制时长（分钟）。</summary>
+    public int MaxDurationMinutes
+    {
+        get => _maxDurationMinutes;
+        set => SetField(ref _maxDurationMinutes, value);
+    }
+
+    /// <summary>断流判定超时（秒）。</summary>
+    public int StallTimeoutSeconds
+    {
+        get => _stallTimeoutSeconds;
+        set => SetField(ref _stallTimeoutSeconds, value);
+    }
+
+    /// <summary>最大重连次数。</summary>
+    public int MaxReconnectAttempts
+    {
+        get => _maxReconnectAttempts;
+        set => SetField(ref _maxReconnectAttempts, value);
+    }
+
+    /// <summary>HTTP 代理地址（留空表示不使用）。</summary>
+    public string Proxy
+    {
+        get => _proxy;
+        set => SetField(ref _proxy, value ?? string.Empty);
+    }
+
+    /// <summary>HTTP 请求超时（秒）。</summary>
+    public int RequestTimeoutSeconds
+    {
+        get => _requestTimeoutSeconds;
+        set => SetField(ref _requestTimeoutSeconds, value);
+    }
+
+    /// <summary>HTTP 最大尝试次数（含首次）。</summary>
+    public int MaxAttempts
+    {
+        get => _maxAttempts;
+        set => SetField(ref _maxAttempts, value);
+    }
+
+    /// <summary>自定义 User-Agent（留空使用内置值）。</summary>
+    public string UserAgent
+    {
+        get => _userAgent;
+        set => SetField(ref _userAgent, value ?? string.Empty);
+    }
+
+    /// <summary>桥接服务首选端口。</summary>
+    public int BridgePort
+    {
+        get => _bridgePort;
+        set => SetField(ref _bridgePort, value);
+    }
+
+    /// <summary>启动时自动开启桥接服务。</summary>
+    public bool BridgeAutoStart
+    {
+        get => _bridgeAutoStart;
+        set => SetField(ref _bridgeAutoStart, value);
+    }
+
+    /// <summary>是否记录 Trace 级日志。</summary>
+    public bool VerboseDiagnostics
+    {
+        get => _verboseDiagnostics;
+        set => SetField(ref _verboseDiagnostics, value);
+    }
+
+    /// <summary>日志保留文件个数。</summary>
+    public int LogRetainDays
+    {
+        get => _logRetainDays;
+        set => SetField(ref _logRetainDays, value);
+    }
+
+    /// <summary>从现有配置载入表单，并从存储载入预设。</summary>
+    /// <param name="options">当前配置。</param>
+    public void Load(StreamPilotOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        MpvPath = options.Playback.MpvPath;
+        MpvArguments = options.Playback.MpvArguments;
+        UseLowLatencyMpvArguments = options.Bridge.UseLowLatencyMpvArguments;
+        ExtremeTargetMs = NormalizeTarget(options.Playback.ExtremeTargetMs);
+        Volume = Clamp(options.Playback.Volume, 0, 100, 70);
+        AutoPlayOnResolve = options.Playback.AutoPlayOnResolve;
+        AutoLaunchMpv = options.Playback.AutoLaunchMpv;
+        BilibiliCookie = options.Platforms.BilibiliCookie;
+
+        RecordingDirectory = options.Recording.OutputDirectory;
+        SegmentPolicyOptions segment = options.Recording.Segment.Normalize();
+        SegmentMaxMegabytes = (int)Math.Clamp(segment.MaxBytes / (1024L * 1024L), 64, 16384);
+        SegmentMaxMinutes = segment.MaxDurationMinutes;
+        SegmentMinMegabytes = (int)Math.Clamp(segment.MinBytes / (1024L * 1024L), 0, 1024);
+        MaxDurationMinutes = Clamp(options.Recording.MaxDurationMinutes, 1, 1440, 360);
+        StallTimeoutSeconds = Clamp(options.Recording.StallTimeoutSeconds, 2, 120, 12);
+        MaxReconnectAttempts = Clamp(options.Recording.MaxReconnectAttempts, 1, 50, 8);
+
+        Proxy = options.Network.Proxy;
+        RequestTimeoutSeconds = Clamp(options.Network.RequestTimeoutSeconds, 1, 120, 8);
+        MaxAttempts = Clamp(options.Network.MaxAttempts, 1, 5, 3);
+        UserAgent = options.Network.UserAgent;
+
+        BridgePort = Clamp(options.Bridge.PreferredPort, 1024, 65535, BridgeConstants.DefaultPort);
+        BridgeAutoStart = options.Bridge.AutoStart;
+
+        VerboseDiagnostics = options.Logging.VerboseDiagnostics;
+        LogRetainDays = Clamp(options.Logging.RetainedFileCount, 1, 90, 5);
+
+        Presets.Clear();
+        foreach (RoomPreset preset in _presetStore.Items)
+        {
+            Presets.Add(PresetItem.FromPreset(preset));
+        }
+
+        StatusMessage = Presets.Count == 0 ? "还没有预设，可在「预设」页签新增。" : $"已载入 {Presets.Count} 条预设。";
+    }
+
+    /// <summary>
+    /// 校验并构造新的配置对象。
+    /// </summary>
+    /// <param name="baseOptions">作为基础的原配置（保留未在界面暴露的字段）。</param>
+    /// <param name="result">构造出的配置。</param>
+    /// <returns>校验通过返回 <see langword="true"/>。</returns>
+    public bool TryBuildOptions(StreamPilotOptions baseOptions, out StreamPilotOptions result)
+    {
+        ArgumentNullException.ThrowIfNull(baseOptions);
+        result = baseOptions;
+
+        if (Proxy.Length > 0 && !Uri.TryCreate(Proxy.Trim(), UriKind.Absolute, out _))
+        {
+            StatusMessage = "代理地址不是合法 URL（例如 http://127.0.0.1:10809）。已保留原值。";
+            return false;
+        }
+
+        foreach (PresetItem item in Presets)
+        {
+            if (item.ToPreset() is null)
+            {
+                StatusMessage = "存在未填写完整（名称或房间号为空）的预设行。已保留原值。";
+                return false;
+            }
+        }
+
+        string recordingDirectory = RecordingDirectory.Trim();
+        string resolvedMpv = MpvPath.Trim();
+
+        result = baseOptions with
+        {
+            Playback = baseOptions.Playback with
+            {
+                MpvPath = resolvedMpv,
+                MpvArguments = MpvArguments.Trim(),
+                ExtremeTargetMs = NormalizeTarget(ExtremeTargetMs),
+                Volume = Clamp(Volume, 0, 100, 70),
+                AutoPlayOnResolve = AutoPlayOnResolve,
+                AutoLaunchMpv = AutoLaunchMpv,
+            },
+            Recording = baseOptions.Recording with
+            {
+                OutputDirectory = recordingDirectory,
+                Segment = new SegmentPolicyOptions
+                {
+                    MaxBytes = SegmentMaxMegabytes * 1024L * 1024L,
+                    MaxDurationMinutes = SegmentMaxMinutes,
+                    MinBytes = SegmentMinMegabytes * 1024L * 1024L,
+                    SplitOnKeyFrameOnly = true,
+                },
+                MaxDurationMinutes = MaxDurationMinutes,
+                StallTimeoutSeconds = StallTimeoutSeconds,
+                MaxReconnectAttempts = MaxReconnectAttempts,
+            },
+            Network = baseOptions.Network with
+            {
+                Proxy = Proxy.Trim(),
+                RequestTimeoutSeconds = RequestTimeoutSeconds,
+                MaxAttempts = MaxAttempts,
+                UserAgent = UserAgent.Trim(),
+            },
+            Platforms = baseOptions.Platforms with
+            {
+                BilibiliCookie = BilibiliCookie.Trim(),
+            },
+            Bridge = baseOptions.Bridge with
+            {
+                PreferredPort = BridgePort,
+                MaxPort = Math.Max(BridgePort, BridgePort + (BridgeConstants.MaxPort - BridgeConstants.DefaultPort)),
+                AutoStart = BridgeAutoStart,
+                UseLowLatencyMpvArguments = UseLowLatencyMpvArguments,
+            },
+            Logging = baseOptions.Logging with
+            {
+                VerboseDiagnostics = VerboseDiagnostics,
+                RetainedFileCount = LogRetainDays,
+            },
+        };
+
+        return true;
+    }
+
+    /// <summary>把表单中的预设写回存储（返回是否有变更）。</summary>
+    /// <returns>有变更返回 <see langword="true"/>。</returns>
+    public bool SavePresets()
+    {
+        List<string> existingNames = [];
+        foreach (RoomPreset preset in _presetStore.Items)
+        {
+            existingNames.Add(preset.Name);
+        }
+
+        foreach (string name in existingNames)
+        {
+            _presetStore.Remove(name);
+        }
+
+        bool any = false;
+        foreach (PresetItem item in Presets)
+        {
+            if (item.ToPreset() is { } preset && _presetStore.Add(preset))
+            {
+                any = true;
+            }
+        }
+
+        return any;
+    }
+
+    private void ClearMpv()
+    {
+        MpvPath = string.Empty;
+        StatusMessage = "已清空 mpv 路径，播放时按默认顺序自动探测。";
+    }
+
+    private void SetTarget(object? parameter)
+    {
+        if (parameter is not null && int.TryParse(parameter.ToString(), out int target))
+        {
+            ExtremeTargetMs = NormalizeTarget(target);
+        }
+    }
+
+    private static void OpenFolder(string path)
+    {
+        try
+        {
+            Directory.CreateDirectory(path);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        {
+            MessageBox.Show("打开目录失败：" + exception.Message, "StreamPilot", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private void BrowseMpv()
+    {
+        using WinFormsOpenFileDialog dialog = new()
+        {
+            Title = "选择 mpv 可执行文件",
+            Filter = "mpv (mpv.exe)|mpv.exe|可执行文件 (*.exe)|*.exe|所有文件 (*.*)|*.*",
+            CheckFileExists = true,
+        };
+
+        string? started = string.IsNullOrWhiteSpace(MpvPath) ? null : Path.GetDirectoryName(MpvPath);
+        if (!string.IsNullOrWhiteSpace(started) && Directory.Exists(started))
+        {
+            dialog.InitialDirectory = started;
+        }
+
+        if (dialog.ShowDialog() == WinFormsDialogResult.OK)
+        {
+            MpvPath = dialog.FileName;
+            StatusMessage = "已选择 mpv：" + dialog.FileName;
+        }
+    }
+
+    private void DetectMpv()
+    {
+        string? resolved = _resolveMpvPath(MpvPath);
+        if (resolved is null)
+        {
+            StatusMessage = "未找到 mpv。请把 mpv.exe 放到 tools\\mpv\\ 或手动选择路径。";
+            _logger.Warn(_moduleName, "自动探测 mpv 失败。", new Dictionary<string, object?>
+            {
+                ["configured"] = MpvPath,
+            });
+            return;
+        }
+
+        MpvPath = resolved;
+        StatusMessage = "已定位 mpv：" + resolved;
+    }
+
+    private void AddPreset()
+    {
+        Presets.Add(new PresetItem(string.Empty, PlatformId.Bilibili, string.Empty));
+        SelectedPreset = Presets[^1];
+        StatusMessage = "已新增一行预设，请填写名称与房间号后保存。";
+    }
+
+    private void RemovePreset()
+    {
+        if (SelectedPreset is null)
+        {
+            return;
+        }
+
+        int index = Presets.IndexOf(SelectedPreset);
+        Presets.Remove(SelectedPreset);
+        SelectedPreset = Presets.Count == 0 ? null : Presets[Math.Clamp(index, 0, Presets.Count - 1)];
+        StatusMessage = "已删除该预设（保存后生效）。";
+    }
+
+    private void BrowseRecordingDirectory()
+    {
+        using WinFormsFolderBrowserDialog dialog = new()
+        {
+            Description = "选择录制输出根目录",
+            UseDescriptionForTitle = true,
+            ShowNewFolderButton = true,
+        };
+
+        string current = RecordingDirectory.Trim();
+        if (current.Length > 0 && Directory.Exists(current))
+        {
+            dialog.InitialDirectory = current;
+        }
+
+        if (dialog.ShowDialog() == WinFormsDialogResult.OK)
+        {
+            RecordingDirectory = dialog.SelectedPath;
+            StatusMessage = "录制目录：" + dialog.SelectedPath;
+        }
+    }
+
+    private static int Clamp(int value, int min, int max, int fallback) =>
+        value < min || value > max ? fallback : value;
+
+    private static int NormalizeTarget(int value)
+    {
+        foreach (int candidate in PlaybackRequest.ExtremeTargetsMs)
+        {
+            if (candidate == value)
+            {
+                return candidate;
+            }
+        }
+
+        return PlaybackRequest.DefaultExtremeTargetMs;
+    }
+
+    private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+
+    private bool SetField<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
+    {
+        if (EqualityComparer<T>.Default.Equals(field, value))
+        {
+            return false;
+        }
+
+        field = value;
+        OnPropertyChanged(propertyName);
+        return true;
+    }
+}
+
+/// <summary>设置窗口使用的平台下拉选项。</summary>
+internal static class SettingsPlatforms
+{
+    /// <summary>创建平台选项列表。</summary>
+    /// <returns>平台选项。</returns>
+    public static IReadOnlyList<PlatformOption> CreateOptions() =>
+    [
+        new PlatformOption(PlatformId.Bilibili, "哔哩哔哩", "https://live.bilibili.com/"),
+        new PlatformOption(PlatformId.Douyin, "抖音", "https://live.douyin.com/"),
+        new PlatformOption(PlatformId.Huya, "虎牙", "https://www.huya.com/"),
+        new PlatformOption(PlatformId.Douyu, "斗鱼", "https://www.douyu.com/"),
+        new PlatformOption(PlatformId.Yy, "YY", "https://www.yy.com/"),
+        new PlatformOption(PlatformId.Bigo, "Bigo Live", "https://www.bigo.tv/"),
+    ];
+}

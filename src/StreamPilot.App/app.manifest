@@ -18,11 +18,10 @@
     </application>
   </compatibility>
 
-  <application xmlns="urn:schemas-microsoft-com:asm.v3">
-    <windowsSettings>
-      <!-- 每显示器 DPI 感知，避免 WebView2 画面模糊 -->
-      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
-      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
-    </windowsSettings>
-  </application>
+  <!--
+    DPI 感知不在此处声明：设置窗口使用了 WinForms 的"浏览文件/文件夹"对话框，
+    其分析器（WFO0003）要求 DPI 由 WinForms 的 ApplicationHighDpiMode 统一配置，
+    因此改由 StreamPilot.App.csproj 的 <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode> 提供，
+    效果与原先的 dpiAwareness=PerMonitorV2 一致（WPF 与 WebView2 同样受益）。
+  -->
 </assembly>

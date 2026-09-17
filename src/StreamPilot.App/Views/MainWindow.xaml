@@ -17,15 +17,66 @@
             Background="{StaticResource PanelBackgroundBrush}"
             BorderBrush="{StaticResource BorderBrushSoft}"
             BorderThickness="0,0,1,0">
-      <TabControl x:Name="ControlTabs" Background="Transparent" BorderThickness="0">
+      <Grid>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- 预设栏：选中即填入平台与房间号并自动解析；右侧齿轮打开独立设置窗口 -->
+        <Border Grid.Row="0" Padding="10,8" BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="0,0,0,1">
+          <Grid>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto" />
+              <ColumnDefinition Width="*" />
+              <ColumnDefinition Width="Auto" />
+              <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Text="预设" Style="{StaticResource MutedText}" Margin="0,0,6,0" />
+            <Grid Grid.Column="1">
+              <ComboBox x:Name="PresetCombo"
+                        ItemsSource="{Binding Presets}"
+                        SelectedItem="{Binding SelectedPreset, Mode=TwoWay}"
+                        ToolTip="选择预设后自动填入平台与房间号并开始解析">
+                <ComboBox.ItemTemplate>
+                  <DataTemplate>
+                    <TextBlock Text="{Binding Name}" Foreground="{StaticResource TextBrush}" />
+                  </DataTemplate>
+                </ComboBox.ItemTemplate>
+              </ComboBox>
+              <TextBlock Text="（在设置中添加）"
+                         IsHitTestVisible="False"
+                         Margin="10,0,0,0"
+                         HorizontalAlignment="Left">
+                <TextBlock.Style>
+                  <Style TargetType="TextBlock" BasedOn="{StaticResource MutedText}">
+                    <Setter Property="Visibility" Value="Collapsed" />
+                    <Style.Triggers>
+                      <DataTrigger Binding="{Binding Presets.Count}" Value="0">
+                        <Setter Property="Visibility" Value="Visible" />
+                      </DataTrigger>
+                    </Style.Triggers>
+                  </Style>
+                </TextBlock.Style>
+              </TextBlock>
+            </Grid>
+            <Button Grid.Column="2" Content="解析预设" Command="{Binding ApplyPresetCommand}"
+                    CommandParameter="{Binding SelectedPreset}" Margin="6,0,0,0" />
+            <Button Grid.Column="3" Content="⚙" Command="{Binding OpenSettingsCommand}"
+                    ToolTip="打开设置窗口" MinWidth="34" Padding="6,4" Margin="0"
+                    AutomationProperties.AutomationId="OpenSettingsButton" />
+          </Grid>
+        </Border>
+
+        <TabControl Grid.Row="1" x:Name="ControlTabs" Background="Transparent" BorderThickness="0">
         <!-- ================= 直播 ================= -->
         <TabItem Header="直播">
           <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="12">
             <StackPanel>
               <TextBlock Text="平台" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
               <ComboBox ItemsSource="{Binding Platforms}"
-                        SelectedValuePath="Id"
-                        SelectedValue="{Binding SelectedPlatform, Mode=TwoWay}">
+                        SelectedItem="{Binding SelectedPlatformOption, Mode=TwoWay}"
+                        AutomationProperties.AutomationId="PlatformCombo">
                 <ComboBox.ItemTemplate>
                   <DataTemplate>
                     <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource TextBrush}" />
@@ -103,36 +154,25 @@
           </ScrollViewer>
         </TabItem>
 
-        <!-- ================= 设置 ================= -->
-        <TabItem Header="设置">
-          <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="12">
-            <StackPanel>
-              <TextBlock Text="mpv 路径" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-              <TextBox Text="{Binding MpvPath, UpdateSourceTrigger=PropertyChanged}" />
-              <TextBlock Text="留空时依次查找 tools\mpv\mpv.exe、PATH 与常见安装位置。" Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,0" />
-
-              <TextBlock Text="B站 Cookie（可选）" Style="{StaticResource MutedText}" Margin="0,12,0,4" />
-              <TextBox Text="{Binding BilibiliCookie, UpdateSourceTrigger=PropertyChanged}" />
-              <TextBlock Text="仅保存在本机 %LOCALAPPDATA%\StreamPilot\config.json，不会写入日志，也不会随程序发布。"
-                         Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,0" />
-
-              <TextBlock Text="录制输出目录" Style="{StaticResource MutedText}" Margin="0,12,0,4" />
-              <TextBox Text="{Binding OutputDirectoryInput, UpdateSourceTrigger=PropertyChanged}" />
-              <TextBlock Text="留空时使用「视频」目录下的 StreamPilot 子目录。" Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,0" />
-
-              <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-                <Button Content="保存设置" Command="{Binding SaveSettingsCommand}" />
-                <Button Content="打开日志目录" Command="{Binding OpenLogFolderCommand}" />
-              </StackPanel>
-
-              <TextBlock Text="界面日志" Style="{StaticResource MutedText}" Margin="0,12,0,4" />
-              <ListBox ItemsSource="{Binding LogLines}" Height="220" Background="#141A22"
-                       Foreground="{StaticResource TextBrush}" BorderBrush="{StaticResource BorderBrushSoft}"
-                       FontFamily="Consolas" FontSize="12" />
-            </StackPanel>
-          </ScrollViewer>
+        <!-- ================= 日志 ================= -->
+        <TabItem Header="日志">
+          <Grid Margin="12">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="*" />
+              <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <TextBlock Grid.Row="0" Text="界面事件（完整日志见「设置 → 高级」中的日志目录）"
+                       Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,0,0,6" />
+            <ListBox Grid.Row="1" ItemsSource="{Binding LogLines}" Background="#141A22"
+                     Foreground="{StaticResource TextBrush}" BorderBrush="{StaticResource BorderBrushSoft}"
+                     FontFamily="Consolas" FontSize="12" />
+            <Button Grid.Row="2" Content="打开日志目录" Command="{Binding OpenLogFolderCommand}"
+                    HorizontalAlignment="Left" Margin="0,8,0,0" />
+          </Grid>
         </TabItem>
       </TabControl>
+      </Grid>
     </Border>
 
     <!-- 右侧：WebView2 播放宿主（在代码后置中挂载，避免 XAML 直接依赖宿主类型） -->

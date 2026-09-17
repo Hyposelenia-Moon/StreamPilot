@@ -102,15 +102,15 @@
       flex: 0 0 auto;
     }
 
-    #presetBar {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      min-width: 0;
-      flex: 1 1 auto;
+    #modeHint {
+      color: #aeb8c7;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 40%;
+      margin-right: 6px;
     }
 
-    select,
     button,
     input[type="range"] {
       font: inherit;
@@ -121,28 +121,6 @@
       padding: 4px 8px;
       -webkit-appearance: none;
       appearance: none;
-    }
-
-    /* 下拉框展开后的选项列表由系统绘制，必须单独指定颜色，否则在浅色主题下是白底白字 */
-    select option {
-      background-color: #1e232b;
-      color: #e6e9ee;
-    }
-
-    /*
-      预设下拉必须自带宽度与最小宽度：
-      放在 flex 容器里若被压缩成十几像素，文字会被裁掉，看起来就像"空白/看不见"。
-    */
-    #presetSelect {
-      width: 220px;
-      min-width: 140px;
-      max-width: 260px;
-      text-overflow: ellipsis;
-      background-image: linear-gradient(45deg, transparent 50%, #98a2b3 50%), linear-gradient(135deg, #98a2b3 50%, transparent 50%);
-      background-position: calc(100% - 15px) calc(50% - 2px), calc(100% - 10px) calc(50% - 2px);
-      background-size: 5px 5px, 5px 5px;
-      background-repeat: no-repeat;
-      padding-right: 24px;
     }
 
     /* range 滑块：加大对比度，避免在某些主题下"看不见" */
@@ -336,20 +314,19 @@
 
 <body>
   <div id="root">
+    <!--
+      播放页只保留"观看相关"的控件（追帧档位、全屏、音量）。
+      播放控制（解析 / 开始播放 / 追帧 / mpv 播放）统一放在主界面左侧面板，
+      避免同一动作在左右两侧各有一份按钮。
+    -->
     <header>
-      <div id="presetBar">
-        <span style="color: #98a2b3">预设</span>
-        <select id="presetSelect" title="从主界面保存的预设中快速加载直播间"></select>
-      </div>
       <div id="modeGroup" title="极限追帧档位，数值越小延迟越低但越容易卡顿">
         <button type="button" data-target="150">150 ms</button>
         <button type="button" data-target="200">200 ms</button>
         <button type="button" data-target="250">250 ms</button>
       </div>
       <span class="spacer"></span>
-      <button type="button" id="chaseBtn" title="立刻跳到直播最新位置">追帧</button>
-      <button type="button" id="mpvBtn" title="用本地 mpv 播放（支持超分 / HDR）">mpv 播放</button>
-      <button type="button" id="fsBtn" title="全屏">全屏</button>
+      <span id="modeHint" class="hintText">等待直播源</span>      <button type="button" id="fsBtn" title="全屏">全屏</button>
     </header>
 
     <div id="stage">
@@ -405,9 +382,7 @@
         volume: document.getElementById('volume'),
         volumeLabel: document.getElementById('volumeLabel'),
         volDisplay: document.getElementById('volDisplay'),
-        presetSelect: document.getElementById('presetSelect'),
-        mpvBtn: document.getElementById('mpvBtn'),
-        chaseBtn: document.getElementById('chaseBtn'),
+        modeHint: document.getElementById('modeHint'),
         fsBtn: document.getElementById('fsBtn'),
         toggleLog: document.getElementById('toggleLog'),
         modeButtons: Array.prototype.slice.call(document.querySelectorAll('#modeGroup button')),
@@ -518,11 +493,15 @@
         elements.status.textContent = message;
       }
 
-      /** 更新 mpv 按钮可用状态。 */
-      function updateMpvButton() {
-        const ready = state.currentStreamUrl.length > 0;
-        elements.mpvBtn.disabled = !ready;
-        elements.mpvBtn.classList.toggle('active', ready);
+      /** 更新顶部模式提示（档位与当前线路）。 */
+      function updateModeHint() {
+        const run = state.run;
+        if (!run || !run.currentCandidate) {
+          elements.modeHint.textContent = '等待直播源';
+          return;
+        }
+
+        elements.modeHint.textContent = core.modeLabel(run) + ' · ' + run.currentCandidate.host;
       }
 
       /** 销毁当前播放器并释放资源。 */
@@ -711,7 +690,7 @@
         run.currentCandidate = candidate;
         state.currentStreamUrl = candidate.url;
         state.currentReferer = candidate.referer || '';
-        updateMpvButton();
+        updateModeHint();
         report(outbound.CANDIDATE_ACTIVE, '正在连接 ' + candidate.host, run, candidate);
 
         destroyPlayer();
@@ -857,7 +836,7 @@
         stopRun(run);
         destroyPlayer();
         state.currentStreamUrl = '';
-        updateMpvButton();
+        updateModeHint();
         setHintLocked(message, 'error', 20000);
       }
 
@@ -941,7 +920,7 @@
         run.refreshRequested = true;
         destroyPlayer();
         state.currentStreamUrl = '';
-        updateMpvButton();
+        updateModeHint();
         setHintLocked('所有候选线路均不可用，正在请主程序重新解析…\n' + reason, 'error', 10000);
         report(outbound.REFRESH_NEEDED, reason, run, run.currentCandidate);
       }
@@ -1124,7 +1103,7 @@
 
         destroyPlayer();
         state.currentStreamUrl = '';
-        updateMpvButton();
+        updateModeHint();
         setHint('等待直播源');
         elements.hint.classList.add('empty');
         setStatus('未连接');
@@ -1136,43 +1115,6 @@
         for (const button of elements.modeButtons) {
           button.classList.toggle('active', Number(button.dataset.target) === targetMs);
         }
-      }
-
-      /** 向桥接服务请求用 mpv 播放当前地址。 */
-      async function requestMpvPlayback() {
-        if (state.currentStreamUrl.length === 0) {
-          setHintLocked('请先在主界面解析直播源。', 'warn', 6000);
-          return;
-        }
-
-        if (state.bridgeBaseAddress.length === 0) {
-          setHintLocked('桥接服务未启动，无法调用 mpv。请在主界面设置中开启 mpv 桥接。', 'warn', 8000);
-          return;
-        }
-
-        const url = state.bridgeBaseAddress
-          + '/play?url=' + encodeURIComponent(state.currentStreamUrl)
-          + '&title=' + encodeURIComponent(state.roomTitle || '')
-          + '&referer=' + encodeURIComponent(state.currentReferer || '');
-        try {
-          const response = await fetch(url, { method: 'GET', cache: 'no-store' });
-          if (response.ok) {
-            setHintLocked('已请求 mpv 播放当前地址。', 'info', 5000);
-            appendLog('ok', '已请求 mpv 播放');
-            report(outbound.STATUS, '已请求 mpv 播放', state.run, state.run ? state.run.currentCandidate : null);
-          } else {
-            setHintLocked('mpv 启动失败：HTTP ' + response.status + '。请检查主界面的 mpv 路径设置。', 'error', 10000);
-            appendLog('error', 'mpv 启动失败：HTTP ' + response.status);
-          }
-        } catch (error) {
-          setHintLocked('调用桥接服务失败：' + error.message, 'error', 10000);
-          appendLog('error', '调用桥接服务失败：' + error.message);
-        }
-      }
-
-      /** 请求宿主更新预设列表。 */
-      function requestPresets() {
-        report(outbound.STATUS, '请求预设列表');
       }
 
       /** 更新音量显示。 */
@@ -1224,14 +1166,6 @@
           applyVolume(next, false);
         });
 
-        elements.chaseBtn.addEventListener('click', function onChaseClick() {
-          handleChase({ keepSeconds: 0.08 });
-        });
-
-        elements.mpvBtn.addEventListener('click', function onMpvClick() {
-          void requestMpvPlayback();
-        });
-
         elements.fsBtn.addEventListener('click', function onFullscreenClick() {
           if (document.fullscreenElement) {
             void document.exitFullscreen();
@@ -1260,17 +1194,6 @@
           elements.log.style.display = hidden ? 'block' : 'none';
           elements.toggleLog.textContent = hidden ? '隐藏日志' : '显示日志';
         });
-
-        elements.presetSelect.addEventListener('change', function onPresetChange() {
-          const value = elements.presetSelect.value;
-          if (value.length === 0) {
-            return;
-          }
-
-          report(outbound.STATUS, '请求加载预设：' + value, null, null, { presetUrl: value });
-          appendLog('info', '已请求主程序解析预设：' + value);
-          elements.presetSelect.value = '';
-        });
       }
 
       /** 处理来自宿主的消息。 */
@@ -1290,9 +1213,7 @@
             handleStop();
             break;
           default:
-            if (payload.type === 'presets' && Array.isArray(payload.items)) {
-              fillPresets(payload.items);
-            } else if (payload.type === 'volume') {
+            if (payload.type === 'volume') {
               applyVolume(payload.value, true);
             } else if (payload.type === 'bridge-info') {
               state.bridgeBaseAddress = typeof payload.baseAddress === 'string' ? payload.baseAddress : '';
@@ -1305,29 +1226,9 @@
         }
       }
 
-      /** 渲染预设下拉。 */
-      function fillPresets(items) {
-        elements.presetSelect.innerHTML = '';
-        const placeholder = document.createElement('option');
-        placeholder.value = '';
-        placeholder.textContent = items.length === 0 ? '（无预设，可在主界面添加）' : '选择预设…';
-        elements.presetSelect.appendChild(placeholder);
-
-        for (const item of items) {
-          if (!item || typeof item.url !== 'string' || item.url.length === 0) {
-            continue;
-          }
-
-          const option = document.createElement('option');
-          option.value = item.url;
-          option.textContent = (item.name || item.url) + '（' + (item.platform || '未知') + '）';
-          elements.presetSelect.appendChild(option);
-        }
-      }
-
       bindControls();
       applyVolume(70, true);
-      updateMpvButton();
+      updateModeHint();
 
       if (hostChannel) {
         hostChannel.onMessage(handleHostMessage);
@@ -1340,7 +1241,6 @@
         hevc: hevcMseSupported,
         avc: avcMseSupported,
       });
-      requestPresets();
     }());
   </script>
 </body>

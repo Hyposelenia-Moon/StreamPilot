@@ -1,4 +1,5 @@
 using System.Windows;
+using WpfMessageBox = System.Windows.MessageBox;
 using System.Windows.Threading;
 using StreamPilot.App.ViewModels;
 
@@ -61,7 +62,7 @@ public partial class MainWindow : Window
         }
         catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
         {
-            MessageBox.Show(
+            WpfMessageBox.Show(
                 "初始化播放内核失败：" + exception.Message + Environment.NewLine
                 + "请确认已安装 WebView2 运行时（Windows 10/11 通常自带）。",
                 "StreamPilot",
