@@ -75,6 +75,18 @@
         <Setter Property="VerticalAlignment" Value="Top" />
       </Style>
 
+      <!--
+        单行值文本：用于左栏「当前直播」这类紧凑信息行。
+        标题可能很长，必须显式 NoWrap + 省略号（隐式样式只设排版，不设换行策略），
+        否则一行标题会把卡片撑开好几行，其它信息被挤出可视区。
+      -->
+      <Style x:Key="ValueLine" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+        <Setter Property="TextWrapping" Value="NoWrap" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+      </Style>
+
       <Style x:Key="CardPanel" TargetType="Border">
         <Setter Property="Background" Value="{StaticResource CardBackgroundBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />

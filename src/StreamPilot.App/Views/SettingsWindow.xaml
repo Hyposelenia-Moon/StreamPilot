@@ -14,100 +14,153 @@
         ShowInTaskbar="False"
         ResizeMode="CanResize">
   <Grid>
+    <Grid.Resources>
+      <!--
+        表单排版：每个设置项都是"一行标签 + 一行控件"。
+        SettingLabel 用于标签行；SettingFieldBox / SettingFieldCombo 用于窄控件（统一 180px）；
+        宽输入框（路径、目录、Cookie、UA）不给宽度，直接占满整行。
+      -->
+      <Style x:Key="SettingLabel" TargetType="TextBlock" BasedOn="{StaticResource MutedText}">
+        <Setter Property="Margin" Value="0,0,0,4" />
+      </Style>
+      <Style x:Key="SettingFieldBox" TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
+        <Setter Property="Width" Value="180" />
+        <Setter Property="HorizontalAlignment" Value="Left" />
+      </Style>
+      <Style x:Key="SettingFieldCombo" TargetType="ComboBox" BasedOn="{StaticResource {x:Type ComboBox}}">
+        <Setter Property="Width" Value="180" />
+        <Setter Property="HorizontalAlignment" Value="Left" />
+      </Style>
+      <Style x:Key="SettingFieldCheck" TargetType="CheckBox" BasedOn="{StaticResource {x:Type CheckBox}}">
+        <Setter Property="Margin" Value="0,0,0,8" />
+      </Style>
+      <Style x:Key="SettingRow" TargetType="StackPanel">
+        <Setter Property="Margin" Value="0,0,0,12" />
+      </Style>
+      <Style x:Key="CookieBox" TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
+        <Setter Property="MinHeight" Value="52" />
+        <Setter Property="Margin" Value="0,0,0,12" />
+        <Setter Property="AcceptsReturn" Value="True" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="VerticalScrollBarVisibility" Value="Auto" />
+        <Setter Property="VerticalContentAlignment" Value="Top" />
+      </Style>
+    </Grid.Resources>
+
     <Grid.RowDefinitions>
       <RowDefinition Height="*" />
       <RowDefinition Height="Auto" />
     </Grid.RowDefinitions>
 
     <TabControl Grid.Row="0" Margin="14,12,14,8">
-      <!-- ============ 常用：只放日常会改的设置项 ============ -->
+      <!-- ============ 常用：日常要改的设置项 ============ -->
       <TabItem Header="常用">
         <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="4,10,4,4">
           <StackPanel>
             <Border Style="{StaticResource CardPanel}">
               <StackPanel>
-                <TextBlock Text="默认平台" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <ComboBox Width="220" HorizontalAlignment="Left"
-                          ItemsSource="{Binding DefaultPlatformChoices}"
-                          SelectedItem="{Binding SelectedDefaultPlatform, Mode=TwoWay}"
-                          ToolTip="只在输入房间号、无法从链接识别平台时使用"
-                          AutomationProperties.AutomationId="DefaultPlatformCombo">
-                  <ComboBox.ItemTemplate>
-                    <DataTemplate>
-                      <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource TextBrush}" />
-                    </DataTemplate>
-                  </ComboBox.ItemTemplate>
-                </ComboBox>
-              </StackPanel>
-            </Border>
+                <TextBlock Text="平台与播放" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
 
-            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
-              <StackPanel>
-                <TextBlock Text="mpv 外挂播放" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <TextBlock Text="mpv 路径" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                <Grid>
-                  <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
-                  </Grid.ColumnDefinitions>
-                  <TextBox Grid.Column="0" Text="{Binding MpvPath, UpdateSourceTrigger=PropertyChanged}" />
-                  <Button Grid.Column="1" Content="探测" Command="{Binding DetectMpvCommand}" Margin="8,0,0,0" />
-                  <Button Grid.Column="2" Content="浏览…" Command="{Binding BrowseMpvCommand}" />
-                  <Button Grid.Column="3" Content="清空" Command="{Binding ClearMpvCommand}" Margin="0" />
-                </Grid>
-              </StackPanel>
-            </Border>
+                <StackPanel Style="{StaticResource SettingRow}">
+                  <TextBlock Text="默认平台" Style="{StaticResource SettingLabel}" />
+                  <ComboBox Style="{StaticResource SettingFieldCombo}"
+                            ItemsSource="{Binding DefaultPlatformChoices}"
+                            SelectedItem="{Binding SelectedDefaultPlatform, Mode=TwoWay}"
+                            ToolTip="只在输入房间号、无法从链接识别平台时使用"
+                            AutomationProperties.AutomationId="DefaultPlatformCombo">
+                    <ComboBox.ItemTemplate>
+                      <DataTemplate>
+                        <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource TextBrush}" />
+                      </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                  </ComboBox>
+                </StackPanel>
 
-            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
-              <StackPanel>
-                <TextBlock Text="播放行为" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <CheckBox Content="解析成功后自动开始播放" IsChecked="{Binding AutoPlayOnResolve}" Margin="0,0,0,8" />
-                <CheckBox Content="解析成功后自动调用 mpv 播放" IsChecked="{Binding AutoLaunchMpv}" />
-
-                <TextBlock Text="默认音量" Style="{StaticResource MutedText}" Margin="0,12,0,4" />
-                <Grid>
-                  <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                  </Grid.ColumnDefinitions>
-                  <Slider Grid.Column="0" Minimum="0" Maximum="100" TickFrequency="5" IsSnapToTickEnabled="True"
-                          Value="{Binding Volume}" VerticalAlignment="Center" />
-                  <TextBlock Grid.Column="1" Text="{Binding Volume, StringFormat={}{0}%}" Style="{StaticResource MutedText}"
-                             MinWidth="46" TextAlignment="Right" Margin="8,0,0,0" />
-                </Grid>
-              </StackPanel>
-            </Border>
-
-            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
-              <StackPanel>
-                <TextBlock Text="录制" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <TextBlock Text="输出目录" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                <Grid>
-                  <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                  </Grid.ColumnDefinitions>
-                  <TextBox Grid.Column="0" Text="{Binding RecordingDirectory, UpdateSourceTrigger=PropertyChanged}" />
-                  <Button Grid.Column="1" Content="浏览…" Command="{Binding BrowseRecordingDirectoryCommand}" Margin="8,0,0,0" />
-                </Grid>
-
-                <Grid Margin="0,12,0,0">
-                  <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                  </Grid.ColumnDefinitions>
-                  <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                    <TextBlock Text="分片大小上限（MiB）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                    <TextBox Text="{Binding SegmentMaxMegabytes}" Width="130" HorizontalAlignment="Left" />
+                <StackPanel Style="{StaticResource SettingRow}">
+                  <TextBlock Text="默认音量" Style="{StaticResource SettingLabel}" />
+                  <StackPanel Orientation="Horizontal">
+                    <Slider Width="180" Minimum="0" Maximum="100" TickFrequency="5" IsSnapToTickEnabled="True"
+                            Value="{Binding Volume}" VerticalAlignment="Center"
+                            AutomationProperties.AutomationId="VolumeSlider" />
+                    <TextBlock Text="{Binding Volume, StringFormat={}{0}%}" Style="{StaticResource MutedText}"
+                               MinWidth="46" TextAlignment="Right" Margin="8,0,0,0" />
                   </StackPanel>
-                  <StackPanel Grid.Column="1">
-                    <TextBlock Text="分片时长上限（分钟）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                    <TextBox Text="{Binding SegmentMaxMinutes}" Width="130" HorizontalAlignment="Left" />
-                  </StackPanel>
-                </Grid>
+                </StackPanel>
+
+                <CheckBox Content="解析成功后自动开始播放" IsChecked="{Binding AutoPlayOnResolve}"
+                          Style="{StaticResource SettingFieldCheck}" />
+                <CheckBox Content="解析成功后自动调用 mpv 播放" IsChecked="{Binding AutoLaunchMpv}"
+                          Style="{StaticResource SettingFieldCheck}" Margin="0" />
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
+              <StackPanel>
+                <TextBlock Text="mpv 路径" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
+
+                <TextBox Text="{Binding MpvPath, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="留空时按 tools\mpv 与系统路径自动探测"
+                         AutomationProperties.AutomationId="MpvPathBox" />
+
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                  <Button Content="自动探测" Command="{Binding DetectMpvCommand}" />
+                  <Button Content="浏览…" Command="{Binding BrowseMpvCommand}" />
+                  <Button Content="清空" Command="{Binding ClearMpvCommand}" Margin="0" />
+                </StackPanel>
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
+              <StackPanel>
+                <TextBlock Text="录制输出目录" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
+
+                <TextBox Text="{Binding RecordingDirectory, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="留空时使用「视频」目录下的 StreamPilot 子目录"
+                         AutomationProperties.AutomationId="RecordingDirectoryBox" />
+
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                  <Button Content="浏览…" Command="{Binding BrowseRecordingDirectoryCommand}" />
+                  <Button Content="打开目录" Command="{Binding OpenRecordingFolderCommand}" Margin="0" />
+                </StackPanel>
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
+              <StackPanel>
+                <TextBlock Text="账号 Cookie（可选）" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
+                <TextBlock Text="填了才能拿最高画质（B站 4K/HDR、虎牙蓝光20M、抖音原画）"
+                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,0,0,10" />
+
+                <TextBlock Text="哔哩哔哩 Cookie" Style="{StaticResource SettingLabel}" />
+                <TextBox Style="{StaticResource CookieBox}" Text="{Binding BilibiliCookie, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="只用于解析请求换取高画质；不会写进日志、不会发给 CDN"
+                         AutomationProperties.AutomationId="BilibiliCookieBox" />
+
+                <TextBlock Text="抖音 Cookie" Style="{StaticResource SettingLabel}" />
+                <TextBox Style="{StaticResource CookieBox}" Text="{Binding DouyinCookie, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="只用于解析请求换取高画质；不会写进日志、不会发给 CDN"
+                         AutomationProperties.AutomationId="DouyinCookieBox" />
+
+                <TextBlock Text="虎牙 Cookie" Style="{StaticResource SettingLabel}" />
+                <TextBox Style="{StaticResource CookieBox}" Text="{Binding HuyaCookie, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="只用于解析请求换取高画质；不会写进日志、不会发给 CDN"
+                         AutomationProperties.AutomationId="HuyaCookieBox" />
+
+                <TextBlock Text="斗鱼 Cookie" Style="{StaticResource SettingLabel}" />
+                <TextBox Style="{StaticResource CookieBox}" Text="{Binding DouyuCookie, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="只用于解析请求换取高画质；不会写进日志、不会发给 CDN"
+                         AutomationProperties.AutomationId="DouyuCookieBox" />
+
+                <TextBlock Text="YY Cookie" Style="{StaticResource SettingLabel}" />
+                <TextBox Style="{StaticResource CookieBox}" Text="{Binding YyCookie, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="只用于解析请求换取高画质；不会写进日志、不会发给 CDN"
+                         AutomationProperties.AutomationId="YyCookieBox" />
+
+                <TextBlock Text="Bigo Cookie" Style="{StaticResource SettingLabel}" />
+                <TextBox Style="{StaticResource CookieBox}" Text="{Binding BigoCookie, UpdateSourceTrigger=PropertyChanged}"
+                         Margin="0"
+                         ToolTip="只用于解析请求换取高画质；不会写进日志、不会发给 CDN"
+                         AutomationProperties.AutomationId="BigoCookieBox" />
               </StackPanel>
             </Border>
           </StackPanel>
@@ -120,108 +173,118 @@
           <StackPanel>
             <Border Style="{StaticResource CardPanel}">
               <StackPanel>
-                <TextBlock Text="账号与 Cookie（可选）" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
+                <TextBlock Text="请求" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
 
-                <TextBlock Text="哔哩哔哩 Cookie" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                <TextBox Text="{Binding BilibiliCookie, UpdateSourceTrigger=PropertyChanged}" MinHeight="52"
-                         AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
-                         VerticalContentAlignment="Top" />
-
-                <TextBlock Text="抖音 Cookie" Style="{StaticResource MutedText}" Margin="0,10,0,4" />
-                <TextBox Text="{Binding DouyinCookie, UpdateSourceTrigger=PropertyChanged}" MinHeight="52"
-                         AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
-                         VerticalContentAlignment="Top" />
-
-                <TextBlock Text="虎牙 Cookie" Style="{StaticResource MutedText}" Margin="0,10,0,4" />
-                <TextBox Text="{Binding HuyaCookie, UpdateSourceTrigger=PropertyChanged}" MinHeight="52"
-                         AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
-                         VerticalContentAlignment="Top" />
-
-                <TextBlock Text="斗鱼 Cookie" Style="{StaticResource MutedText}" Margin="0,10,0,4" />
-                <TextBox Text="{Binding DouyuCookie, UpdateSourceTrigger=PropertyChanged}" MinHeight="52"
-                         AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
-                         VerticalContentAlignment="Top" />
-
-                <TextBlock Text="YY Cookie" Style="{StaticResource MutedText}" Margin="0,10,0,4" />
-                <TextBox Text="{Binding YyCookie, UpdateSourceTrigger=PropertyChanged}" MinHeight="52"
-                         AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
-                         VerticalContentAlignment="Top" />
-
-                <TextBlock Text="Bigo Cookie" Style="{StaticResource MutedText}" Margin="0,10,0,4" />
-                <TextBox Text="{Binding BigoCookie, UpdateSourceTrigger=PropertyChanged}" MinHeight="52"
-                         AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
-                         VerticalContentAlignment="Top" />
-              </StackPanel>
-            </Border>
-
-            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
-              <StackPanel>
-                <TextBlock Text="网络" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <TextBlock Text="HTTP 代理" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                <TextBox Text="{Binding Proxy, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="形如 http://127.0.0.1:10809；留空表示不使用代理，修改后需重启程序" />
-              </StackPanel>
-            </Border>
-
-            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
-              <StackPanel>
-                <TextBlock Text="请求细节" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <Grid>
+                <Grid Margin="0,0,0,12">
                   <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="180" />
+                    <ColumnDefinition Width="180" />
                     <ColumnDefinition Width="*" />
                   </Grid.ColumnDefinitions>
-                  <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                    <TextBlock Text="请求超时（秒）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                    <TextBox Text="{Binding RequestTimeoutSeconds}" Width="130" HorizontalAlignment="Left" />
+
+                  <StackPanel Grid.Column="0">
+                    <TextBlock Text="超时（秒）" Style="{StaticResource SettingLabel}" />
+                    <TextBox Text="{Binding RequestTimeoutSeconds}" Style="{StaticResource SettingFieldBox}"
+                             AutomationProperties.AutomationId="RequestTimeoutBox" />
                   </StackPanel>
+
                   <StackPanel Grid.Column="1">
-                    <TextBlock Text="最大尝试次数（含首次）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                    <TextBox Text="{Binding MaxAttempts}" Width="130" HorizontalAlignment="Left" />
+                    <TextBlock Text="最大尝试次数（含首次）" Style="{StaticResource SettingLabel}" />
+                    <TextBox Text="{Binding MaxAttempts}" Style="{StaticResource SettingFieldBox}"
+                             AutomationProperties.AutomationId="MaxAttemptsBox" />
                   </StackPanel>
                 </Grid>
 
-                <TextBlock Text="自定义 User-Agent" Style="{StaticResource MutedText}" Margin="0,12,0,4" />
+                <TextBlock Text="User-Agent" Style="{StaticResource SettingLabel}" />
                 <TextBox Text="{Binding UserAgent, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="留空使用内置 Windows Chrome UA" />
+                         ToolTip="留空使用内置 Windows Chrome UA"
+                         AutomationProperties.AutomationId="UserAgentBox" />
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
+              <StackPanel>
+                <TextBlock Text="代理" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
+
+                <TextBlock Text="HTTP 代理" Style="{StaticResource SettingLabel}" />
+                <TextBox Text="{Binding Proxy, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="形如 http://127.0.0.1:10809；留空表示不使用代理，修改后需重启程序"
+                         AutomationProperties.AutomationId="ProxyBox" />
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
+              <StackPanel>
+                <TextBlock Text="录制分片" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
+
+                <Grid Margin="0,0,0,12">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="180" />
+                    <ColumnDefinition Width="180" />
+                    <ColumnDefinition Width="*" />
+                  </Grid.ColumnDefinitions>
+
+                  <StackPanel Grid.Column="0">
+                    <TextBlock Text="分片大小上限（MiB）" Style="{StaticResource SettingLabel}" />
+                    <TextBox Text="{Binding SegmentMaxMegabytes}" Style="{StaticResource SettingFieldBox}"
+                             AutomationProperties.AutomationId="SegmentMaxMegabytesBox" />
+                  </StackPanel>
+
+                  <StackPanel Grid.Column="1">
+                    <TextBlock Text="分片时长上限（分钟）" Style="{StaticResource SettingLabel}" />
+                    <TextBox Text="{Binding SegmentMaxMinutes}" Style="{StaticResource SettingFieldBox}"
+                             AutomationProperties.AutomationId="SegmentMaxMinutesBox" />
+                  </StackPanel>
+                </Grid>
+
+                <TextBlock Text="分片最小字节数（MiB）" Style="{StaticResource SettingLabel}" />
+                <TextBox Text="{Binding SegmentMinMegabytes}" Style="{StaticResource SettingFieldBox}"
+                         ToolTip="低于该大小不切分，避免切出大量小文件"
+                         AutomationProperties.AutomationId="SegmentMinMegabytesBox" />
               </StackPanel>
             </Border>
 
             <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
               <StackPanel>
                 <TextBlock Text="录制稳定性" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
+
                 <Grid>
                   <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="180" />
+                    <ColumnDefinition Width="180" />
                     <ColumnDefinition Width="*" />
                   </Grid.ColumnDefinitions>
-                  <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                    <TextBlock Text="最长录制时长（分钟）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                    <TextBox Text="{Binding MaxDurationMinutes}" Width="110" HorizontalAlignment="Left" />
+
+                  <StackPanel Grid.Column="0">
+                    <TextBlock Text="最长录制时长（分钟）" Style="{StaticResource SettingLabel}" />
+                    <TextBox Text="{Binding MaxDurationMinutes}" Style="{StaticResource SettingFieldBox}"
+                             AutomationProperties.AutomationId="MaxDurationMinutesBox" />
                   </StackPanel>
-                  <StackPanel Grid.Column="1" Margin="0,0,20,0">
-                    <TextBlock Text="断流判定（秒）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                    <TextBox Text="{Binding StallTimeoutSeconds}" Width="110" HorizontalAlignment="Left" />
-                  </StackPanel>
-                  <StackPanel Grid.Column="2">
-                    <TextBlock Text="最大重连次数" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                    <TextBox Text="{Binding MaxReconnectAttempts}" Width="110" HorizontalAlignment="Left"
-                             ToolTip="断流后按 2/4/8/15/30 秒退避重连，达到上限即结束本次录制" />
+
+                  <StackPanel Grid.Column="1">
+                    <TextBlock Text="断流判定（秒）" Style="{StaticResource SettingLabel}" />
+                    <TextBox Text="{Binding StallTimeoutSeconds}" Style="{StaticResource SettingFieldBox}"
+                             AutomationProperties.AutomationId="StallTimeoutBox" />
                   </StackPanel>
                 </Grid>
+
+                <TextBlock Text="最大重连次数" Style="{StaticResource SettingLabel}" Margin="0,12,0,4" />
+                <TextBox Text="{Binding MaxReconnectAttempts}" Style="{StaticResource SettingFieldBox}"
+                         ToolTip="断流后按 2/4/8/15/30 秒退避重连，达到上限即结束本次录制"
+                         AutomationProperties.AutomationId="MaxReconnectAttemptsBox" />
               </StackPanel>
             </Border>
 
             <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
               <StackPanel>
                 <TextBlock Text="本地桥接服务" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <TextBlock Text="首选端口" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                <TextBox Text="{Binding BridgePort}" Width="150" HorizontalAlignment="Left"
-                         ToolTip="只监听 127.0.0.1；端口被占用时自动顺延" />
-                <CheckBox Content="启动时自动开启" IsChecked="{Binding BridgeAutoStart}" Margin="0,10,0,0"
+
+                <TextBlock Text="首选端口" Style="{StaticResource SettingLabel}" />
+                <TextBox Text="{Binding BridgePort}" Style="{StaticResource SettingFieldBox}"
+                         ToolTip="只监听 127.0.0.1；端口被占用时自动顺延"
+                         AutomationProperties.AutomationId="BridgePortBox" />
+
+                <CheckBox Content="启动时自动开启" IsChecked="{Binding BridgeAutoStart}" Margin="0,12,0,0"
                           ToolTip="mpv 外挂播放依赖它" />
               </StackPanel>
             </Border>
@@ -229,10 +292,13 @@
             <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
               <StackPanel>
                 <TextBlock Text="日志" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
+
                 <CheckBox Content="记录详细诊断日志" IsChecked="{Binding VerboseDiagnostics}" Margin="0,0,0,8"
                           ToolTip="排查问题时开启" />
-                <TextBlock Text="日志文件个数" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                <TextBox Text="{Binding LogRetainDays}" Width="150" HorizontalAlignment="Left" />
+
+                <TextBlock Text="日志文件个数" Style="{StaticResource SettingLabel}" />
+                <TextBox Text="{Binding LogRetainDays}" Style="{StaticResource SettingFieldBox}"
+                         AutomationProperties.AutomationId="LogRetainDaysBox" />
 
                 <Grid Margin="0,12,0,0">
                   <Grid.ColumnDefinitions>
@@ -263,7 +329,7 @@
       </TabItem>
     </TabControl>
 
-    <!-- 底部操作条 -->
+    <!-- 底部操作条：保存/取消固定在右下角，主按钮用主题蓝 -->
     <Border Grid.Row="1" Background="{StaticResource PanelBackgroundBrush}" BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="0,1,0,0" Padding="14,10">
       <Grid>
         <Grid.ColumnDefinitions>
@@ -272,8 +338,10 @@
         </Grid.ColumnDefinitions>
         <TextBlock Grid.Column="0" Text="{Binding StatusMessage}" Style="{StaticResource MutedText}" TextWrapping="Wrap" VerticalAlignment="Center" />
         <StackPanel Grid.Column="1" Orientation="Horizontal">
-          <Button Content="保存" Click="OnSaveClick" MinWidth="96" IsDefault="True" Style="{StaticResource PrimaryButton}" />
-          <Button Content="取消" Click="OnCancelClick" MinWidth="96" Margin="0" IsCancel="True" />
+          <Button Content="保存" Click="OnSaveClick" MinWidth="96" IsDefault="True" Style="{StaticResource PrimaryButton}"
+                  AutomationProperties.AutomationId="SettingsSaveButton" />
+          <Button Content="取消" Click="OnCancelClick" MinWidth="96" Margin="0" IsCancel="True"
+                  AutomationProperties.AutomationId="SettingsCancelButton" />
         </StackPanel>
       </Grid>
     </Border>

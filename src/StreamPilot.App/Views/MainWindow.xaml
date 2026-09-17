@@ -178,10 +178,49 @@
               </StackPanel>
             </Border>
 
+            <!-- ===== 当前直播 =====
+                 只显示主播 / 标题 / 分区三行：宿主状态文字在画面下方状态行显示，
+                 候选线路摘要与桥接状态不再进卡片（避免与状态行重复）。 -->
+            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
+              <StackPanel>
+                <TextBlock Text="当前直播" Style="{StaticResource SectionTitle}" Margin="0,0,0,6" />
+
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                  </Grid.ColumnDefinitions>
+                  <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                  </Grid.RowDefinitions>
+
+                  <TextBlock Grid.Row="0" Grid.Column="0" Text="主播：" Style="{StaticResource MutedText}" Margin="0,0,0,2" />
+                  <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding RoomAnchor}" Style="{StaticResource ValueLine}"
+                             ToolTip="{Binding RoomAnchor}" Margin="0,0,0,2" />
+
+                  <TextBlock Grid.Row="1" Grid.Column="0" Text="标题：" Style="{StaticResource MutedText}" Margin="0,0,0,2" />
+                  <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding RoomTitle}" Style="{StaticResource ValueLine}"
+                             ToolTip="{Binding RoomTitle}" Margin="0,0,0,2" />
+
+                  <TextBlock Grid.Row="2" Grid.Column="0" Text="分区：" Style="{StaticResource MutedText}" />
+                  <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding RoomCategory}" Style="{StaticResource ValueLine}"
+                             ToolTip="{Binding RoomCategory}" />
+                </Grid>
+
+                <TextBlock Text="当前线路卡顿会自动切换到下一条候选" Style="{StaticResource MutedText}"
+                           TextWrapping="Wrap" Margin="0,6,0,0" />
+              </StackPanel>
+            </Border>
+
             <!-- ===== 录制 ===== -->
             <TextBlock Text="直播回放录制" Style="{StaticResource SectionTitle}" Margin="0,14,0,4" />
 
-            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+            <TextBlock Text="想拿最高画质（B站 4K/HDR、虎牙蓝光20M 等）需要在设置里填写对应平台的 Cookie。（设置 → 高级 → 账号）"
+                       Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,0,0,8" />
+
+            <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
               <Button Content="开始录制" Command="{Binding StartRecordingCommand}" Style="{StaticResource PrimaryButton}"
                       ToolTip="原样保存直播流，不转码；超出分片上限或主播断流时自动开新分片" />
               <Button Content="停止录制" Command="{Binding StopRecordingCommand}" />

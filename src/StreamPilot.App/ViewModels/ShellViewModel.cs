@@ -111,6 +111,21 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>单个预设开播检查的超时时间。</summary>
     private static readonly TimeSpan PresetCheckTimeout = TimeSpan.FromSeconds(10);
 
+    /// <summary>「新增预设」对话框里解析直播链接的超时时间。</summary>
+    private static readonly TimeSpan PresetLinkResolveTimeout = TimeSpan.FromSeconds(20);
+
+    /// <summary>「新增预设」默认平台未配置时的提示（对话内显示，不关闭）。</summary>
+    private const string PresetPlatformHint = "无法识别平台：请粘贴直播间链接，或在设置里指定默认平台。";
+
+    /// <summary>「新增预设」解析失败提示的前缀。</summary>
+    private const string PresetResolveFailurePrefix = "解析失败：";
+
+    /// <summary>「新增预设」解析失败提示的后缀（说明为什么没有保存）。</summary>
+    private const string PresetNotSavedSuffix = "（未保存该预设，请检查链接后重试）";
+
+    /// <summary>「新增预设」解析超时提示。</summary>
+    private const string PresetResolveTimeoutHint = "解析超时（20 秒）";
+
     /// <summary>
     /// 同一房间"页面请求重新解析 → 重新解析 → 再下发播放"的最大连续自动重试次数。
     /// </summary>
@@ -186,6 +201,11 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>已订阅状态变化的预设项（重建列表时逐个退订，避免事件悬挂）。</summary>
     private readonly List<PresetItemViewModel> _presetItemSubscriptions = [];
 
+    /// <summary>
+    /// 最近一次"新增预设"解析失败的原因（供对话框回调与日志使用，取用后清空）。
+    /// </summary>
+    private string _presetResolveFailure = string.Empty;
+
     /// <summary>预设列表当前选中项（见 <see cref="SelectedPresetItem"/>）。</summary>
     private PresetItemViewModel? _selectedPresetItem;
     private string _roomInput = string.Empty;
@@ -196,10 +216,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     private string _roomTitle = "-";
     private string _roomAnchor = "-";
     private string _roomCategory = "-";
-    private string _liveStatus = ResolveMessages.LiveStatusUnknown;
     private string _recordingSummary = "未录制";
-    private string _playerTelemetry = "-";
-    private string _candidateLineSummary = "候选线路：-";
     private string _presetSummary = "暂无预设";
     private ResolvedRoom? _currentRoom;
     private IRecordingSession? _recordingSession;
@@ -397,13 +414,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         ? "平台：未识别"
         : "平台：自动识别（当前 " + ResolvePlatformName(_effectivePlatform) + "）";
 
-    /// <summary>候选线路摘要（只显示数量，不含任何 host 或 URL）。</summary>
-    public string CandidateLineSummary
-    {
-        get => _candidateLineSummary;
-        private set => SetField(ref _candidateLineSummary, value);
-    }
-
     private void RaisePlatformChanged()
     {
         OnPropertyChanged(nameof(EffectivePlatform));
@@ -487,25 +497,11 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         private set => SetField(ref _roomCategory, value);
     }
 
-    /// <summary>直播状态词（直播中 / 未开播 / 轮播中 / 未知）。</summary>
-    public string LiveStatus
-    {
-        get => _liveStatus;
-        private set => SetField(ref _liveStatus, value);
-    }
-
     /// <summary>录制状态摘要。</summary>
     public string RecordingSummary
     {
         get => _recordingSummary;
         private set => SetField(ref _recordingSummary, value);
-    }
-
-    /// <summary>播放页遥测摘要。</summary>
-    public string PlayerTelemetry
-    {
-        get => _playerTelemetry;
-        private set => SetField(ref _playerTelemetry, value);
     }
 
     /// <summary>桥接服务状态文本。</summary>
@@ -577,7 +573,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                     break;
 
                 case PlayerTelemetryType:
-                    PlayerTelemetry = BuildTelemetrySummary(root);
                     // 遥测里的 paused 是页面的权威状态：用户直接点画面或播放页按钮都会反映到这里。
                     _isPlaybackPaused = ReadPausedFlag(root) ?? _isPlaybackPaused;
 
@@ -688,7 +683,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         IsBusy = true;
         try
         {
-            PlatformId? autoDetected = DetectPlatformFromInput();
+            PlatformId? autoDetected = DetectPlatform(_roomInput);
             PlatformId effective = autoDetected ?? _options.DefaultPlatform;
             if (effective == PlatformId.Unknown)
             {
@@ -717,8 +712,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                 RoomTitle = "-";
                 RoomAnchor = "-";
                 RoomCategory = "-";
-                LiveStatus = ResolveMessages.DescribeLiveStatus(outcome.Failure);
-                CandidateLineSummary = BuildCandidateSummary(0, 0);
                 AppendLog(StatusMessage);
                 RaiseCommandStates();
                 return;
@@ -728,15 +721,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             RoomTitle = outcome.Room.Title;
             RoomAnchor = outcome.Room.Anchor;
             RoomCategory = string.IsNullOrWhiteSpace(outcome.Room.Category) ? "-" : outcome.Room.Category;
-            LiveStatus = ResolveMessages.LiveStatusLive;
             StatusMessage = $"解析成功：{outcome.Room.Anchor} / {outcome.Room.Title}"
-                + $"（状态：{LiveStatus}，共 {outcome.Room.Candidates.Count} 条线路）";
+                + $"（状态：{ResolveMessages.LiveStatusLive}，共 {outcome.Room.Candidates.Count} 条线路）";
             AppendLog(StatusMessage);
-
-            // 界面只展示条数，不展示 host 与完整地址。
-            CandidateLineSummary = BuildCandidateSummary(
-                outcome.Room.Candidates.Count,
-                CountUsableCandidates(outcome.Room));
 
             PersistLastInput();
 
@@ -1036,17 +1023,18 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// 用户经常直接粘贴别家平台的链接，因此主界面不再提供平台下拉，
     /// 统一按链接域名识别；房间号无法从域名识别时由调用方回落到默认平台。
     /// </remarks>
+    /// <param name="input">房间号或直播间链接。</param>
     /// <returns>识别出的平台；链接为空、不是链接或域名不匹配时返回 <see langword="null"/>。</returns>
-    private PlatformId? DetectPlatformFromInput()
+    private static PlatformId? DetectPlatform(string input)
     {
-        string input = _roomInput.Trim();
-        if (!input.Contains("://", StringComparison.Ordinal)
-            || !Uri.TryCreate(input, UriKind.Absolute, out Uri? uri))
+        string trimmed = input.Trim();
+        if (!trimmed.Contains("://", StringComparison.Ordinal)
+            || !Uri.TryCreate(trimmed, UriKind.Absolute, out Uri? uri))
         {
             return null;
         }
 
-        foreach (PlatformOption option in Platforms)
+        foreach (PlatformOption option in PlatformOption.All)
         {
             if (!Uri.TryCreate(option.UrlPrefix, UriKind.Absolute, out Uri? baseUri))
             {
@@ -1127,31 +1115,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         };
     }
 
-    /// <summary>构造候选线路摘要文本（不含 host 与完整地址）。</summary>
-    /// <param name="total">候选总数。</param>
-    /// <param name="usable">仍在有效期内的候选数。</param>
-    /// <returns>形如"候选线路：12 条（可用 8 条）"的文本。</returns>
-    private static string BuildCandidateSummary(int total, int usable) =>
-        $"候选线路：{total} 条（可用 {usable} 条）";
-
-    /// <summary>统计仍在有效期内的候选数量。</summary>
-    /// <param name="room">已解析的房间。</param>
-    /// <returns>可用候选数。</returns>
-    private static int CountUsableCandidates(ResolvedRoom room)
-    {
-        DateTimeOffset now = DateTimeOffset.UtcNow;
-        int usable = 0;
-        foreach (StreamCandidate candidate in room.Candidates)
-        {
-            if (candidate.ExpiresAt is null || candidate.ExpiresAt > now)
-            {
-                usable++;
-            }
-        }
-
-        return usable;
-    }
-
     /// <summary>
     /// 暂停或继续播放。
     /// </summary>
@@ -1181,7 +1144,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         _playback.StopActive();
         _activeSessionId = 0;
         _isPlaybackPaused = false;
-        PlayerTelemetry = "-";
         StatusMessage = "已停止播放（画面已关闭，中继已释放）。";
         AppendLog(StatusMessage);
     }
@@ -1627,43 +1589,146 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         await ResolveAsync().ConfigureAwait(true);
     }
 
-    /// <summary>把当前平台与房间号保存为预设（同名同平台会覆盖），并立刻检测其开播状态。</summary>
+    /// <summary>
+    /// 新增预设：弹出两字段对话框（主播名称 + 直播链接），解析成功后保存并在列表里选中它。
+    /// </summary>
+    /// <remarks>
+    /// 预设内容全部来自对话框，不读取「直播源」卡片里当前的输入；
+    /// 解析走与「解析房间」相同的 <see cref="IRoomResolver"/> 流程（按链接域名识别平台）。
+    /// 解析失败或超时一律不保存：地址不可用的预设只会让用户在列表里反复点到解析失败。
+    /// </remarks>
     /// <returns>异步任务。</returns>
     private async Task SavePresetAsync()
     {
-        string roomInput = _roomInput.Trim();
-        if (roomInput.Length == 0)
+        PresetDialog.Show(System.Windows.Application.Current?.MainWindow, AddPresetFromDialogAsync);
+        await Task.CompletedTask.ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// 「新增预设」对话框的校验回调：解析直播链接，成功则保存预设并返回 <see langword="null"/>。
+    /// </summary>
+    /// <param name="anchorName">主播名称（作为预设名）。</param>
+    /// <param name="link">直播链接或房间号。</param>
+    /// <returns>失败原因；成功返回 <see langword="null"/>。</returns>
+    private async Task<string?> AddPresetFromDialogAsync(string anchorName, string link)
+    {
+        string name = anchorName.Trim();
+        string input = link.Trim();
+        if (name.Length == 0)
         {
-            // 明确告诉用户"为什么没加上"，而不是让按钮灰着或静默返回。
-            StatusMessage = "新增预设失败：请先填写房间号或直播间链接。";
-            AppendLog("新增预设失败：房间号为空");
-            return;
+            return "请填写主播名称。";
         }
 
-        PlatformId platform = _effectivePlatform == PlatformId.Unknown ? _selectedPlatformOption.Id : _effectivePlatform;
-        string defaultName = string.IsNullOrWhiteSpace(_roomAnchor) || _roomAnchor == "-"
-            ? roomInput
-            : _roomAnchor;
-        string? name = InputDialog.Show(System.Windows.Application.Current?.MainWindow, "新增预设", "给这个直播间起个名字（列表里一眼就能找到）", defaultName);
-        if (string.IsNullOrWhiteSpace(name))
+        if (input.Length == 0)
         {
-            StatusMessage = "已取消新增预设。";
-            return;
+            return "请填写直播链接（可粘贴直播间网址或房间号）。";
         }
 
-        if (!_presetStore.Add(new RoomPreset(name.Trim(), platform, roomInput)))
+        if (name.Length > PresetStore.MaxNameLength)
         {
-            StatusMessage = "新增预设失败：名称或房间号不合法（名称最长 60 字）。";
-            AppendLog("新增预设失败：" + name);
-            return;
+            return $"主播名称最长 {PresetStore.MaxNameLength} 字，请缩短。";
+        }
+
+        ResolvedRoom? room = await ResolvePresetLinkAsync(input).ConfigureAwait(true);
+        if (room is null)
+        {
+            return PresetResolveFailureMessage();
+        }
+
+        RoomPreset preset = new(name, room.Platform, BuildPresetRoomInput(room));
+        if (!_presetStore.Add(preset))
+        {
+            return $"保存预设失败：请检查名称（最长 {PresetStore.MaxNameLength} 字）与链接。";
         }
 
         // 重建列表并把新预设设为选中项，用户在列表里能立刻看到它。
-        RefreshPresetItems(name.Trim());
-        StatusMessage = $"已新增预设「{name.Trim()}」，正在后台检测它是否开播（当前共 {PresetItems.Count} 个）。";
-        AppendLog("已新增预设：" + name.Trim());
+        RefreshPresetItems(name);
+        StatusMessage = $"已新增预设「{name}」（{ResolvePlatformName(room.Platform)}），"
+            + $"正在后台检测它是否开播（当前共 {PresetItems.Count} 个）。";
+        AppendLog("已新增预设：" + name + " → " + preset.RoomInput);
         _ = RefreshPresetStatusAsync();
-        await Task.CompletedTask.ConfigureAwait(true);
+        return null;
+    }
+
+    /// <summary>解析"新增预设"对话框里的直播链接；带超时保护，绝不无限等待。</summary>
+    /// <param name="input">直播链接或房间号。</param>
+    /// <returns>解析出的房间；失败或超时返回 <see langword="null"/>。</returns>
+    private async Task<ResolvedRoom?> ResolvePresetLinkAsync(string input)
+    {
+        RoomQuery? query = BuildPresetQuery(input);
+        if (query is null)
+        {
+            return null;
+        }
+
+        using CancellationTokenSource timeout = new(PresetLinkResolveTimeout);
+        try
+        {
+            ResolveOutcome outcome = await _resolver.ResolveAsync(query, timeout.Token).ConfigureAwait(true);
+            if (outcome.Success && outcome.Room is not null)
+            {
+                return outcome.Room;
+            }
+
+            _presetResolveFailure = outcome.Message.Length > 0
+                ? outcome.Message
+                : ResolveMessages.DescribeFailure(outcome.Failure);
+            _logger.Warn(_moduleName, "新增预设解析失败。", new Dictionary<string, object?>
+            {
+                ["platform"] = query.Platform.ToString(),
+                ["failure"] = outcome.Failure.ToString(),
+            });
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            _presetResolveFailure = PresetResolveTimeoutHint;
+            _logger.Warn(_moduleName, "新增预设解析超时。", new Dictionary<string, object?>
+            {
+                ["platform"] = query.Platform.ToString(),
+            });
+            return null;
+        }
+    }
+
+    /// <summary>构造"新增预设"对话框里的解析请求（平台按链接域名识别，识别不出时用默认平台）。</summary>
+    /// <param name="input">直播链接或房间号。</param>
+    /// <returns>解析请求；平台无法确定时返回 <see langword="null"/>。</returns>
+    private RoomQuery? BuildPresetQuery(string input)
+    {
+        bool looksLikeUrl = input.Contains("://", StringComparison.Ordinal)
+            || input.Contains('/', StringComparison.Ordinal);
+        PlatformId? detected = DetectPlatform(input);
+        PlatformId platform = detected ?? _options.DefaultPlatform;
+        if (platform == PlatformId.Unknown)
+        {
+            _presetResolveFailure = PresetPlatformHint;
+            return null;
+        }
+
+        RoomQuery query = looksLikeUrl
+            ? RoomQuery.FromUrl(platform, input)
+            : RoomQuery.FromRoomId(platform, input);
+
+        return query with
+        {
+            Cookie = _options.Platforms.ForPlatform(platform),
+        };
+    }
+
+    /// <summary>构造预设里保存的房间输入：用平台返回的最终房间号（短号跳转后也稳定）。</summary>
+    /// <param name="room">解析出的房间。</param>
+    /// <returns>房间号。</returns>
+    private static string BuildPresetRoomInput(ResolvedRoom room) => room.RoomId;
+
+    /// <summary>拼装"新增预设"解析失败的提示文本（说明为什么没有保存）。</summary>
+    /// <returns>面向用户的提示文本。</returns>
+    private string PresetResolveFailureMessage()
+    {
+        string reason = _presetResolveFailure.Length > 0 ? _presetResolveFailure : ResolveMessages.DescribeFailure(ResolveFailure.Unknown);
+        _presetResolveFailure = string.Empty;
+        AppendLog("新增预设解析失败：" + reason + "（未保存）");
+        return PresetResolveFailurePrefix + reason + PresetNotSavedSuffix;
     }
 
     /// <summary>删除指定预设（不从界面发起解析）。</summary>
@@ -1802,20 +1867,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         }
 
         return "未知";
-    }
-
-    private static string BuildTelemetrySummary(JsonElement root)
-    {
-        string buffered = root.TryGetProperty("bufferedAheadMs", out JsonElement bufferElement) && bufferElement.ValueKind == JsonValueKind.Number
-            ? bufferElement.GetInt32().ToString(System.Globalization.CultureInfo.InvariantCulture) + "ms"
-            : "-";
-        string rate = root.TryGetProperty("playbackRate", out JsonElement rateElement) && rateElement.ValueKind == JsonValueKind.Number
-            ? rateElement.GetDouble().ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + "x"
-            : "-";
-        string dropped = root.TryGetProperty("droppedVideoFrames", out JsonElement dropElement) && dropElement.ValueKind == JsonValueKind.Number
-            ? dropElement.GetInt32().ToString(System.Globalization.CultureInfo.InvariantCulture)
-            : "-";
-        return $"缓冲 {buffered} · 倍速 {rate} · 丢帧 {dropped}";
     }
 
     /// <summary>
