@@ -341,7 +341,7 @@ public sealed class PlatformParserTests
         Assert.Equal("蓝光10M", qualities[0].Label);
         Assert.True(qualities[0].IsBest);
         Assert.Equal("4000", qualities[1].Key);
-        Assert.Equal(4, qualities[1].BitrateKbps);
+        Assert.Equal(4000, qualities[1].BitrateKbps);
         Assert.Equal(0, selected);
 
         (IReadOnlyList<QualityOption> _, int? picked) =

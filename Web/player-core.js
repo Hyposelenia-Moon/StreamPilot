@@ -127,6 +127,7 @@ const INBOUND_MESSAGE_TYPES = Object.freeze({
   PLAY: 'play',
   CHASE: 'chase',
   STOP: 'stop',
+  TARGET: 'target',
 });
 
 /** 页面消息类型：页面 → 宿主。 */
@@ -350,7 +351,7 @@ function getStartupTimeoutMs(plan) {
 
 /**
  * 模式标签（用于界面提示）。
- * @param {{mode?:string,extremeTargetMs?:number}} plan 播放计划。
+ * @param {{mode?:string,extremeTargetMs?:number,extremeTargetSeconds?:number}} plan 播放计划或运行对象。
  * @returns {string} 中文标签。
  */
 function modeLabel(plan) {
@@ -358,7 +359,12 @@ function modeLabel(plan) {
     return '稳定缓冲';
   }
 
-  return '极限追帧 ' + normalizeExtremeTargetSeconds(plan.extremeTargetMs) * 1000 + ' ms';
+  // 运行对象过去只带 extremeTargetSeconds：两种形状都认，
+  // 否则会在 missing 字段时静默回落成默认档位（表现为"选了 250 却显示 200"）。
+  const milliseconds = Number.isFinite(plan.extremeTargetMs)
+    ? plan.extremeTargetMs
+    : Number.isFinite(plan.extremeTargetSeconds) ? plan.extremeTargetSeconds * 1000 : plan.extremeTargetMs;
+  return '极限追帧 ' + normalizeExtremeTargetSeconds(milliseconds) * 1000 + ' ms';
 }
 
 /**
@@ -409,6 +415,50 @@ function buildPlaybackPlan(payload, canPlayFlv, canPlayHls, hevcSupported) {
 }
 
 /**
+ * 在不重连的前提下把追帧档位应用到一个正在播放的运行对象上。
+ * @param {object} run 运行对象（含 extreme / extremeTargetMs）。
+ * @param {*} extremeTargetMs 宿主下发的目标延迟（150/200/250）。
+ * @returns {boolean} 档位发生变化返回 true。
+ */
+function applyExtremeTarget(run, extremeTargetMs) {
+  if (!run || typeof run !== 'object') {
+    return false;
+  }
+
+  const milliseconds = Number(extremeTargetMs);
+  const normalized = EXTREME_TARGETS_MS.includes(milliseconds) ? milliseconds : DEFAULT_EXTREME_TARGET_MS;
+  const changed = run.extremeTargetMs !== normalized;
+  run.extremeTargetMs = normalized;
+  run.extremeTargetSeconds = normalized / 1000;
+  run.extreme = true;
+  run.mode = 'extreme';
+  return changed;
+}
+
+/**
+ * 给档位名补上码率后缀（档位名里已经写了码率时不重复追加）。
+ * @param {string} label 平台给出的档位名（例如「蓝光4M」）。
+ * @param {number|null} bitrateKbps 码率（kbps），未知时传 null。
+ * @returns {string} 展示用文字。
+ */
+function appendBitrate(label, bitrateKbps) {
+  if (!Number.isFinite(bitrateKbps) || bitrateKbps <= 0) {
+    return label;
+  }
+
+  // 档位名里已经带「4M」「20M」「4000kbps」这类码率时不再叠加，避免出现「蓝光4M · 4000 kbps」。
+  // 注意不要把「4K」（分辨率）当成码率，所以只认 M/mbps/kbps 这几种单位。
+  if (/[0-9]\s*(m|mbps|kbps)\b/i.test(label)) {
+    return label;
+  }
+
+  const text = bitrateKbps >= 1000
+    ? (Math.round(bitrateKbps / 100) / 10) + ' Mbps'
+    : bitrateKbps + ' kbps';
+  return label + ' · ' + text;
+}
+
+/**
  * 规范化宿主下发的画质档位列表，供页面渲染下拉框。
  * @param {*} qualities 宿主 play 消息里的 qualities 字段。
  * @param {*} selectedKey 当前生效的档位键。
@@ -433,10 +483,10 @@ function normalizeQualities(qualities, selectedKey) {
 
     const rawLabel = typeof entry.label === 'string' ? entry.label.trim() : '';
     const bitrate = Number.isFinite(entry.bitrateKbps) ? Math.round(entry.bitrateKbps) : null;
-    const label = rawLabel.length > 0 ? rawLabel : key;
+    const base = rawLabel.length > 0 ? rawLabel : key;
     items.push({
       key,
-      label: bitrate !== null && bitrate > 0 ? label + ' · ' + bitrate + ' kbps' : label,
+      label: appendBitrate(base, bitrate),
       selected: key === wanted,
     });
   }
@@ -517,6 +567,7 @@ const StreamPilotPlayerCore = {
   modeLabel,
   buildPlaybackPlan,
   normalizeQualities,
+  applyExtremeTarget,
   isHttpStatusInvalid,
   isMseError,
   isHevcUnsupportedDescription,

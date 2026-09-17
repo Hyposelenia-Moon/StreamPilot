@@ -6,6 +6,7 @@
         MinHeight="600" MinWidth="1320"
         Background="{StaticResource WindowBackgroundBrush}"
         Icon="pack://application:,,,/Assets/streampilot.ico"
+        TextElement.Foreground="{StaticResource TextBrush}"
         FontFamily="{StaticResource UiFontFamily}"
         FontSize="13"
         UseLayoutRounding="True"
@@ -67,8 +68,8 @@
                 </TextBlock.Style>
               </TextBlock>
             </Grid>
-            <Button Grid.Column="2" Content="保存预设" Command="{Binding SavePresetCommand}" ToolTip="把当前平台与房间号保存为预设" Margin="8,0,0,0" />
-            <Button Grid.Column="3" Content="删除预设" Command="{Binding DeleteSelectedPresetCommand}" ToolTip="删除下拉中选中的预设" />
+            <Button Grid.Column="2" Content="＋ 新增预设" Command="{Binding SavePresetCommand}" ToolTip="把当前平台与房间号存进下拉，下次一键打开" Margin="8,0,0,0" />
+            <Button Grid.Column="3" Content="删除" Command="{Binding DeleteSelectedPresetCommand}" ToolTip="删除下拉中选中的预设" />
             <Button Grid.Column="4" Content="⚙" Command="{Binding OpenSettingsCommand}"
                     ToolTip="打开设置窗口" MinWidth="36" Padding="8,4" Margin="0" FontSize="14"
                     AutomationProperties.AutomationId="OpenSettingsButton" />

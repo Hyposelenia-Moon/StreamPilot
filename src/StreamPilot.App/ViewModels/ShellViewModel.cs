@@ -49,6 +49,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>宿主要求页面停止的消息类型。</summary>
     private const string HostStopType = "stop";
+
+    /// <summary>宿主要求页面热切换追帧档位的消息类型。</summary>
+    private const string HostTargetType = "target";
     /// <summary>页面进入全屏的消息类型。</summary>
     private const string PlayerFullscreenEnterType = "fullscreen-enter";
 
@@ -161,7 +164,10 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         OpenLogFolderCommand = new RelayCommand(_ => OpenFolder(AppPaths.LogDirectory));
         OpenSettingsCommand = new RelayCommand(_ => OpenSettings());
         DeleteSelectedPresetCommand = new AsyncRelayCommand(_ => DeleteSelectedPresetAsync(), HandleCommandErrorAsync, _ => SelectedPreset is not null);
-        SavePresetCommand = new AsyncRelayCommand(_ => SavePresetAsync(), HandleCommandErrorAsync, _ => _roomInput.Trim().Length > 0);
+
+        // 保存预设刻意**始终可点**：按钮灰着没有任何解释，用户会以为"预设加不了"。
+        // 点进去再校验并给出明确提示，比禁用按钮更容易理解。
+        SavePresetCommand = new AsyncRelayCommand(_ => SavePresetAsync(), HandleCommandErrorAsync);
     }
 
     /// <summary>视图模型依赖集合（由组合根构造）。</summary>
@@ -493,6 +499,12 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                 case PlayerStatusType:
                     StatusMessage = message.Length == 0 ? StatusMessage : message;
                     AppendLog(message);
+                    if (message.Contains("播放已开始", StringComparison.Ordinal) || root.TryGetProperty("firstFrameMs", out _))
+                    {
+                        // 新会话已经出画，这时才回收上一轮中继（否则切换瞬间会黑屏）。
+                        _playback.ReleasePreviousRelays();
+                    }
+
                     break;
 
                 case PlayerErrorType:
@@ -853,6 +865,15 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
         ExtremeTargetMs = target;
         PersistPlaybackSettings();
+
+        // 正在播放时热切换：把新档位直接下发给页面，而不是等下一次播放才生效。
+        if (_isPlayerReady && _activeSessionId != 0)
+        {
+            SendToPlayer(new { type = HostTargetType, extremeTargetMs = ExtremeTargetMs });
+            AppendLog("追帧档位切换为 " + ExtremeTargetMs + " ms（已应用到当前播放）");
+            return;
+        }
+
         AppendLog("追帧档位切换为 " + ExtremeTargetMs + " ms（下次播放生效）");
     }
 
@@ -950,23 +971,26 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         string roomInput = _roomInput.Trim();
         if (roomInput.Length == 0)
         {
-            StatusMessage = "请先填写房间号或链接，再保存为预设。";
+            // 明确告诉用户"为什么没加上"，而不是让按钮灰着或静默返回。
+            StatusMessage = "新增预设失败：请先填写房间号或直播间链接。";
+            AppendLog("新增预设失败：房间号为空");
             return;
         }
 
         string defaultName = string.IsNullOrWhiteSpace(_roomAnchor) || _roomAnchor == "-"
             ? roomInput
             : _roomAnchor;
-        string? name = InputDialog.Show(System.Windows.Application.Current?.MainWindow, "保存预设", "预设名称（便于在下拉里识别）", defaultName);
+        string? name = InputDialog.Show(System.Windows.Application.Current?.MainWindow, "新增预设", "给这个直播间起个名字（存在下拉里方便下次点开）", defaultName);
         if (string.IsNullOrWhiteSpace(name))
         {
+            StatusMessage = "已取消新增预设。";
             return;
         }
 
         if (!_presetStore.Add(new RoomPreset(name.Trim(), SelectedPlatform, roomInput)))
         {
-            StatusMessage = "保存预设失败，请检查名称与房间号。";
-            AppendLog("保存预设失败：" + name);
+            StatusMessage = "新增预设失败：名称或房间号不合法（名称最长 60 字）。";
+            AppendLog("新增预设失败：" + name);
             return;
         }
 
@@ -982,8 +1006,8 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             _suppressPresetAutoApply = false;
         }
 
-        StatusMessage = "已保存预设「" + name.Trim() + "」。";
-        AppendLog("已保存预设：" + name.Trim());
+        StatusMessage = $"已新增预设「{name.Trim()}」，下拉里已选中它（当前共 {Presets.Count} 个）。";
+        AppendLog("已新增预设：" + name.Trim());
         await Task.CompletedTask.ConfigureAwait(true);
     }
 

@@ -1069,6 +1069,8 @@
       /** 处理宿主下发的 play 消息。 */
       async function handlePlay(payload) {
         if (state.run) {
+          // 切换画质/重新解析时先给一句话，避免旧画面销毁后出现纯黑屏。
+          setHint('正在切换到新线路…', 'info');
           stopRun(state.run);
           state.run = null;
         }
@@ -1094,6 +1096,7 @@
           sessionId: plan.sessionId,
           mode: plan.mode,
           extreme: plan.extreme,
+          extremeTargetMs: plan.extremeTargetMs,
           extremeTargetSeconds: plan.extremeTargetSeconds,
           candidates: plan.candidates,
           queue: [],
@@ -1302,6 +1305,20 @@
         elements.qualitySelect.disabled = !multiple;
       }
 
+      /** 追帧档位热切换：不重连，只改当前运行对象的追帧目标并立即追帧。 */
+      function handleTargetChange(payload) {
+        const changed = core.applyExtremeTarget(state.run, payload.extremeTargetMs);
+        updateModeHint();
+        if (!changed || !state.run) {
+          return;
+        }
+
+        // 目标延迟变小了：立刻向缓冲末端追一次（保留 0.08 秒），让新档位马上生效。
+        if (chaseToLiveEdge(0.08)) {
+          report(outbound.STATUS, '追帧档位已切换为 ' + state.run.extremeTargetMs + ' ms', state.run, state.run.currentCandidate);
+        }
+      }
+
       /** 处理来自宿主的消息。 */
       function handleHostMessage(payload) {
         if (!payload || typeof payload !== 'object') {
@@ -1318,6 +1335,9 @@
             break;
           case core.INBOUND_MESSAGE_TYPES.STOP:
             handleStop();
+            break;
+          case core.INBOUND_MESSAGE_TYPES.TARGET:
+            handleTargetChange(payload);
             break;
           default:
             if (payload.type === 'volume') {

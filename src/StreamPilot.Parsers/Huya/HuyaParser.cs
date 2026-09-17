@@ -436,7 +436,8 @@ internal sealed class HuyaParser : PlatformParserBase
             {
                 Key = bitRate.ToString(CultureInfo.InvariantCulture),
                 Label = label.Length > 0 ? label : DescribeBitRate(bitRate),
-                BitrateKbps = bitRate > 0 ? bitRate / 1000 : null,
+                BitrateKbps = bitRate > 0 ? bitRate : null,
+                // 虎牙的 iBitRate 单位就是 kbps（4000 = 4 Mbps）。
                 IsBest = options.Count == 0,
             });
         }

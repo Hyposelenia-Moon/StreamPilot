@@ -45,9 +45,13 @@
       <!-- 程序图标：窗口（含弹出的输入框）统一从这里取，避免各处硬编码 pack URI -->
       <ImageSource x:Key="AppIcon">pack://application:,,,/Assets/streampilot.ico</ImageSource>
 
-      <!-- 无主题键样式：作为默认样式应用于对应控件类型 -->
+      <!--
+        文本默认值：隐式 TextBlock 样式**只设排版，不设前景色**。
+        原因是隐式样式会连按钮里的内部 TextBlock 一起命中：一旦在这里写死前景色，
+        主按钮/选中档位上的白字会被强制成正文色（蓝底深字，看不清）。
+        颜色统一由窗口的 TextElement.Foreground 提供，按钮内部文本继承按钮自己的前景色。
+      -->
       <Style TargetType="TextBlock">
-        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
         <Setter Property="VerticalAlignment" Value="Center" />
         <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
         <Setter Property="FontSize" Value="13" />
@@ -59,12 +63,14 @@
       </Style>
 
       <Style x:Key="SectionTitle" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
         <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="FontSize" Value="14" />
         <Setter Property="Margin" Value="0,14,0,6" />
       </Style>
 
       <Style x:Key="ValueText" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
         <Setter Property="TextWrapping" Value="Wrap" />
         <Setter Property="VerticalAlignment" Value="Top" />
       </Style>

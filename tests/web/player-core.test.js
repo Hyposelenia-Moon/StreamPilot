@@ -195,8 +195,8 @@ test('normalizeQualities 生成下拉项并回落到首档', () => {
   assert.equal(picked.items.length, 2);
   assert.equal(picked.selectedKey, '10000');
   assert.deepEqual(picked.items.map((item) => item.selected), [false, true]);
-  assert.equal(picked.items[0].label, '4K 原画 · 20000 kbps');
-  assert.equal(picked.items[1].label, '原画 · 10000 kbps');
+  assert.equal(picked.items[0].label, '4K 原画 · 20 Mbps');
+  assert.equal(picked.items[1].label, '原画 · 10 Mbps');
 
   const fallback = core.normalizeQualities(payload, 'not-exist');
   assert.equal(fallback.selectedKey, '20000');
@@ -208,4 +208,32 @@ test('normalizeQualities 生成下拉项并回落到首档', () => {
 
 test('OUTBOUND_MESSAGE_TYPES 包含画质消息', () => {
   assert.equal(core.OUTBOUND_MESSAGE_TYPES.QUALITY, 'quality');
+});
+
+test('appendBitrate 不重复叠加档位名里已有的码率', () => {
+  assert.equal(core.normalizeQualities([{ key: '4000', label: '蓝光4M', bitrateKbps: 4000 }], '4000').items[0].label, '蓝光4M');
+  assert.equal(core.normalizeQualities([{ key: '20000', label: '蓝光20M', bitrateKbps: 20000 }], '20000').items[0].label, '蓝光20M');
+  assert.equal(core.normalizeQualities([{ key: 'x', label: '超清', bitrateKbps: 2500 }], 'x').items[0].label, '超清 · 2.5 Mbps');
+  assert.equal(core.normalizeQualities([{ key: 'y', label: '流畅', bitrateKbps: 500 }], 'y').items[0].label, '流畅 · 500 kbps');
+  assert.equal(core.normalizeQualities([{ key: 'z', label: '原画' }], 'z').items[0].label, '原画');
+});
+
+test('modeLabel 正确显示 250/150 档位（含缺失 extremeTargetMs 的运行对象）', () => {
+  assert.equal(core.modeLabel({ mode: 'extreme', extremeTargetMs: 250 }), '极限追帧 250 ms');
+  assert.equal(core.modeLabel({ mode: 'extreme', extremeTargetMs: 150 }), '极限追帧 150 ms');
+  assert.equal(core.modeLabel({ mode: 'extreme', extremeTargetSeconds: 0.25 }), '极限追帧 250 ms');
+  assert.equal(core.modeLabel({ mode: 'stable' }), '稳定缓冲');
+  assert.equal(core.modeLabel(null), '稳定缓冲');
+});
+
+test('applyExtremeTarget 热切换档位', () => {
+  const run = { mode: 'extreme', extreme: true, extremeTargetMs: 200, extremeTargetSeconds: 0.2 };
+  assert.equal(core.applyExtremeTarget(run, 250), true);
+  assert.equal(run.extremeTargetMs, 250);
+  assert.equal(run.extremeTargetSeconds, 0.25);
+  assert.equal(core.applyExtremeTarget(run, 250), false);
+  run.extremeTargetMs = 200;
+  assert.equal(core.applyExtremeTarget(run, 999), true);
+  assert.equal(run.extremeTargetMs, 250, '非法档位回落到默认 250');
+  assert.equal(core.applyExtremeTarget(null, 250), false);
 });

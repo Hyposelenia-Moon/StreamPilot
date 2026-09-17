@@ -37,7 +37,16 @@ public interface IPlaybackCoordinator
     /// <summary>当前活动的播放会话标识；无会话时为 0。</summary>
     int ActiveSessionId { get; }
 
-    /// <summary>停止当前播放会话。</summary>
+    /// <summary>
+    /// 释放"上一轮"的中继注册。
+    /// </summary>
+    /// <remarks>
+    /// 准备新会话时**不能**立刻释放旧中继：切画质/切线路时页面仍在播旧地址，
+    /// 立刻释放会让正在播放的画面直接黑屏。改由宿主在收到"播放已开始"后调用本方法回收。
+    /// </remarks>
+    void ReleasePreviousRelays();
+
+    /// <summary>停止当前播放会话（同时释放新旧两轮中继）。</summary>
     void StopActive();
 }
 

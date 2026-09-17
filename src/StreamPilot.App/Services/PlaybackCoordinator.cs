@@ -29,6 +29,7 @@ public sealed class PlaybackCoordinator : IPlaybackCoordinator
     private readonly string _moduleName = "App.Playback";
     private readonly Lock _relayGate = new();
     private readonly List<string> _activeRelayUrls = [];
+    private readonly List<string> _previousRelayUrls = [];
     private int _nextSessionId;
 
     /// <summary>初始化播放编排器。</summary>
@@ -66,8 +67,9 @@ public sealed class PlaybackCoordinator : IPlaybackCoordinator
         DateTimeOffset now = DateTimeOffset.UtcNow;
         StreamPilotOptions options = _optionsProvider();
 
-        // 新一轮播放开始前释放上一轮注册的中继，避免中继注册与令牌长期堆积在内存中。
-        ReleaseActiveRelays();
+        // 新一轮播放开始前把"上一轮"挪到待回收位置，而不是立刻释放：
+        // 切画质/重解析时页面可能还在播旧地址，立刻释放会让画面黑屏。
+        RetireActiveRelays();
 
         List<WebPlayerCandidate> playable = [];
         bool hasUnsupportedCodec = false;
@@ -186,10 +188,48 @@ public sealed class PlaybackCoordinator : IPlaybackCoordinator
     }
 
     /// <inheritdoc />
+    public void ReleasePreviousRelays()
+    {
+        string[] urls;
+        lock (_relayGate)
+        {
+            if (_previousRelayUrls.Count == 0)
+            {
+                return;
+            }
+
+            urls = [.. _previousRelayUrls];
+            _previousRelayUrls.Clear();
+        }
+
+        foreach (string url in urls)
+        {
+            _bridge.ReleaseRelay(url);
+        }
+    }
+
+    /// <inheritdoc />
     public void StopActive()
     {
         ActiveSessionId = 0;
+        ReleasePreviousRelays();
         ReleaseActiveRelays();
+    }
+
+    /// <summary>把当前会话的中继挪到"上一轮"待回收列表（新会话起播后由宿主回收）。</summary>
+    private void RetireActiveRelays()
+    {
+        ReleasePreviousRelays();
+        lock (_relayGate)
+        {
+            if (_activeRelayUrls.Count == 0)
+            {
+                return;
+            }
+
+            _previousRelayUrls.AddRange(_activeRelayUrls);
+            _activeRelayUrls.Clear();
+        }
     }
 
     /// <summary>释放当前记录的所有中继注册。</summary>

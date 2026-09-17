@@ -6,6 +6,7 @@
         MinHeight="560" MinWidth="760"
         Background="{StaticResource WindowBackgroundBrush}"
         Icon="pack://application:,,,/Assets/streampilot.ico"
+        TextElement.Foreground="{StaticResource TextBrush}"
         FontFamily="{StaticResource UiFontFamily}"
         FontSize="13"
         UseLayoutRounding="True"
