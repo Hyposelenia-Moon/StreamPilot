@@ -15,12 +15,29 @@
   <script src="./mpegts.js"></script>
   <script src="./hls.js"></script>
   <style>
+    /*
+      配色策略（修复"白底白字"）：
+      1. html 上先给出无条件的深色兜底（不依赖 CSS 变量），避免 :root 变量未生效时出现白底；
+      2. color-scheme: dark 让下拉框、滚动条、range 等"原生控件"也走深色，不受系统浅色主题影响；
+      3. 每个元素都显式声明 color/background/border，不依赖从 body 继承，杜绝"白底白字"组合；
+      4. 强制配色模式（Windows 高对比度）下本页面依旧保持深色，避免系统强制色把文字变白。
+    */
+    html {
+      background: #101216;
+      color: #e6e9ee;
+      color-scheme: dark;
+    }
+
     :root {
       --bg: #101216;
       --panel: #16191f;
       --border: #262b33;
+      --border-strong: #38404d;
       --text: #e6e9ee;
+      --text-strong: #ffffff;
       --muted: #98a2b3;
+      --control: #1e232b;
+      --control-active: #1b2836;
       --accent: #4c8dff;
       --warn: #f0b429;
       --error: #ef5350;
@@ -35,10 +52,38 @@
     body {
       margin: 0;
       height: 100%;
-      background: var(--bg);
-      color: var(--text);
+      background: #101216;
+      color: #e6e9ee;
       font: 13px/1.5 "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
       overflow: hidden;
+      -webkit-text-size-adjust: 100%;
+    }
+
+    /* 强制配色模式下保持既定深色，避免出现"系统白底 + 本页浅色文字"的不可读组合 */
+    @media (forced-colors: active) {
+      html,
+      body,
+      header,
+      footer,
+      #stage,
+      #controls,
+      #logPanel,
+      #statusLine,
+      #hint,
+      #volDisplay {
+        forced-color-adjust: none;
+        background: #101216;
+        color: #e6e9ee;
+      }
+
+      button,
+      select,
+      input[type="range"] {
+        forced-color-adjust: none;
+        background: #1e232b;
+        color: #e6e9ee;
+        border: 1px solid #38404d;
+      }
     }
 
     #root {
@@ -52,8 +97,8 @@
       align-items: center;
       gap: 8px;
       padding: 6px 10px;
-      background: var(--panel);
-      border-bottom: 1px solid var(--border);
+      background: #16191f;
+      border-bottom: 1px solid #262b33;
       flex: 0 0 auto;
     }
 
@@ -69,16 +114,62 @@
     button,
     input[type="range"] {
       font: inherit;
-      color: var(--text);
-      background: #1e232b;
-      border: 1px solid var(--border);
+      color: #e6e9ee;
+      background-color: #1e232b;
+      border: 1px solid #262b33;
       border-radius: 6px;
       padding: 4px 8px;
+      -webkit-appearance: none;
+      appearance: none;
     }
 
-    select {
+    /* 下拉框展开后的选项列表由系统绘制，必须单独指定颜色，否则在浅色主题下是白底白字 */
+    select option {
+      background-color: #1e232b;
+      color: #e6e9ee;
+    }
+
+    /*
+      预设下拉必须自带宽度与最小宽度：
+      放在 flex 容器里若被压缩成十几像素，文字会被裁掉，看起来就像"空白/看不见"。
+    */
+    #presetSelect {
+      width: 220px;
+      min-width: 140px;
       max-width: 260px;
-      min-width: 0;
+      text-overflow: ellipsis;
+      background-image: linear-gradient(45deg, transparent 50%, #98a2b3 50%), linear-gradient(135deg, #98a2b3 50%, transparent 50%);
+      background-position: calc(100% - 15px) calc(50% - 2px), calc(100% - 10px) calc(50% - 2px);
+      background-size: 5px 5px, 5px 5px;
+      background-repeat: no-repeat;
+      padding-right: 24px;
+    }
+
+    /* range 滑块：加大对比度，避免在某些主题下"看不见" */
+    input[type="range"] {
+      padding: 0;
+      height: 20px;
+      width: 140px;
+      background: transparent;
+      border: none;
+      accent-color: #4c8dff;
+    }
+
+    input[type="range"]::-webkit-slider-runnable-track {
+      height: 4px;
+      border-radius: 2px;
+      background: #38404d;
+    }
+
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px;
+      height: 14px;
+      margin-top: -5px;
+      border-radius: 50%;
+      background: #4c8dff;
+      border: 1px solid #101216;
     }
 
     button {
@@ -87,7 +178,7 @@
     }
 
     button:hover:not(:disabled) {
-      border-color: var(--accent);
+      border-color: #4c8dff;
     }
 
     button:disabled {
@@ -96,8 +187,8 @@
     }
 
     button.active {
-      border-color: var(--accent);
-      background: #1b2836;
+      border-color: #4c8dff;
+      background-color: #1b2836;
     }
 
     #modeGroup {
@@ -117,14 +208,14 @@
     #stage {
       position: relative;
       flex: 1 1 auto;
-      background: #000;
+      background: #000000;
       min-height: 0;
     }
 
     video {
       width: 100%;
       height: 100%;
-      background: #000;
+      background-color: #000000;
       object-fit: contain;
       position: relative;
       z-index: 1;
@@ -139,12 +230,12 @@
       max-width: 82%;
       padding: 14px 18px;
       border-radius: 10px;
-      background: rgba(12, 14, 18, 0.82);
-      border: 1px solid var(--border);
+      background: rgba(12, 14, 18, 0.92);
+      border: 1px solid #262b33;
+      color: #e6e9ee;
       text-align: center;
       white-space: pre-wrap;
       pointer-events: none;
-      color: var(--text);
     }
 
     #hint.empty {
@@ -153,11 +244,11 @@
     }
 
     #hint[data-level="warn"] {
-      border-color: var(--warn);
+      border-color: #f0b429;
     }
 
     #hint[data-level="error"] {
-      border-color: var(--error);
+      border-color: #ef5350;
     }
 
     #hint.hidden,
@@ -173,16 +264,17 @@
       z-index: 2;
       padding: 4px 10px;
       border-radius: 6px;
-      background: rgba(12, 14, 18, 0.78);
-      border: 1px solid var(--border);
+      background: rgba(12, 14, 18, 0.92);
+      border: 1px solid #262b33;
+      color: #e6e9ee;
     }
 
     footer {
       flex: 0 0 auto;
       display: flex;
       flex-direction: column;
-      border-top: 1px solid var(--border);
-      background: var(--panel);
+      border-top: 1px solid #262b33;
+      background: #16191f;
     }
 
     #controls {
@@ -191,11 +283,12 @@
       gap: 8px;
       padding: 6px 10px;
       flex-wrap: wrap;
+      color: #e6e9ee;
     }
 
     #statusLine {
       padding: 0 10px 6px;
-      color: var(--muted);
+      color: #98a2b3;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -204,11 +297,12 @@
     #logPanel {
       max-height: 132px;
       overflow-y: auto;
-      border-top: 1px solid var(--border);
+      border-top: 1px solid #262b33;
       padding: 6px 10px;
       font-family: Consolas, "Cascadia Mono", monospace;
       font-size: 12px;
-      color: var(--muted);
+      color: #98a2b3;
+      scrollbar-color: #38404d #16191f;
     }
 
     #logPanel div {
@@ -217,19 +311,19 @@
     }
 
     #logPanel div[data-level="warn"] {
-      color: var(--warn);
+      color: #f0b429;
     }
 
     #logPanel div[data-level="error"] {
-      color: var(--error);
+      color: #ef5350;
     }
 
     #logPanel div[data-level="ok"] {
-      color: var(--ok);
+      color: #3ddc84;
     }
 
     #volumeLabel {
-      color: var(--muted);
+      color: #98a2b3;
       min-width: 46px;
       text-align: right;
     }
@@ -244,7 +338,7 @@
   <div id="root">
     <header>
       <div id="presetBar">
-        <span style="color: var(--muted)">预设</span>
+        <span style="color: #98a2b3">预设</span>
         <select id="presetSelect" title="从主界面保存的预设中快速加载直播间"></select>
       </div>
       <div id="modeGroup" title="极限追帧档位，数值越小延迟越低但越容易卡顿">
@@ -266,7 +360,7 @@
 
     <footer>
       <div id="controls">
-        <span style="color: var(--muted)">音量</span>
+        <span style="color: #98a2b3">音量</span>
         <input id="volume" type="range" min="0" max="100" step="1" value="70" style="width: 140px" />
         <span id="volumeLabel">70%</span>
         <span class="spacer"></span>
