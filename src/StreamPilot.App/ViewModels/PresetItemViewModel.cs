@@ -89,7 +89,7 @@ public sealed class PresetItemViewModel : INotifyPropertyChanged
     private const string StatusSeparator = " / ";
 
     private PresetLiveState _state = PresetLiveState.Unknown;
-    private string _anchorName;
+    private string _platformAnchor = string.Empty;
     private string _failureReason = string.Empty;
 
     /// <summary>初始化预设项。</summary>
@@ -101,7 +101,7 @@ public sealed class PresetItemViewModel : INotifyPropertyChanged
         ArgumentNullException.ThrowIfNull(applyCommand);
         Preset = preset;
         ApplyCommand = applyCommand;
-        _anchorName = preset.Name;
+        _platformAnchor = preset.Name;
         BadgeText = ResolveBadgeText(preset.Platform);
         BadgeBrush = ResolveBadgeBrush(preset.Platform);
     }
@@ -127,15 +127,28 @@ public sealed class PresetItemViewModel : INotifyPropertyChanged
     /// <summary>房间号或直播间链接。</summary>
     public string RoomInput => Preset.RoomInput;
 
-    /// <summary>展示用的名称：优先主播名，未检查出来时用预设名。</summary>
-    public string AnchorName
+    /// <summary>
+    /// 展示用的名称：**用户设定的名称（<see cref="RoomPreset.Name"/>）始终优先**，
+    /// 只有用户没设名称时才用平台返回的主播名兜底。
+    /// </summary>
+    /// <remarks>
+    /// 解析结果只写进 <see cref="PlatformAnchor"/>，绝不覆盖用户设定值：
+    /// 早期实现让 <c>ApplyLive</c> 直接改写本属性，于是"用户在预设里设的名字"在开播检查之后
+    /// 显示成了平台主播名（列表行显示的与用户设定的不一致），而悬浮提示仍用预设名，两处口径也不一致。
+    /// </remarks>
+    public string AnchorName => string.IsNullOrWhiteSpace(Preset.Name) ? _platformAnchor : Preset.Name;
+
+    /// <summary>平台返回的主播名：仅作为用户未设名称时的兜底展示与提示信息，不写回用户设定值。</summary>
+    private string PlatformAnchor
     {
-        get => _anchorName;
-        private set
+        get => _platformAnchor;
+        set
         {
-            if (SetField(ref _anchorName, value))
+            if (SetField(ref _platformAnchor, value))
             {
+                OnPropertyChanged(nameof(AnchorName));
                 OnPropertyChanged(nameof(DisplayText));
+                OnPropertyChanged(nameof(ToolTipText));
             }
         }
     }
@@ -192,8 +205,24 @@ public sealed class PresetItemViewModel : INotifyPropertyChanged
 
     /// <summary>整行悬浮提示文本。</summary>
     public string ToolTipText => FailureReason.Length == 0
-        ? Preset.Name + "（" + BadgeText + "）· 点击即解析该预设。"
+        ? BuildToolTip()
         : FailureReason + " · 点击仍可尝试解析。";
+
+    /// <summary>
+    /// 拼装常规悬浮提示：以用户设定的名称为准，平台主播名与它不同时一并列出（便于核对房间是否找对）。
+    /// </summary>
+    /// <returns>悬浮提示文本。</returns>
+    private string BuildToolTip()
+    {
+        string text = Preset.Name + "（" + BadgeText + "）";
+        if (!string.IsNullOrWhiteSpace(_platformAnchor)
+            && !string.Equals(_platformAnchor, Preset.Name, StringComparison.Ordinal))
+        {
+            text += StatusSeparator + "平台主播名：" + _platformAnchor;
+        }
+
+        return text + " · 点击即解析该预设。";
+    }
 
     /// <summary>把本项标记为"检查中"。</summary>
     public void ApplyChecking()
@@ -202,12 +231,14 @@ public sealed class PresetItemViewModel : INotifyPropertyChanged
         State = PresetLiveState.Checking;
     }
 
-    /// <summary>把本项标记为"开播中"，并刷新为平台返回的真实主播名。</summary>
-    /// <param name="anchor">直播间主播名。</param>
+    /// <summary>
+    /// 把本项标记为"开播中"，并记下平台返回的主播名（只作兜底展示，不覆盖用户设定的名称）。
+    /// </summary>
+    /// <param name="anchor">平台返回的主播名。</param>
     public void ApplyLive(string anchor)
     {
         FailureReason = string.Empty;
-        AnchorName = string.IsNullOrWhiteSpace(anchor) ? Preset.Name : anchor;
+        PlatformAnchor = string.IsNullOrWhiteSpace(anchor) ? Preset.Name : anchor;
         State = PresetLiveState.Live;
     }
 
@@ -216,7 +247,7 @@ public sealed class PresetItemViewModel : INotifyPropertyChanged
     public void ApplyOffline(string anchor)
     {
         FailureReason = string.Empty;
-        AnchorName = string.IsNullOrWhiteSpace(anchor) ? Preset.Name : anchor;
+        PlatformAnchor = string.IsNullOrWhiteSpace(anchor) ? Preset.Name : anchor;
         State = PresetLiveState.Offline;
     }
 

@@ -208,24 +208,36 @@ const LATENCY_UNIT_SUFFIX = ' ms';
 /** 取不到真实延迟时状态行不再追加该分段，绝不显示占位数字。 */
 const LATENCY_PLACEHOLDER = null;
 
-/** 状态行后缀：当前没有在自动追帧（用户点了「取消追帧」）。仅在"已取消"时追加。 */
-const CHASE_CANCELLED_SUFFIX = '已取消追帧';
+/*
+ * 合并后的「追帧 / 停止追帧」按钮只有一处入口，判定入口统一是 `shouldAutoChase`：
+ *  - 按钮文案描述"点下去会发生什么"（`chaseButtonLabel`）：正在自动追帧时是「停止追帧」，否则是「追帧」；
+ *  - 状态行分段描述"当前处在哪个状态"（`CHASE_STATE_SUFFIXES`）：两种状态都有标记，
+ *    用户才能一眼看出追帧到底开没开（只在"已停止"时加分段会让"正在追帧"无从确认）。
+ */
 
-/** 追帧开关（按钮与状态行共用同一份文案判定）。 */
-const CHASE_SWITCH_LABELS = Object.freeze({
-  /** 取消追帧入口：当前在自动追帧，点击后停止自动追帧。 */
-  CANCEL: '取消追帧',
-  /** 恢复追帧入口：当前已取消，点击后恢复自动追帧。 */
-  RESUME: '恢复追帧',
+/** 追帧按钮文案的两侧取值。 */
+const CHASE_BUTTON_LABELS = Object.freeze({
+  /** 当前未自动追帧：点击后开启自动追帧并立刻追一次帧。 */
+  START: '追帧',
+  /** 当前正在自动追帧：点击后停止自动追帧（不暂停播放）。 */
+  STOP: '停止追帧',
 });
 
-/** 取消自动追帧时写入 mpegts.js 的"永不触发"延迟阈值（秒）。 */
+/** 状态行上的追帧状态分段。 */
+const CHASE_STATE_SUFFIXES = Object.freeze({
+  /** 自动追帧进行中。 */
+  ACTIVE: '追帧中',
+  /** 已停止自动追帧。 */
+  STOPPED: '已停止追帧',
+});
+
+/** 停止追帧时写入 mpegts.js 的"永不触发"延迟阈值（秒）。 */
 const CHASE_DISABLED_LATENCY_SECONDS = Number.MAX_SAFE_INTEGER;
 
-/** 取消自动追帧时写入 hls.js 的最大延迟切片数（等价于不因延迟跳片）。 */
+/** 停止追帧时写入 hls.js 的最大延迟切片数（等价于不因延迟跳片）。 */
 const CHASE_DISABLED_MAX_LATENCY_COUNT = Number.MAX_SAFE_INTEGER;
 
-/** 取消自动追帧时的倍速追帧上限（1 表示不加速追赶）。 */
+/** 停止追帧时的倍速追帧上限（1 表示不加速追赶）。 */
 const CHASE_DISABLED_PLAYBACK_RATE = 1;
 
 /*
@@ -431,7 +443,7 @@ function buildHlsConfig(extreme, autoChase) {
     /*
       hls.js 没有"关闭延迟同步"的开关，能表达"不自动追帧"的只有两处：
       `maxLiveSyncPlaybackRate = 1`（不加速追赶）与把最大延迟切片数放到不可能达到的值
-      （不因延迟而跳片）。两者同时给出，取消追帧后画面就以正常倍速连续播放。
+      （不因延迟而跳片）。两者同时给出，停止追帧后画面就以正常倍速连续播放。
     */
     liveMaxLatencyDurationCount: chasing ? maxLatencyCount : CHASE_DISABLED_MAX_LATENCY_COUNT,
     maxLiveSyncPlaybackRate: chasing ? HLS_MAX_LIVE_SYNC_PLAYBACK_RATE : CHASE_DISABLED_PLAYBACK_RATE,
@@ -444,13 +456,13 @@ function buildHlsConfig(extreme, autoChase) {
  * 语义（与「暂停播放」严格区分）：
  *  - **自动追帧**：库内硬跳（mpegts.js 延迟追帧器）与倍速追赶（延迟同步器）按目标延迟把
  *    画面拉回直播边缘。默认开启。
- *  - **取消追帧**：关掉上面两路自动行为，画面以正常倍速实时推进；**不暂停播放、不销毁播放器、
- *    不释放地址**，因此恢复时不需要重新解析。它只是为了"宁可延迟大一点也不要跳帧"。
+ *  - **停止追帧**：关掉上面两路自动行为，画面以正常倍速实时推进；**不暂停播放、不销毁播放器、
+ *    不释放地址**，因此重新开启时不需要重新解析。它只是为了"宁可延迟大一点也不要跳帧"。
  *  - **暂停播放**：`video.pause()`，画面完全停止；恢复时可能因缓冲过期而追帧。
- * 只有页面上"取消追帧"按钮会关闭它；按钮再点一次即恢复。缺省（字段未设置）视为开启，
- * 这样旧的调用点与旧会话不会因为字段缺失而被当成"已取消"。
+ * 页面上合并后的「追帧 / 停止追帧」按钮是唯一开关：点「停止追帧」关闭它，点「追帧」开启并立刻追一次帧。
+ * 缺省（字段未设置）视为开启，这样旧的调用点与旧会话不会因为字段缺失而被当成"已停止"。
  *
- * 注意：取消追帧只停"自动追帧策略"，不停"缓冲失控自救"（{@link isBufferRunaway}）——
+ * 注意：停止追帧只停"自动追帧策略"，不停"缓冲失控自救"（{@link isBufferRunaway}）——
  * 后者是兜底保护，只在画面真的停住且缓冲涨到 8 秒以上时才介入。
  * @param {{autoChaseEnabled?:boolean}|null} run 运行对象。
  * @returns {boolean} 应当自动追帧返回 true。
@@ -503,14 +515,13 @@ function readActualLatencyMs(run) {
 }
 
 /**
- * 追帧开关按钮的文案（取消 / 恢复）。
- * @param {*} autoChase 当前是否自动追帧（{@link shouldAutoChase} 的结果）。
- * @returns {string} 按钮文案。
+ * 合并后的追帧按钮文案（「追帧」/「停止追帧」）。
+ * @param {*} state 当前是否自动追帧（{@link shouldAutoChase} 的结果）。
+ * @returns {string} 按钮文案：正在自动追帧时为「停止追帧」，否则为「追帧」。
  */
-function chaseSwitchLabel(autoChase) {
-  return autoChase ? CHASE_SWITCH_LABELS.CANCEL : CHASE_SWITCH_LABELS.RESUME;
+function chaseButtonLabel(state) {
+  return state ? CHASE_BUTTON_LABELS.STOP : CHASE_BUTTON_LABELS.START;
 }
-
 
 /**
  * 计算重连退避时间。
@@ -754,14 +765,15 @@ function isAutoplayBlocked(error) {
 /**
  * 底部状态行在播放开始后的文案（不显示候选主机名与 CDN 节点）。
  *
- * 组成：播放状态 + 模式/档位 + （仅在已取消追帧时）状态后缀 + **实际延迟**。
+ * 组成：播放状态 + 模式/档位 + 追帧状态（追帧中 / 已停止追帧）+ **实际延迟**。
  * 延迟来自遥测实测值（{@link readActualLatencyMs}），取不到就不追加该段，不写死档位数字。
- * 追帧开启时不加后缀：默认行为不需要占状态行。
+ * 追帧状态两种取值都要出现：只标注"已停止"会让"正在追帧"没有可确认的显示。
  * @param {{mode?:string,extremeTargetMs?:number,extremeTargetSeconds?:number,autoChaseEnabled?:boolean,lastLatencyMs?:number}} run 运行对象。
  * @returns {string} 中文状态。
  */
 function formatPlaybackStatusText(run) {
-  const chaseSegment = shouldAutoChase(run) ? '' : STATUS_SEGMENT_SEPARATOR + CHASE_CANCELLED_SUFFIX;
+  const chaseSegment = STATUS_SEGMENT_SEPARATOR
+    + (shouldAutoChase(run) ? CHASE_STATE_SUFFIXES.ACTIVE : CHASE_STATE_SUFFIXES.STOPPED);
   const base = MODE_HINT_PLAYING + STATUS_SEGMENT_SEPARATOR + modeLabel(run) + chaseSegment;
   return formatStatusWithLatency(base, readActualLatencyMs(run));
 }
@@ -1071,8 +1083,8 @@ const StreamPilotPlayerCore = {
   STATUS_IDLE_TEXT,
   STATUS_SEGMENT_SEPARATOR,
   LATENCY_UNIT_SUFFIX,
-  CHASE_CANCELLED_SUFFIX,
-  CHASE_SWITCH_LABELS,
+  CHASE_BUTTON_LABELS,
+  CHASE_STATE_SUFFIXES,
   HOST_STATUS_HOLD_INFO_MS,
   HOST_STATUS_HOLD_WARN_MS,
   HOST_STATUS_HOLD_ERROR_MS,
@@ -1105,7 +1117,7 @@ const StreamPilotPlayerCore = {
   formatStatusWithLatency,
   readActualLatencyMs,
   shouldAutoChase,
-  chaseSwitchLabel,
+  chaseButtonLabel,
   normalizeStatusLevel,
   getHostStatusHoldMs,
   getHostStatusRemainingMs,

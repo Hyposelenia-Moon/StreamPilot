@@ -385,8 +385,7 @@
         <input id="volume" type="range" min="0" max="100" step="1" value="30" />
         <span id="volumeLabel">30%</span>
         <span class="spacer"></span>
-        <button type="button" id="chaseToggleBtn" title="停止自动追帧（不暂停播放，画面改为正常倍速实时播放）">取消追帧</button>
-        <button type="button" id="chaseBtn" title="跳到直播最新位置">追帧</button>
+        <button type="button" id="chaseBtn" title="开启自动追帧并立刻追一次帧（跳到直播最新位置）">追帧</button>
         <label id="targetBox" for="targetSelect">
           <span class="qualityLabel">追帧档位</span>
           <select id="targetSelect"></select>
@@ -453,7 +452,6 @@
         pauseBtn: document.getElementById('pauseBtn'),
         stopBtn: document.getElementById('stopBtn'),
         chaseBtn: document.getElementById('chaseBtn'),
-        chaseToggleBtn: document.getElementById('chaseToggleBtn'),
         stage: document.getElementById('stage'),
       };
 
@@ -1587,7 +1585,7 @@
           runawayChaseAttempts: 0,
           /** 上一次缓冲失控自行处置的时间戳（0 表示还没处置过）。 */
           runawayHandledAt: 0,
-          /** 是否保留库内自动追帧；false 表示用户点了「取消追帧」（不暂停播放）。 */
+          /** 是否保留库内自动追帧；false 表示用户点了「停止追帧」（不暂停播放）。 */
           autoChaseEnabled: true,
           /** 最近一次遥测测到的真实延迟（毫秒）；没有测量值时为 null，状态行据此决定是否显示延迟段。 */
           lastLatencyMs: null,
@@ -1596,6 +1594,8 @@
         state.roomTitle = typeof payload.title === 'string' ? payload.title : '';
 
         state.run = run;
+        // 新会话默认开启自动追帧：按钮必须回到「追帧」，不能留着上一轮的「停止追帧」。
+        syncChaseButton();
         setStatus('正在检测候选线路…');
         logToHost(core.LOG_LEVELS.INFO, '开始播放会话 #' + run.sessionId + '（' + core.modeLabel(run) + '）');
 
@@ -1622,7 +1622,7 @@
        *
        * 按当前候选的格式选配置：过去这里无条件写 mpegts 配置，
        * 于是 HLS 会话上"改档位"会静默失败（hls.js 不认这些键），用户看到的是"档位改了但没生效"。
-       * 追帧开关走同一个入口，保证"取消追帧"与"改档位"用的是同一份配置推导。
+       * 追帧开关走同一个入口，保证"停止追帧"与"改档位"用的是同一份配置推导。
        * @param {object} run 运行对象（含 extreme / extremeTargetSeconds / autoChaseEnabled / currentCandidate）。
        */
       function applyPlayerTargetConfig(run) {
@@ -1643,39 +1643,46 @@
         }
       }
 
-      /** 把当前追帧开关同步到按钮文案与提示。 */
-      function syncChaseToggle() {
+      /** 把当前追帧开关同步到合并按钮的文案与提示。 */
+      function syncChaseButton() {
         const autoChase = core.shouldAutoChase(state.run);
-        elements.chaseToggleBtn.textContent = core.chaseSwitchLabel(autoChase);
-        elements.chaseToggleBtn.title = autoChase
+        elements.chaseBtn.textContent = core.chaseButtonLabel(autoChase);
+        elements.chaseBtn.title = autoChase
           ? '停止自动追帧（不暂停播放，画面改为正常倍速实时播放）'
-          : '恢复自动追帧（重新按目标延迟把画面拉回直播边缘）';
+          : '开启自动追帧并立刻追一次帧（跳到直播最新位置）';
       }
 
       /**
-       * 取消 / 恢复自动追帧。
+       * 合并后的「追帧 / 停止追帧」按钮。
        *
-       * 与「暂停播放」的区别：这里**不**调用 `video.pause()`、不销毁播放器、不释放地址，
-       * 画面继续以正常倍速播放，只是不再由库内追帧器按目标延迟硬跳或倍速追赶。
+       * 语义（与「暂停播放」的区别：这里**不**调用 `video.pause()`、不销毁播放器、不释放地址）：
+       *  - 点「追帧」= 开启自动追帧**并立刻追一次帧**（保留原一次性追帧的效果）；
+       *  - 点「停止追帧」= 关闭自动追帧，画面以正常倍速实时推进，不再按目标延迟拉回。
        * 缓冲失控自救属于兜底保护，不随本开关关闭。
        */
-      function toggleAutoChase() {
+      function toggleChase() {
         const run = state.run;
         if (!run) {
-          logToHost(core.LOG_LEVELS.WARN, '当前没有正在播放的会话，无法切换追帧开关');
+          logToHost(core.LOG_LEVELS.WARN, '当前没有正在播放的会话，无法切换追帧');
           return;
         }
 
-        run.autoChaseEnabled = !core.shouldAutoChase(run);
+        const enabling = !core.shouldAutoChase(run);
+        run.autoChaseEnabled = enabling;
         applyPlayerTargetConfig(run);
-        syncChaseToggle();
+        if (enabling) {
+          // 点「追帧」等价于"开启自动追帧 + 立刻追一次"，这里保留原来一次性追帧的效果。
+          chaseToLiveEdge(core.CHASE_KEEP_DEFAULT_SECONDS);
+        }
+
+        syncChaseButton();
         setStatus(core.formatPlaybackStatusText(run));
-        const message = run.autoChaseEnabled
-          ? '已恢复自动追帧（目标延迟 ' + run.extremeTargetMs + ' ms）'
-          : '已取消自动追帧（画面以正常倍速播放，不再自动拉回目标延迟）';
+        const message = enabling
+          ? '已开启自动追帧（目标延迟 ' + run.extremeTargetMs + ' ms）'
+          : '已停止自动追帧（画面以正常倍速播放，不再自动拉回目标延迟）';
         logToHost(core.LOG_LEVELS.INFO, message);
         report(outbound.STATUS, message, run, run.currentCandidate, {
-          autoChaseEnabled: run.autoChaseEnabled,
+          autoChaseEnabled: enabling,
         });
       }
 
@@ -1830,6 +1837,8 @@
         state.pausedByUser = false;
         state.resumedAt = 0;
         updatePauseButton();
+        // 会话已结束：追帧按钮回到「追帧」，避免停播后仍显示「停止追帧」。
+        syncChaseButton();
         showEmptyState();
         setStatus(core.STATUS_IDLE_TEXT);
       }
@@ -1958,11 +1967,7 @@
         });
 
         elements.chaseBtn.addEventListener('click', function onChaseClick() {
-          handleChase({ keepSeconds: core.CHASE_KEEP_DEFAULT_SECONDS });
-        });
-
-        elements.chaseToggleBtn.addEventListener('click', function onChaseToggleClick() {
-          toggleAutoChase();
+          toggleChase();
         });
 
         elements.targetSelect.addEventListener('change', function onTargetChange() {
@@ -2098,7 +2103,7 @@
       renderTargets({ extremeTargetMs: core.DEFAULT_EXTREME_TARGET_MS });
       applyVolume(core.INITIAL_VOLUME_PERCENT);
       updatePauseButton();
-      syncChaseToggle();
+      syncChaseButton();
       showEmptyState();
       renderStatusLine();
 

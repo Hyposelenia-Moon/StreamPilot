@@ -506,7 +506,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// </summary>
     /// <remarks>
     /// 取值来自解析结果：解析成功即为"直播中"（解析器只会为在播房间产出候选），
-    /// 失败时由 <see cref="ResolveMessages.DescribeLiveStatus"/> 把失败分类映射成状态词。
+    /// 失败时由 <see cref="ResolveMessages.DescribeLiveStatus"/> 把失败分类映射成状态词；
+    /// 「停止播放」与「删除预设」后由 <see cref="ClearRoomInfo"/> 复位为"未知"（初始态），
+    /// 不残留上一房间的开播状态。
     /// </remarks>
     public string LiveStatus
     {
@@ -735,10 +737,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             }
 
             _currentRoom = outcome.Room;
-            RoomTitle = outcome.Room.Title;
-            RoomAnchor = outcome.Room.Anchor;
-            RoomCategory = string.IsNullOrWhiteSpace(outcome.Room.Category) ? PlaceholderText : outcome.Room.Category;
-            LiveStatus = ResolveMessages.LiveStatusLive;
+            ShowCurrentRoomInfo();
             StatusMessage = $"解析成功：{outcome.Room.Anchor} / {outcome.Room.Title}"
                 + $"（状态：{LiveStatus}，共 {outcome.Room.Candidates.Count} 条线路）";
             AppendLog(StatusMessage);
@@ -756,11 +755,12 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 把「当前直播」卡片重置为"未知"占位（解析前与解析失败时使用）。
+    /// 把「当前直播」卡片重置为初始占位（解析前 / 解析失败 / 停止播放 / 删除预设时使用）。
     /// </summary>
     /// <param name="liveStatus">要显示的开播状态词；缺省为"未知"。</param>
     /// <remarks>
     /// 解析一开始就清空，避免上一轮解析残留的主播名/状态被当成这一轮的结果；
+    /// 「停止播放」与「删除预设」也用它把卡片清空为初始态（不残留上一房间的信息）；
     /// 状态词由调用方给出（失败时来自失败分类），不在 UI 层做任何判断。
     /// </remarks>
     private void ClearRoomInfo(string? liveStatus = null)
@@ -769,6 +769,47 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         RoomAnchor = PlaceholderText;
         RoomCategory = PlaceholderText;
         LiveStatus = liveStatus ?? ResolveMessages.LiveStatusUnknown;
+    }
+
+    /// <summary>
+    /// 把「当前直播」卡片刷新为已解析房间（<see cref="_currentRoom"/>）的信息。
+    /// </summary>
+    /// <remarks>
+    /// 「停止播放」与「删除预设」都会把卡片清空（见 <see cref="ClearRoomInfo"/>），
+    /// 重新下发播放前必须把卡片恢复成该房间的信息，否则会出现"画面在播、卡片却是空的"。
+    /// </remarks>
+    private void ShowCurrentRoomInfo()
+    {
+        if (_currentRoom is null)
+        {
+            ClearRoomInfo();
+            return;
+        }
+
+        RoomTitle = _currentRoom.Title;
+        RoomAnchor = _currentRoom.Anchor;
+        RoomCategory = string.IsNullOrWhiteSpace(_currentRoom.Category) ? PlaceholderText : _currentRoom.Category;
+        LiveStatus = ResolveMessages.LiveStatusLive;
+    }
+
+    /// <summary>判断某个预设是否就是「当前直播」卡片里的那个房间（按平台与房间号比对）。</summary>
+    /// <param name="preset">待判断的预设。</param>
+    /// <returns>是当前房间时返回 <see langword="true"/>。</returns>
+    /// <remarks>
+    /// 「删除预设」只清空它自己对应的卡片：删掉别的预设时，用户正在看的房间信息不该被一起抹掉。
+    /// 预设里存的是用户输入的原文（可能是 URL 或短号），所以既做等值比较也做包含比较。
+    /// </remarks>
+    private bool IsCurrentRoomFromPreset(RoomPreset preset)
+    {
+        if (_currentRoom is null || _currentRoom.Platform != preset.Platform)
+        {
+            return false;
+        }
+
+        string input = preset.RoomInput.Trim();
+        return input.Length > 0
+            && (string.Equals(input, _currentRoom.RoomId, StringComparison.OrdinalIgnoreCase)
+                || input.Contains(_currentRoom.RoomId, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
@@ -802,6 +843,12 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             StatusMessage = "请先解析直播间。";
             return;
         }
+
+        /*
+          「停止播放」与「删除预设」都会把「当前直播」卡片清空，这里在下发播放前恢复它：
+          卡片描述的是"这次要看的房间"，与是否真的出画无关，用户点了播放就该看到房间信息。
+        */
+        ShowCurrentRoomInfo();
 
         // 解析成功后由本方法统一决定"是否开始播放"，设置里的自动播放开关在这里生效。
         if (!_options.Playback.AutoPlayOnResolve)
@@ -1178,6 +1225,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         _playback.StopActive();
         _activeSessionId = 0;
         _isPlaybackPaused = false;
+
+        // 本次观看已结束：左侧「当前直播」卡片回到初始态，不残留上一房间的开播状态 / 主播 / 标题 / 分区。
+        ClearRoomInfo();
         StatusMessage = "已停止播放（画面已关闭，中继已释放）。";
         AppendLog(StatusMessage);
     }
@@ -1557,7 +1607,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     private async Task CheckPresetAsync(PresetItemViewModel item, CancellationToken cancellationToken)
     {
         item.ApplyChecking();
-        string anchor = item.Preset.Name;
         try
         {
             ResolveOutcome outcome = await _resolver
@@ -1566,14 +1615,15 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
             if (outcome.Success && outcome.Room is not null)
             {
-                anchor = outcome.Room.Anchor;
-                item.ApplyLive(anchor);
+                // 平台主播名只作兜底展示：预设里用户设定的名称始终优先（见 PresetItemViewModel.AnchorName）。
+                item.ApplyLive(outcome.Room.Anchor);
                 return;
             }
 
             if (outcome.Failure == ResolveFailure.NotLive)
             {
-                item.ApplyOffline(anchor);
+                // 未开播时平台不返回主播名：传预设名，展示仍以用户设定的名称为准。
+                item.ApplyOffline(item.Preset.Name);
                 return;
             }
 
@@ -1777,6 +1827,13 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
         bool removed = _presetStore.Remove(item.Preset.Name);
         RefreshPresetItems();
+
+        // 删掉的正是当前卡片对应的房间时才清空：卡片显示的是"当前正在看的房间"，
+        // 删掉它却还留着开播状态，读起来就像这个房间仍在播放；删别的预设则不能牵连当前房间。
+        if (IsCurrentRoomFromPreset(item.Preset))
+        {
+            ClearRoomInfo();
+        }
         StatusMessage = removed ? "已删除预设「" + item.Preset.Name + "」。" : "删除预设失败：" + item.Preset.Name;
         AppendLog(StatusMessage);
         await Task.CompletedTask.ConfigureAwait(true);
