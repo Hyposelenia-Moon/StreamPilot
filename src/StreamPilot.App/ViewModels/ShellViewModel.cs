@@ -44,11 +44,23 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>宿主要求页面播放的消息类型。</summary>
     private const string HostPlayType = "play";
 
-    /// <summary>宿主要求页面追帧的消息类型。</summary>
-    private const string HostChaseType = "chase";
-
     /// <summary>宿主要求页面暂停或继续播放的消息类型。</summary>
     private const string HostPauseType = "pause";
+
+    /// <summary>页面日志消息类型（页面不再显示日志面板，日志统一进宿主日志）。</summary>
+    private const string PlayerLogType = "log";
+
+    /// <summary>页面日志消息里的级别字段名。</summary>
+    private const string LogLevelFieldName = "level";
+
+    /// <summary>页面日志级别：信息。</summary>
+    private const string LogLevelInfo = "info";
+
+    /// <summary>页面日志级别：警告。</summary>
+    private const string LogLevelWarn = "warn";
+
+    /// <summary>页面日志级别：错误。</summary>
+    private const string LogLevelError = "error";
 
     /// <summary>页面请求宿主开始播放的消息类型。</summary>
     private const string PlayerRequestPlayType = "request-play";
@@ -60,7 +72,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     private const string PausedFieldName = "paused";
 
     /// <summary>
-    /// 追帧档位消息类型（双向同名）：档位入口只在播放页底部，宿主要求热切换的同名消息由播放页处理。
+    /// 追帧档位消息类型（页面 → 宿主）：档位入口只在播放页底部，宿主只记住该值供下次播放沿用。
     /// </summary>
     private const string TargetType = "target";
 
@@ -69,9 +81,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>播放页档位消息里的目标延迟字段名。</summary>
     private const string TargetFieldName = "extremeTargetMs";
-
-    /// <summary>手动追帧时要求播放页保留的缓冲秒数（越小延迟越低）。</summary>
-    private const double ChaseKeepSeconds = 0.08;
 
     /// <summary>单个预设开播检查的超时时间。</summary>
     private static readonly TimeSpan PresetCheckTimeout = TimeSpan.FromSeconds(10);
@@ -94,15 +103,12 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         ("droppedVideoFrames", "droppedVideoFrames"),
         ("totalVideoFrames", "totalVideoFrames"),
         ("extremeTargetMs", "extremeTargetMs"),
-        ("stallSamples", "stallSamples"),
         ("reconnects", "reconnects"),
     ];
 
-    /// <summary>自动识别平台失败时的提示（界面与状态栏共用）。</summary>
-    private const string PlatformDetectionHint = "无法自动识别平台：请在链接中包含平台域名，或在设置里指定默认平台。";
+    /// <summary>自动识别平台失败时的提示（状态行使用）。</summary>
+    private const string PlatformDetectionHint = "无法识别平台：请输入直播间链接，或在设置里指定默认平台。";
 
-    /// <summary>无法从链接识别平台时，界面不再给出房间号链接示例。</summary>
-    private const string PlatformUrlHint = "支持房间号或链接；粘贴完整直播间链接可自动识别平台。";
     /// <summary>页面进入全屏的消息类型。</summary>
     private const string PlayerFullscreenEnterType = "fullscreen-enter";
 
@@ -132,9 +138,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>最近一次解析实际使用的平台；识别不出时为 <see cref="PlatformId.Unknown"/>。</summary>
     private PlatformId _effectivePlatform = PlatformId.Unknown;
 
-    /// <summary>点击某个预设后是否从输入框自动识别过平台（用于界面提示）。</summary>
-    private bool _isPlatformDetectedFromInput;
-
     private bool _isCheckingPresets;
     private CancellationTokenSource? _presetCheckCancellation;
 
@@ -145,7 +148,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     private PresetItemViewModel? _selectedPresetItem;
     private string _roomInput = string.Empty;
     private int _extremeTargetMs;
-    private int _volume;
     private bool _isBusy;
     private bool _isPlayerReady;
     private string _statusMessage = "等待解析直播源。";
@@ -156,7 +158,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     private string _recordingSummary = "未录制";
     private string _playerTelemetry = "-";
     private string _candidateLineSummary = "候选线路：-";
-    private string _presetSummary = "暂无预设，可用下方「新增预设」把当前直播间存起来。";
+    private string _presetSummary = "暂无预设";
     private ResolvedRoom? _currentRoom;
     private IRecordingSession? _recordingSession;
     private int _activeSessionId;
@@ -164,7 +166,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>连续自动重新解析的次数（播放出画后清零）。</summary>
     private int _automaticReResolveCount;
 
-    /// <summary>播放页是否处于用户暂停状态（暂停不销毁会话，按钮据此显示"继续播放"）。</summary>
+    /// <summary>播放页是否处于用户暂停状态（页面遥测里的 paused 是权威状态，暂停不销毁会话）。</summary>
     private bool _isPlaybackPaused;
 
     /// <summary>用户选择的画质档位键；为空表示取平台最高档。</summary>
@@ -188,8 +190,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
         _roomInput = _options.LastRoomInput;
         _extremeTargetMs = NormalizeTarget(_options.Playback.ExtremeTargetMs);
-        _volume = Math.Clamp(_options.Playback.Volume, 0, 100);
-
+        
         Platforms = PlatformOption.All;
 
         // 按配置的默认平台预选；找不到时回落到第一个，避免 SelectedItem 绑定拿不到实例。
@@ -199,9 +200,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         _selectedPlatformOption = PlatformOption.Find(initialPlatform) ?? Platforms[0];
 
         ResolveCommand = new AsyncRelayCommand(_ => ResolveFromUserAsync(), HandleCommandErrorAsync, _ => !IsBusy);
-        PlayCommand = new AsyncRelayCommand(_ => PlayFromUserAsync(), HandleCommandErrorAsync, _ => _currentRoom is not null && !IsBusy);
-        StopCommand = new RelayCommand(_ => TogglePause(), _ => _isPlayerReady);
-        ChaseCommand = new RelayCommand(_ => SendToPlayer(new { type = HostChaseType, keepSeconds = ChaseKeepSeconds }), _ => _isPlayerReady);
         MpvCommand = new AsyncRelayCommand(_ => PlayWithMpvAsync(), HandleCommandErrorAsync, _ => _currentRoom is not null);
         StartRecordingCommand = new AsyncRelayCommand(_ => StartRecordingAsync(), HandleCommandErrorAsync, _ => _currentRoom is not null && _recordingSession is null);
         StopRecordingCommand = new AsyncRelayCommand(_ => StopRecordingAsync(), HandleCommandErrorAsync, _ => _recordingSession is not null);
@@ -271,15 +269,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>解析命令。</summary>
     public ICommand ResolveCommand { get; }
-
-    /// <summary>播放命令。</summary>
-    public ICommand PlayCommand { get; }
-
-    /// <summary>停止命令。</summary>
-    public ICommand StopCommand { get; }
-
-    /// <summary>追帧命令。</summary>
-    public ICommand ChaseCommand { get; }
 
     /// <summary>mpv 外挂播放命令。</summary>
     public ICommand MpvCommand { get; }
@@ -363,27 +352,8 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>平台状态显示文本，例如"平台：自动识别（当前 虎牙）"。</summary>
     public string PlatformStatusText => _effectivePlatform == PlatformId.Unknown
-        ? "平台：尚未识别（解析时按链接域名自动识别）"
+        ? "平台：未识别"
         : "平台：自动识别（当前 " + ResolvePlatformName(_effectivePlatform) + "）";
-
-    /// <summary>平台识别说明文本。</summary>
-    public string PlatformHintText
-    {
-        get
-        {
-            if (_effectivePlatform != PlatformId.Unknown)
-            {
-                return _isPlatformDetectedFromInput
-                    ? "已按链接域名识别；换平台直接粘贴对应平台的直播间链接即可。"
-                    : "链接里没有平台域名，已使用默认平台；可在设置里更改默认平台。";
-            }
-
-            return PlatformDetectionHint;
-        }
-    }
-
-    /// <summary>房间输入框下方的提示：平台在解析时按链接域名识别，因此这里不再给出固定示例。</summary>
-    public string RoomUrlHint => PlatformUrlHint;
 
     /// <summary>候选线路摘要（只显示数量，不含任何 host 或 URL）。</summary>
     public string CandidateLineSummary
@@ -396,7 +366,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     {
         OnPropertyChanged(nameof(EffectivePlatform));
         OnPropertyChanged(nameof(PlatformStatusText));
-        OnPropertyChanged(nameof(PlatformHintText));
     }
 
     private static string ResolvePlatformName(PlatformId platform)
@@ -410,24 +379,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     {
         get => _roomInput;
         set => SetField(ref _roomInput, value);
-    }
-
-    /// <summary>播放音量（0-100）。</summary>
-    public int Volume
-    {
-        get => _volume;
-        set => SetField(ref _volume, Math.Clamp(value, 0, 100));
-    }
-
-    /// <summary>播放页是否处于用户暂停状态。</summary>
-    /// <remarks>
-    /// 暂停不销毁播放会话：地址与播放器都保留，继续播放时从当前位置恢复。
-    /// 界面上的按钮文案据此在「暂停播放」与「继续播放」之间切换。
-    /// </remarks>
-    public bool IsPlaybackPaused
-    {
-        get => _isPlaybackPaused;
-        private set => SetField(ref _isPlaybackPaused, value);
     }
 
     /// <summary>是否已经解析出可播放的直播间（播放页的「开始播放」按钮据此启用）。</summary>
@@ -512,7 +463,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>桥接服务状态文本。</summary>
     public string BridgeStatus => _bridge.IsRunning
         ? "桥接：" + _bridge.BaseAddress
-        : "桥接：未启动（mpv 外挂播放不可用）";
+        : "桥接：未启动";
 
     /// <summary>刷新桥接状态文本（桥接在窗口显示之后才启动，需要主动通知一次）。</summary>
     public void RefreshBridgeStatus() => OnPropertyChanged(nameof(BridgeStatus));
@@ -574,13 +525,13 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                     StatusMessage = "播放器已就绪。";
                     AppendLog("播放器内核已就绪（HEVC: " + ReadFlag(root, "hevc") + "，H.264: " + ReadFlag(root, "avc") + "）");
                     SendBridgeInfo();
-                    SendToPlayer(new { type = "volume", value = _volume });
+                    SendToPlayer(new { type = "volume", value = _options.Playback.Volume });
                     break;
 
                 case PlayerTelemetryType:
                     PlayerTelemetry = BuildTelemetrySummary(root);
                     // 遥测里的 paused 是页面的权威状态：用户直接点画面或播放页按钮都会反映到这里。
-                    IsPlaybackPaused = ReadPausedFlag(root) ?? _isPlaybackPaused;
+                    _isPlaybackPaused = ReadPausedFlag(root) ?? _isPlaybackPaused;
 
                     // 结构化落盘：排查"卡顿/断流"时按 10 秒粒度统计缓冲、丢帧与重连次数。
                     _logger.Info(_moduleName, "播放遥测。", BuildTelemetryFields(root));
@@ -596,15 +547,15 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
                         // 真的看到了画面，之前的自动重试计数作废。
                         _automaticReResolveCount = 0;
-                        IsPlaybackPaused = false;
+                        _isPlaybackPaused = false;
                     }
                     else if (message.Contains("已暂停播放", StringComparison.Ordinal))
                     {
-                        IsPlaybackPaused = true;
+                        _isPlaybackPaused = true;
                     }
                     else if (message.Contains("已继续播放", StringComparison.Ordinal))
                     {
-                        IsPlaybackPaused = false;
+                        _isPlaybackPaused = false;
                     }
 
                     break;
@@ -612,6 +563,11 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                 case PlayerErrorType:
                     StatusMessage = message;
                     AppendLog("播放错误：" + message);
+                    break;
+
+                case PlayerLogType:
+                    // 页面日志全部进宿主日志：页面不再有日志面板，这里只负责落盘与"最近事件"。
+                    HandlePlayerLog(root);
                     break;
 
                 case PlayerRefreshNeededType:
@@ -690,7 +646,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                 return;
             }
 
-            ApplyPlatform(effective, autoDetected is not null);
+            ApplyPlatform(effective);
             RoomQuery? query = BuildQuery(effective);
             if (query is null)
             {
@@ -809,7 +765,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             _activeSessionId = plan.SessionId;
 
             // 新会话一定是从播放状态开始，按钮回到「暂停播放」。
-            IsPlaybackPaused = false;
+            _isPlaybackPaused = false;
 
             // 档位入口在播放页底部，播放计划里的目标值即"当前档位"，记下来供下次播放沿用。
             if (plan.ExtremeTargetMs != _extremeTargetMs)
@@ -1057,8 +1013,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>切换当前平台并刷新界面提示。</summary>
     /// <param name="platform">生效的平台。</param>
-    /// <param name="detectedFromInput">是否来自链接域名识别。</param>
-    private void ApplyPlatform(PlatformId platform, bool detectedFromInput)
+    private void ApplyPlatform(PlatformId platform)
     {
         PlatformOption? option = PlatformOption.Find(platform);
         if (option is not null && option.Id != _selectedPlatformOption.Id)
@@ -1067,13 +1022,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             AppendLog("已根据链接自动切换到" + option.DisplayName + "平台。");
         }
 
-        if (_effectivePlatform == platform && _isPlatformDetectedFromInput == detectedFromInput)
-        {
-            return;
-        }
-
         _effectivePlatform = platform;
-        _isPlatformDetectedFromInput = detectedFromInput;
         RaisePlatformChanged();
     }
 
@@ -1160,7 +1109,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     private void TogglePause()
     {
         bool paused = !_isPlaybackPaused;
-        IsPlaybackPaused = paused;
+        _isPlaybackPaused = paused;
         SendToPlayer(new { type = HostPauseType, paused = paused });
         StatusMessage = paused ? "已暂停播放（会话与地址保留）。" : "已继续播放。";
         AppendLog(StatusMessage);
@@ -1202,6 +1151,53 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         {
             await PlayAsync().ConfigureAwait(true);
         }
+    }
+
+    /// <summary>
+    /// 处理播放页日志：按级别落盘，并把文本追加到界面的"最近事件"。
+    /// </summary>
+    /// <param name="root">日志消息根元素。</param>
+    /// <remarks>
+    /// 页面不再显示日志面板，页面侧的所有诊断文本都走这条通道；
+    /// 级别只影响落盘级别与 WARN 前缀，避免"页面里的提示语"影响界面状态行。
+    /// </remarks>
+    private void HandlePlayerLog(JsonElement root)
+    {
+        if (!root.TryGetProperty("message", out JsonElement messageElement) || messageElement.ValueKind != JsonValueKind.String)
+        {
+            return;
+        }
+
+        string text = messageElement.GetString() ?? string.Empty;
+        if (text.Length == 0)
+        {
+            return;
+        }
+
+        string level = root.TryGetProperty(LogLevelFieldName, out JsonElement levelElement) && levelElement.ValueKind == JsonValueKind.String
+            ? levelElement.GetString() ?? LogLevelInfo
+            : LogLevelInfo;
+        Dictionary<string, object?> fields = new(StringComparer.Ordinal)
+        {
+            ["source"] = "player-page",
+            ["level"] = level,
+            ["message"] = text,
+        };
+
+        switch (level)
+        {
+            case LogLevelError:
+                _logger.Error(_moduleName, "播放页日志。", fields);
+                break;
+            case LogLevelWarn:
+                _logger.Warn(_moduleName, "播放页日志。", fields);
+                break;
+            default:
+                _logger.Debug(_moduleName, "播放页日志。", fields);
+                break;
+        }
+
+        AppendLog(text);
     }
 
     /// <summary>读取播放页传来的画质档位键。</summary>
@@ -1290,13 +1286,11 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             _saveOptions(_options);
 
             _extremeTargetMs = NormalizeTarget(_options.Playback.ExtremeTargetMs);
-            _volume = Math.Clamp(_options.Playback.Volume, 0, 100);
-            OnPropertyChanged(nameof(Volume));
-            OnPropertyChanged(nameof(RecordingDirectory));
+                        OnPropertyChanged(nameof(RecordingDirectory));
 
             ApplyPlatformChangeFromSettings();
             RefreshBridgeStatus();
-            SendToPlayer(new { type = "volume", value = _volume });
+            SendToPlayer(new { type = "volume", value = _options.Playback.Volume });
 
             StatusMessage = "设置已保存。";
             AppendLog("设置已保存");
@@ -1319,7 +1313,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         }
 
         _effectivePlatform = option is null ? PlatformId.Unknown : option.Id;
-        _isPlatformDetectedFromInput = false;
         RaisePlatformChanged();
         UpdatePresetSummary();
     }
@@ -1387,7 +1380,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         }
 
         _presetSummary = total == 0
-            ? "暂无预设：填好房间号后点「新增预设」，下次一键打开。"
+            ? "暂无预设"
             : $"共 {total} 个预设 · 开播 {live} 个 · 检查失败 {failed} 个";
         OnPropertyChanged(nameof(PresetSummary));
     }
@@ -1628,7 +1621,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             Playback = _options.Playback with
             {
                 ExtremeTargetMs = _extremeTargetMs,
-                Volume = _volume,
             },
         };
         _saveOptions(_options);
@@ -1765,12 +1757,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     private void RaiseCommandStates()
     {
         (ResolveCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (PlayCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (StartRecordingCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (StopRecordingCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (MpvCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (StopCommand as RelayCommand)?.RaiseCanExecuteChanged();
-        (ChaseCommand as RelayCommand)?.RaiseCanExecuteChanged();
         OnPropertyChanged(nameof(PlayAvailable));
     }
 

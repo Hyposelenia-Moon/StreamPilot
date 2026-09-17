@@ -63,10 +63,11 @@ const READY_STATE_PLAYABLE = 3;
  * 但一旦真的停住，恢复必须比稳定档更快，否则用户看到的是"卡住好几秒"。
  * 参考播放页因此对极限档给出更短的阈值（4s / 6.5s），稳定档给 6s / 9s。
  */
-/** 卡顿判定阈值（毫秒）：缓冲饥饿（网络供不上）。 */
+
+/** 稳定档的饥饿卡顿阈值（毫秒）：缓冲见底，网络供不上。 */
 const STALL_THRESHOLD_STARVED_MS = 6000;
 
-/** 卡顿判定阈值（毫秒）：缓冲充足但画面不动（播放器真卡住）。 */
+/** 稳定档的硬卡顿阈值（毫秒）：缓冲充足但画面不动。 */
 const STALL_THRESHOLD_IDLE_MS = 9000;
 
 /** 极限档的饥饿卡顿阈值（毫秒）。 */
@@ -209,11 +210,11 @@ const LOG_LEVELS = Object.freeze({
 /**
  * 把宿主传入的目标延迟归一化为秒。
  * @param {*} value 宿主传入的 extremeTargetMs。
- * @returns {number} 150/200/250 对应 0.15/0.2/0.25；其他值回落为 0.2。
+ * @returns {number} 150/200/250 对应 0.15/0.2/0.25；其他值回落为 0.25。
  */
 function normalizeExtremeTargetSeconds(value) {
   const milliseconds = Number(value);
-  return EXTREME_TARGETS_MS.includes(milliseconds) ? milliseconds / 1000 : STABLE_TARGET_MS / 1000;
+  return EXTREME_TARGETS_MS.includes(milliseconds) ? milliseconds / 1000 : DEFAULT_EXTREME_TARGET_MS / 1000;
 }
 
 /**
@@ -268,6 +269,12 @@ function normalizeCandidates(raw) {
 
 /**
  * 计算 mpegts.js 的播放配置。
+ *
+ * 逐项与参考播放页（`startCandidate` 里的 config 字面量）保持一致：
+ * `enableStashBuffer`/`stashInitialSize` 越档位而变（极限档关闭 stash 才能贴住延迟下限），
+ * `liveBufferLatencyMaxLatency`/`liveBufferLatencyMinRemain` 决定硬跳的时机与落点，
+ * `liveSyncPlaybackRate` 决定倍速追帧的上限——三者只要有一个偏离参考值，
+ * 画面就会在"硬跳太频繁（一顿一顿）"与"追不上（越来越滞后）"之间摆动。
  * @param {boolean} extreme 是否极限追帧模式。
  * @param {number} targetSeconds 目标延迟（秒）。
  * @returns {object} mpegts.js 配置对象。
@@ -330,12 +337,18 @@ function getReconnectDelayMs(reconnectCount) {
 
 /**
  * 计算卡顿判定阈值。
+ *
+ * 与参考播放页一致：极限档用更短的阈值（饥饿 4s / 硬卡 6.5s），稳定档用 6s / 9s。
+ * 极限档的目标延迟本来就贴近物理下限，buffer 见底是预期；但真的停住时要更快恢复。
  * @param {boolean} looksStarved 是否处于饥饿状态（无缓冲或 readyState 偏低）。
+ * @param {boolean} extreme 是否极限追帧模式。
  * @returns {number} 判定阈值毫秒数。
  */
-function getStallThresholdMs(looksStarved) {
-  // 极限档无法降低物理延迟上限：网络抖动时饥饿是预期现象，
-  // 阈值给足重缓冲时间，避免几秒不动就重连，造成"断断续续"。
+function getStallThresholdMs(looksStarved, extreme) {
+  if (extreme) {
+    return looksStarved ? EXTREME_STALL_THRESHOLD_STARVED_MS : EXTREME_STALL_THRESHOLD_IDLE_MS;
+  }
+
   return looksStarved ? STALL_THRESHOLD_STARVED_MS : STALL_THRESHOLD_IDLE_MS;
 }
 
@@ -346,9 +359,10 @@ function getStallThresholdMs(looksStarved) {
  * @param {boolean} starved 是否处于缓冲饥饿。
  * @param {number} resumedAt 最近一次手动恢复播放的时间戳（毫秒，0 表示没有）。
  * @param {number} now 当前时间戳（毫秒）。
+ * @param {boolean} extreme 是否极限追帧模式。
  * @returns {boolean} 应当重连返回 true。
  */
-function isPlaybackStalled(video, silenceMs, starved, resumedAt, now) {
+function isPlaybackStalled(video, silenceMs, starved, resumedAt, now, extreme) {
   // 用户手动暂停时画面本来就不前进，这不是卡顿。
   if (video && video.paused) {
     return false;
@@ -359,7 +373,7 @@ function isPlaybackStalled(video, silenceMs, starved, resumedAt, now) {
     return false;
   }
 
-  return Number(silenceMs) >= getStallThresholdMs(starved);
+  return Number(silenceMs) >= getStallThresholdMs(starved, extreme);
 }
 
 /**
@@ -527,10 +541,13 @@ function shouldHideHint(run) {
 /**
  * 判断 mpegts.js 触发 LOADING_COMPLETE 后是否应当重连。
  *
- * 直播流没有"下载结束"这回事：浏览器取满缓冲后 mpegts.js 也会报告一次
- * LOADING_COMPLETE，此时重连会白白新建连接并让画面重新起播，看起来就是固定间隔的卡顿。
- * 只有画面确实不再前进（超过停滞阈值）或缓冲已空时才按断流处理。
- * @param {{lastPlaybackProgressAt?:number}} run 运行对象。
+ * 直播流没有"下载结束"这回事：取满缓冲后 mpegts.js 也会报告一次 LOADING_COMPLETE，
+ * 此时重连会白白新建连接并让画面重新起播，看起来就是固定间隔的卡顿。
+ * 只有画面确实不再前进（超过本模式的停滞阈值）或缓冲已空时才按断流处理。
+ *
+ * 阈值按模式取（极限档 4s / 6.5s，稳定档 6s / 9s），与参考播放页的分模式阈值一致：
+ * 极限档一旦真的停住，等 9 秒才恢复就是"卡住好几秒"。
+ * @param {object} run 运行对象（含 playbackStarted / lastPlaybackProgressAt / extreme）。
  * @param {number} now 当前时间戳（毫秒）。
  * @param {boolean} starved 是否处于缓冲饥饿。
  * @returns {boolean} 应当重连返回 true。
@@ -541,7 +558,7 @@ function shouldRecoverAfterLoadingComplete(run, now, starved) {
   }
 
   const silenceMs = Number(now) - Number(run.lastPlaybackProgressAt || 0);
-  return starved || silenceMs >= getStallThresholdMs(false);
+  return starved || silenceMs >= getStallThresholdMs(false, Boolean(run.extreme));
 }
 
 /**
@@ -584,7 +601,7 @@ function buildPlaybackPlan(payload, canPlayFlv, canPlayHls, hevcSupported) {
       mode: extreme ? 'extreme' : 'stable',
       extreme,
       extremeTargetMs: extreme ? Number(payload.extremeTargetMs) : DEFAULT_EXTREME_TARGET_MS,
-      extremeTargetSeconds: extreme ? normalizeExtremeTargetSeconds(payload.extremeTargetMs) : STABLE_TARGET_MS / 1000,
+      extremeTargetSeconds: extreme ? normalizeExtremeTargetSeconds(payload.extremeTargetMs) : DEFAULT_EXTREME_TARGET_MS / 1000,
       candidates: accepted,
     },
     unsupportedCount,
@@ -613,32 +630,23 @@ function applyExtremeTarget(run, extremeTargetMs) {
 }
 
 /**
- * 记录一次遥测样本并按需自动退出极限追帧。
+ * 判断是否应当对候选发起探测。
  *
- * 极限档在抖动网络上会反复饥饿与丢帧，硬顶只会让画面持续卡顿；
- * 连续饥饿样本达到 STALL_FALLBACK_SAMPLES 时把目标延迟放宽到 FALLBACK_TARGET_MS，
- * 先保证画面连续，再由用户决定是否调回。
- * @param {object} run 运行对象（含 extreme / extremeTargetMs）。
- * @param {boolean} starved 本样本是否处于缓冲饥饿。
- * @returns {number|null} 放宽后的目标延迟（毫秒）；无需切换时返回 null。
+ * 探测本身与参考播放页逐条一致（探测请求只取到响应头就 abort，不读响应体），
+ * 这里只加一条参考播放页自己后来补上的收敛条件：**只有一个候选时不探测**。
+ * 依据（都是有出处的，不是感觉）：
+ *  - `docs/parsers/douyu.md` 记录的实测结论是"上游对同一条签名直播长连接只允许一条并发连接，
+ *    第 2 条会被在 0.2–0.4 秒内切断"，该文档给出的修复就是"候选只有 1 条时直接跳过探测：
+ *    探测只用于排序，对单候选零收益却毁掉唯一连接"；
+ *  - 本项目的播放地址在桥接开启时是本地中继地址（`BridgeHost.StreamRelayAsync`），
+ *    中继对每个客户端请求都会各建一条上游连接，因此"单候选 + 探测"同样会让同一个签名地址多开一条上游连接。
+ * 多候选时探测的收益是明确的：能提前把返回 4xx/5xx 的线路排除在队列之外，
+ * 避免把时间浪费在必然失败的首帧超时上。
+ * @param {number} candidateCount 候选数量。
+ * @returns {boolean} 应当探测返回 true。
  */
-function applyStallFallback(run, starved) {
-  if (!run || typeof run !== 'object') {
-    return null;
-  }
-
-  run.stalledSamples = starved ? (run.stalledSamples || 0) + 1 : 0;
-  if (!run.extreme || run.stalledSamples < STALL_FALLBACK_SAMPLES) {
-    return null;
-  }
-
-  run.stalledSamples = 0;
-  if (run.extremeTargetMs === FALLBACK_TARGET_MS) {
-    return null;
-  }
-
-  applyExtremeTarget(run, FALLBACK_TARGET_MS);
-  return run.extremeTargetMs;
+function shouldProbeCandidate(candidateCount) {
+  return Number(candidateCount) > 1;
 }
 
 /**
@@ -734,9 +742,8 @@ const StreamPilotPlayerCore = {
   TELEMETRY_INTERVAL_MS,
   TELEMETRY_REPORT_INTERVAL_MS,
   RECONNECT_COUNTER_RESET_MS,
-  STALL_FALLBACK_SAMPLES,
-  FALLBACK_TARGET_MS,
-  AUTO_FALLBACK_MESSAGE,
+  LOG_LEVELS,
+  CHASE_KEEP_DEFAULT_SECONDS,
   PLAY_RESTORE_TOLERANCE_SECONDS,
   RESUME_GRACE_MS,
   VOLUME_PERCENT_SCALE,
@@ -763,6 +770,7 @@ const StreamPilotPlayerCore = {
   hasProgressed,
   getLocalBufferSeconds,
   looksStarved,
+  shouldProbeCandidate,
   getStartupTimeoutMs,
   modeLabel,
   clampVolumePercent,
@@ -775,7 +783,6 @@ const StreamPilotPlayerCore = {
   buildPlaybackPlan,
   normalizeQualities,
   applyExtremeTarget,
-  applyStallFallback,
   isHttpStatusInvalid,
   isMseError,
   isHevcUnsupportedDescription,

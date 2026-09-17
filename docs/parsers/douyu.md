@@ -107,8 +107,11 @@ POST https://www.douyu.com/lapi/live/getH5PlayV1/1811143         → 表单 enc_
 
 1. 播放页原来在 `buildCandidateQueue` 里用 `fetch` 探测候选，**拿到状态码后不 abort、也不消费响应体**，
    于是这条探测连接一直占着；紧接着 mpegts.js 对**同一个地址**发第 2 条连接 → 被上游秒断 → 首帧必然失败。
-   - 修复：新增 `probeCandidate`，拿到状态码后**立即 `controller.abort()`**；
-   - 且**候选只有 1 条时直接跳过探测**（探测只用于排序，对单候选零收益却毁掉唯一连接）。
+   - 修复：`probeCandidate` 拿到状态码后**立即 `controller.abort()`**，并且**只取响应头、绝不读响应体**；
+   - 且**候选只有 1 条时直接跳过探测**（`shouldProbeCandidate`：探测只用于比较，对单候选零收益却毁掉唯一连接）；
+   - 另外**不再按探测耗时重排队**：队列只把"响应正常"的候选提前，组内保持宿主顺序，
+     4xx/5xx 的候选直接丢弃。这样多候选时探测的收益（提前剔除死线路）留下，
+     代价（把播放换到"探测最快但实际更差"的线路上）去掉，见 [播放策略](../architecture/playback-strategy.md) 第 4 节。
 2. 解析器现在会按 `data.cdnsWithName[].cdn` **补取其它 CDN 的地址**
    （`FetchAdditionalCdnPlayInfosAsync`，最多 2 个、仅在主请求候选 ≤1 条时触发，按 CDN 主机去重）。
    实测 `cdn=hw-h5` 返回完全不同的主机 `hw1a.douyucdn2.cn/live`（同样 `video/x-flv`、200），
@@ -127,6 +130,6 @@ POST https://www.douyu.com/lapi/live/getH5PlayV1/1811143         → 表单 enc_
   不引入 RTMP 客户端库的原因见 [ADR 0004](../../adr/0004-raw-recording.md)。
 - **候选时效**：地址带 `wsAuth`/`token` 签名（`expire=0`，没有可解析的绝对过期时间），
   过期后只能通过重新解析换成新地址；程序已限制自动重试次数，到上限后请手动点「开始播放」重试。
-- **同一签名地址只允许 1 条并发连接**（实测，见上文）：因此播放页**不对单候选做探测**，
-  并且解析器会尽量多给几条不同 CDN 的候选。
+- **同一签名地址只允许 1 条并发连接**（实测，见上文）：因此播放页**不对单候选做探测**
+  （`shouldProbeCandidate`），并且解析器会尽量多给几条不同 CDN 的候选。
 - 参考实现把 `rate=-1`（服务器自选画质）与 `hevc=0`（优先 AVC）作为固定参数；本项目改为**显式档位**：`PreferredQualityKey` 为空/`best`/非法时用 `rate=0`（原画 = 最高档），否则用用户选择的 rate（非法值记 Warn 后回退 0）。

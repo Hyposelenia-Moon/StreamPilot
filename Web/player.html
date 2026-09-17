@@ -67,7 +67,6 @@
       footer,
       #stage,
       #controls,
-      #logPanel,
       #statusLine,
       #hint,
       #volDisplay {
@@ -221,13 +220,7 @@
       padding: 10px 18px;
       font-size: 15px;
       border-radius: 8px;
-    }
-
-    #toggleLog {
-      padding: 10px 14px;
-      font-size: 14px;
-      border-radius: 8px;
-      /* 换行到第二行时也靠右，和上一行的音量行分开 */
+      /* 换行到第二行时也靠右，和上一行的控件分开 */
       margin-left: auto;
     }
 
@@ -312,7 +305,6 @@
 
     #hint.hidden,
     #volDisplay.hidden,
-    #logPanel.hidden,
     footer.hidden {
       display: none;
     }
@@ -360,34 +352,6 @@
       text-overflow: ellipsis;
     }
 
-    #logPanel {
-      max-height: 132px;
-      overflow-y: auto;
-      border-top: 1px solid #e2e5ea;
-      padding: 6px 10px;
-      font-family: Consolas, "Cascadia Mono", monospace;
-      font-size: 12px;
-      color: #6b7280;
-      scrollbar-color: #c7cdd6 #ffffff;
-    }
-
-    #logPanel div {
-      white-space: pre-wrap;
-      word-break: break-all;
-    }
-
-    #logPanel div[data-level="warn"] {
-      color: #b45309;
-    }
-
-    #logPanel div[data-level="error"] {
-      color: #c0392b;
-    }
-
-    #logPanel div[data-level="ok"] {
-      color: #1f8a4c;
-    }
-
     #volumeLabel {
       color: #6b7280;
       min-width: 46px;
@@ -406,7 +370,12 @@
     </header>
 
     <div id="stage">
-      <video id="video" playsinline></video>
+      <!--
+        与参考播放页一致默认静音：首帧到达前 video 仍会输出已缓冲的音频，
+        不静音时用户会先听到一小段"试音"再被 applyVolume 设成 30%。
+        音量滑块与点击画面都能立刻打开声音，行为不受影响。
+      -->
+      <video id="video" playsinline muted></video>
       <div id="hint" class="empty" data-level="info">等待直播源</div>
       <div id="volDisplay" class="hidden">音量：30%</div>
     </div>
@@ -429,10 +398,8 @@
           <select id="qualitySelect"></select>
         </label>
         <button type="button" id="fsBtn" title="全屏（双击画面同样可切换）">全屏</button>
-        <button type="button" id="toggleLog">显示日志</button>
       </div>
       <div id="statusLine">未连接</div>
-      <div id="logPanel" class="hidden"></div>
     </footer>
   </div>
 
@@ -443,6 +410,10 @@
     (function main() {
       const core = window.StreamPilotPlayerCore;
       const outbound = core.OUTBOUND_MESSAGE_TYPES;
+
+      /** HTTP 错误状态码区间：4xx/5xx 视为"线路明确拒绝"，直接丢弃不再尝试。 */
+      const HTTP_ERROR_STATUS_MIN = 400;
+      const HTTP_ERROR_STATUS_MAX = 600;
 
       /** 宿主消息通道：WebView2 的 chrome.webview。外部浏览器打开时为空。 */
       const hostChannel = (function createHostChannel() {
@@ -466,7 +437,6 @@
         video: document.getElementById('video'),
         hint: document.getElementById('hint'),
         status: document.getElementById('statusLine'),
-        log: document.getElementById('logPanel'),
         volume: document.getElementById('volume'),
         volumeLabel: document.getElementById('volumeLabel'),
         volDisplay: document.getElementById('volDisplay'),
@@ -479,7 +449,6 @@
         playBtn: document.getElementById('playBtn'),
         pauseBtn: document.getElementById('pauseBtn'),
         chaseBtn: document.getElementById('chaseBtn'),
-        toggleLog: document.getElementById('toggleLog'),
         stage: document.getElementById('stage'),
       };
 
@@ -559,17 +528,19 @@
         }
       }
 
-      /** 写日志面板。 */
-      function appendLog(level, text) {
-        const row = document.createElement('div');
-        row.dataset.level = level;
-        row.textContent = '[' + new Date().toLocaleTimeString('zh-CN', { hour12: false }) + '] ' + text;
-        elements.log.appendChild(row);
-        while (elements.log.childElementCount > 200) {
-          elements.log.removeChild(elements.log.firstChild);
-        }
-
-        elements.log.scrollTop = elements.log.scrollHeight;
+      /**
+       * 页面诊断日志：只上报给宿主，页面不再显示日志面板。
+       *
+       * 页面上的日志面板既占画面又需要用户手动展开，排查问题还是得看宿主日志；
+       * 因此这里统一走 `log` 消息（级别 info/warn/error 原样带给宿主），
+       * 由宿主决定落盘级别与界面展示，页面侧不留任何输出通道。
+       * @param {string} level 日志级别（core.LOG_LEVELS）。
+       * @param {string} text 日志文本。
+       */
+      function logToHost(level, text) {
+        report(outbound.LOG, text, state.run, state.run ? state.run.currentCandidate : null, {
+          level: level,
+        });
       }
 
       /** 设置居中提示。 */
@@ -628,7 +599,7 @@
         try {
           player.pause();
         } catch (error) {
-          appendLog('warn', '暂停播放器失败：' + error.message);
+          logToHost(core.LOG_LEVELS.WARN, '暂停播放器失败：' + error.message);
         }
 
         try {
@@ -644,7 +615,7 @@
             player.destroy();
           }
         } catch (error) {
-          appendLog('warn', '释放播放器失败：' + error.message);
+          logToHost(core.LOG_LEVELS.WARN, '释放播放器失败：' + error.message);
         }
 
         try {
@@ -652,7 +623,7 @@
           elements.video.removeAttribute('src');
           elements.video.load();
         } catch (error) {
-          appendLog('warn', '重置视频元素失败：' + error.message);
+          logToHost(core.LOG_LEVELS.WARN, '重置视频元素失败：' + error.message);
         }
 
         elements.video.playbackRate = 1;
@@ -686,18 +657,150 @@
       }
 
       /**
-       * 生成候选队列：直接沿用宿主给的顺序，不做任何网络探测。
+       * 探测单个候选：只取到响应头就中止，绝不读取响应体。
        *
-       * 直播地址是长连接，探测（哪怕是 200 就 abort）都会与随后的 mpegts/hls.js 连接
-       * 竞争同一个地址：实测会出现"探测量到 200、紧随其后的播放连接被上游切断"，
-       * 画面因此反复起播、断流、重连，看起来就是持续卡顿。
-       * 现在一律"先连第一个候选"，连不上再由 switchToNextCandidate 顺序重试。
+       * 与参考播放页（`probeCandidate`）逐条一致：GET、`cache:'no-store'`、`credentials:'omit'`、
+       * 超时 1200 ms 且超时即 abort、拿到状态码立刻 abort。
+       * "不读 body"是关键：读 body 等于把整条直播流拉下来，探测就变成一次真实下载。
        * @param {object} run 运行对象。
-       * @returns {Promise<Array<object>>} 待尝试的候选队列。
+       * @param {object} candidate 候选。
+       * @returns {Promise<{outcome:string,elapsedMs:number,statusCode:number|null,errorName:string|null,errorMessage:string|null}>} 探测结论。
        */
-      async function buildCandidateQueue(run) {
+      async function probeCandidate(run, candidate) {
+        const controller = new AbortController();
+        run.controllers.add(controller);
+        const startedAt = performance.now();
+        const elapsed = function elapsedMs() {
+          return Math.round(performance.now() - startedAt);
+        };
+
+        try {
+          const response = await awaitWithTimeout(
+            fetch(candidate.url, {
+              method: 'GET',
+              mode: 'cors',
+              cache: 'no-store',
+              credentials: 'omit',
+              referrerPolicy: 'no-referrer-when-downgrade',
+              signal: controller.signal,
+            }),
+            core.PROBE_TIMEOUT_MS,
+            '候选探测超时',
+            function onProbeTimeout() {
+              controller.abort();
+            });
+
+          if (!isActive(run)) {
+            return { outcome: 'stale', elapsedMs: elapsed(), statusCode: null, errorName: null, errorMessage: null };
+          }
+
+          const status = response.status;
+          try {
+            controller.abort();
+          } catch (abortError) {
+            logToHost(core.LOG_LEVELS.WARN, '探测结束后中止连接失败：' + (abortError && abortError.message));
+          }
+
+          if (response.ok) {
+            return { outcome: 'good', elapsedMs: elapsed(), statusCode: status, errorName: null, errorMessage: null };
+          }
+
+          if (status >= HTTP_ERROR_STATUS_MIN && status < HTTP_ERROR_STATUS_MAX) {
+            return { outcome: 'rejected', elapsedMs: elapsed(), statusCode: status, errorName: null, errorMessage: null };
+          }
+
+          return { outcome: 'inconclusive', elapsedMs: elapsed(), statusCode: status, errorName: null, errorMessage: null };
+        } catch (error) {
+          if (!isActive(run)) {
+            return { outcome: 'stale', elapsedMs: elapsed(), statusCode: null, errorName: null, errorMessage: null };
+          }
+
+          return {
+            outcome: 'inconclusive',
+            elapsedMs: elapsed(),
+            statusCode: null,
+            errorName: error && error.name ? error.name : null,
+            errorMessage: error && error.message ? error.message : null,
+          };
+        } finally {
+          run.controllers.delete(controller);
+        }
+      }
+
+      /** 探测结果是否可用（会话未过期）。 */
+      function isUsableProbeResult(result) {
+        return result.outcome !== 'stale';
+      }
+
+      /** 把探测结果转成队列项（只保留"分组 + 宿主原顺序"，不保留耗时：耗时只用于诊断上报）。 */
+      function buildQueueEntry(candidate, position, result) {
+        return {
+          candidate: candidate,
+          position: position,
+          group: result.outcome === 'good' ? 0 : 1,
+        };
+      }
+
+      /** 按"已知可用优先、其余按宿主原顺序"排序队列项。 */
+      function compareQueueEntries(left, right) {
+        if (left.group !== right.group) {
+          return left.group - right.group;
+        }
+
+        return left.position - right.position;
+      }
+
+      /** 报告单个候选的探测结论。 */
+      function reportProbeResult(run, candidate, result) {
+        if (result.outcome === 'good') {
+          report(outbound.PROBE_RESULT, '线路响应正常', run, candidate, {
+            outcome: 'good',
+            elapsedMs: result.elapsedMs,
+          });
+          return;
+        }
+
+        if (result.outcome === 'rejected') {
+          report(outbound.PROBE_REJECTED, '线路返回 HTTP ' + result.statusCode, run, candidate, {
+            outcome: 'rejected',
+            statusCode: result.statusCode,
+          });
+          return;
+        }
+
+        report(outbound.PROBE_RESULT, '线路探测结果不确定', run, candidate, {
+          outcome: 'inconclusive',
+          elapsedMs: result.elapsedMs,
+          errorName: result.errorName,
+          errorMessage: result.errorMessage,
+        });
+      }
+
+      /** 规整宿主给出的候选顺序（探测通过/不确定的候选）。 */
+      function assembleQueue(run, entries) {
+        entries.sort(compareQueueEntries);
+        const queue = [];
+        for (const entry of entries) {
+          queue.push(entry.candidate);
+        }
+
+        const knownGoodCount = entries.filter(function isKnownGood(item) {
+          return item.group === 0;
+        }).length;
+        report(outbound.CANDIDATE_QUEUE, '候选队列已就绪，共 ' + queue.length + ' 条', run, queue[0] || null, {
+          sourceIndexes: queue.map(function sourceIndexOf(item) {
+            return item.sourceIndex;
+          }),
+          knownGoodCount: knownGoodCount,
+          inconclusiveCount: queue.length - knownGoodCount,
+        });
+        return queue;
+      }
+
+      /** 不探测时的直连模式：直接沿用宿主顺序（例如只有一条候选）。 */
+      function buildDirectQueue(run, reason) {
         const queue = run.candidates.slice();
-        appendLog('info', '按宿主给出的线路顺序直接连接（共 ' + queue.length + ' 条，不做额外探测）');
+        logToHost(core.LOG_LEVELS.INFO, reason + '，按宿主给出的线路顺序直接连接（共 ' + queue.length + ' 条）');
         report(outbound.CANDIDATE_QUEUE, '线路顺序已就绪，共 ' + queue.length + ' 条', run, queue[0] || null, {
           sourceIndexes: queue.map(function index(item) {
             return item.sourceIndex;
@@ -706,6 +809,62 @@
           inconclusiveCount: 0,
         });
         return queue;
+      }
+
+      /**
+       * 生成候选队列。
+       *
+       * 探测恢复成参考播放页的做法（并行、拿到响应头即 abort、超时 1200 ms），但**不按耗时重排队**：
+       * 延时数字量的是"页面→探测目标"这一段，走本地中继时它主要由回环与中继转发决定，与实际 CDN 质量无关，
+       * 按它排序只会把宿主的平台优先级打乱（表现为"换了条更慢的线路"）。
+       * 因此这里只把"已知响应正常"的候选提到前面，组内仍按宿主原顺序；4xx/5xx 的候选直接丢弃。
+       * 是否探测由 core.shouldProbeCandidate 决定，原因见该函数的注释。
+       * @param {object} run 运行对象。
+       * @returns {Promise<Array<object>>} 待尝试的候选队列。
+       */
+      async function buildCandidateQueue(run) {
+        if (!core.shouldProbeCandidate(run.candidates.length)) {
+          return buildDirectQueue(run, '只有一个候选（探测零收益）');
+        }
+
+        report(outbound.CHECKING, '正在并行检查 ' + run.candidates.length + ' 条线路…', run);
+        const results = await Promise.all(run.candidates.map(function probe(item) {
+          return probeCandidate(run, item);
+        }));
+        if (!isActive(run)) {
+          return [];
+        }
+
+        const entries = [];
+        const rejected = [];
+        for (let position = 0; position < run.candidates.length; position += 1) {
+          const candidate = run.candidates[position];
+          const result = results[position];
+          if (!isUsableProbeResult(result)) {
+            return [];
+          }
+
+          reportProbeResult(run, candidate, result);
+          if (result.outcome === 'rejected') {
+            rejected.push(candidate);
+            continue;
+          }
+
+          entries.push(buildQueueEntry(candidate, position, result));
+        }
+
+        if (rejected.length > 0) {
+          logToHost(core.LOG_LEVELS.WARN, '已跳过 ' + rejected.length + ' 条返回 HTTP 错误的线路');
+        }
+
+        if (entries.length === 0) {
+          const message = '所有线路都拒绝了内置播放器的请求（可能未开播、地区受限或已被平台限流）。';
+          setHintLocked(message, 'error', 10000);
+          report(outbound.ERROR, message, run, null, { rejectedCount: rejected.length });
+          return [];
+        }
+
+        return assembleQueue(run, entries);
       }
 
       /** 启动某个候选的播放。 */
@@ -776,8 +935,8 @@
               内核自动播放策略要求静音才能起播时，先用静音拿到首帧，
               再立刻恢复用户音量：这样"无需点击就能看"，音量也与滑块一致。
             */
-            appendLog('info', '内核要求静音起播，已恢复音量 ' + state.lastVolume + '%');
-            applyVolume(state.lastVolume, false);
+            logToHost(core.LOG_LEVELS.INFO, '内核要求静音起播，已恢复音量 ' + state.lastVolume + '%');
+            applyVolume(state.lastVolume);
           }
 
           markPlaybackStarted(run, candidate, startedAt);
@@ -793,7 +952,7 @@
           if (core.isAutoplayBlocked(error)) {
             state.autoplayBlocked = true;
             state.autoplayStartedAt = startedAt;
-            appendLog('warn', '自动播放被策略拦截，等待用户点击画面');
+            logToHost(core.LOG_LEVELS.WARN, '自动播放被策略拦截，等待用户点击画面');
             report(outbound.WARNING, core.AUTOPLAY_BLOCKED_HINT, run, candidate, { errorName: error.name });
             setHint(core.AUTOPLAY_BLOCKED_HINT, 'warn');
             return;
@@ -840,7 +999,6 @@
       function markPlaybackStarted(run, candidate, startedAt) {
         run.playbackStarted = true;
         run.everPlayed = true;
-        run.stalledSamples = 0;
         state.autoplayBlocked = false;
         state.pausedByUser = false;
         state.resumedAt = 0;
@@ -852,7 +1010,7 @@
         updateModeHint();
         updatePauseButton();
         setStatus(core.formatPlaybackStatusText(run));
-        appendLog('ok', '首帧 ' + firstFrameMs + ' ms（' + candidate.host + '）');
+        logToHost(core.LOG_LEVELS.INFO, '首帧 ' + firstFrameMs + ' ms（' + candidate.host + '）');
         report(outbound.STATUS, '播放已开始', run, candidate, { firstFrameMs: firstFrameMs, mode: run.mode });
         startTelemetry(run);
       }
@@ -875,16 +1033,30 @@
 
           markPlaybackStarted(run, candidate, startedAt);
         }).catch(function onFailed(error) {
-          appendLog('error', '点击后仍无法播放：' + (error && error.message ? error.message : error));
+          logToHost(core.LOG_LEVELS.ERROR, '点击后仍无法播放：' + (error && error.message ? error.message : error));
           setHintLocked('仍无法开始播放，请回主界面重新点「开始播放」。', 'warn', 8000);
         });
+      }
+
+      /**
+       * 判断事件是否来自"当前正在用的这个播放器"。
+       *
+       * 销毁后的事件仍会按队列送达：没有这道校验时，旧播放器的 ERROR / LOADING_COMPLETE
+       * 会作用到刚建好的新会话上（表现为"刚连上就被判定断流，然后又重连"），
+       * 参考播放页用 `player !== ownedPlayer` 做了同样的过滤。
+       * @param {object} run 运行对象。
+       * @param {object} player 事件所属的播放器。
+       * @returns {boolean} 事件有效返回 true。
+       */
+      function isCurrentPlayer(run, player) {
+        return isActive(run) && state.ownedPlayer === player;
       }
 
       /** 绑定播放器事件。 */
       function attachPlayerEvents(run, candidate, player, isFlv) {
         if (isFlv) {
           player.on(window.mpegts.Events.ERROR, function onMpegtsError(errorType, errorDetail, errorInfo) {
-            if (!isActive(run)) {
+            if (!isCurrentPlayer(run, player)) {
               return;
             }
 
@@ -907,19 +1079,25 @@
           });
 
           player.on(window.mpegts.Events.LOADING_COMPLETE, function onLoadingComplete() {
-            if (!isActive(run)) {
+            if (!isCurrentPlayer(run, player)) {
               return;
             }
 
             /*
               直播流没有"下载结束"：取满缓冲后 mpegts.js 也会报一次 LOADING_COMPLETE，
               此时重连等于固定间隔地重建连接，画面必然一顿一顿。
-              只有画面确实不再前进或缓冲已空时才按断流处理。
+              只有画面确实不再前进或缓冲已空时才按断流处理；
+              用户按了暂停时画面本来就不前进，这种"下载结束"属于预期，直接忽略。
             */
+            if (run.pausedByUser) {
+              logToHost(core.LOG_LEVELS.INFO, '用户暂停期间的 LOADING_COMPLETE 不按断流处理');
+              return;
+            }
+
             const buffered = core.getLocalBufferSeconds(elements.video.buffered, elements.video.currentTime);
             const starved = core.looksStarved(elements.video, buffered);
             if (!core.shouldRecoverAfterLoadingComplete(run, Date.now(), starved)) {
-              appendLog('info', '缓冲已取满，等待播放消耗（不重连）');
+              logToHost(core.LOG_LEVELS.INFO, '缓冲已取满，等待播放消耗（不重连）');
               return;
             }
 
@@ -930,7 +1108,7 @@
 
         if (window.Hls && !isFlv) {
           player.on(window.Hls.Events.ERROR, function onHlsError(eventName, data) {
-            if (!isActive(run) || !data) {
+            if (!isCurrentPlayer(run, player) || !data) {
               return;
             }
 
@@ -975,7 +1153,7 @@
         run.switching = true;
         run.playbackStarted = false;
         report(outbound.WARNING, '切换线路：' + reason, run, candidate);
-        appendLog('warn', '切换线路：' + reason);
+        logToHost(core.LOG_LEVELS.WARN, '切换线路：' + reason);
         destroyPlayer();
 
         run.queue.shift();
@@ -1003,10 +1181,12 @@
         const reconnectCount = run.reconnectsBySource.get(candidate.sourceIndex) || 0;
         const delay = core.getReconnectDelayMs(reconnectCount);
         if (delay < 0) {
-          run.switching = true;
+          /*
+            这里不再先把 switching 置 true 再置回来：`switchToNextCandidate` 自己会置位并守门，
+            中间那次"强制解锁"会让同一个候选在本轮里被重复切换（重复销毁播放器 = 画面连续重建）。
+          */
           report(outbound.WARNING, '当前线路重连未恢复，切换线路', run, candidate, { reconnectCount: reconnectCount });
-          appendLog('warn', '当前线路重连 ' + reconnectCount + ' 次未恢复，切换线路');
-          run.switching = false;
+          logToHost(core.LOG_LEVELS.WARN, '当前线路重连 ' + reconnectCount + ' 次未恢复，切换线路');
           switchToNextCandidate(run, candidate, reason);
           return;
         }
@@ -1073,24 +1253,13 @@
           const starved = core.looksStarved(video, localBuffer);
 
           /*
-            抖动网络上极限档会反复饥饿：硬顶只会持续丢帧。
-            连续饥饿达到阈值时自动回落到稳定档并提示，避免"看着看着就卡住"。
+            不在这里"自动回落到稳定档"：那会把 150/200/250 三档悄悄改成别的东西，
+            而档位入口只有画面下方一处，用户看到的档位必须就是真正生效的档位。
+            抖动时该做的是按本模式的阈值尽快重连（见 core.isPlaybackStalled），
+            而不是替用户改设置——参考播放页同样只做重连、不改档位。
           */
-          const fallbackTarget = core.applyStallFallback(run, starved);
-          if (fallbackTarget !== null) {
-            applyPlayerTargetConfig(run);
-            appendLog('warn', core.AUTO_FALLBACK_MESSAGE + '（' + fallbackTarget + ' ms）');
-            setStatus(core.AUTO_FALLBACK_MESSAGE + '（' + fallbackTarget + ' ms）');
-            report(outbound.WARNING, core.AUTO_FALLBACK_MESSAGE, run, run.currentCandidate, {
-              extremeTargetMs: fallbackTarget,
-              stallSamples: core.STALL_FALLBACK_SAMPLES,
-            });
-            syncTargetSelect();
-            updateModeHint();
-          }
-
           if (run.playbackStarted && !run.switching && !run.reconnecting
-            && core.isPlaybackStalled(video, silenceMs, starved, state.resumedAt, Date.now())) {
+            && core.isPlaybackStalled(video, silenceMs, starved, state.resumedAt, Date.now(), run.extreme)) {
             recoverAfterInterruption(run, run.currentCandidate, '画面进度超过 ' + Math.round(silenceMs / 1000) + ' 秒未前进');
             return;
           }
@@ -1116,7 +1285,6 @@
               totalVideoFrames: quality ? quality.totalVideoFrames : null,
               mode: run.mode,
               extremeTargetMs: run.extremeTargetMs,
-              stallSamples: run.stalledSamples || 0,
               reconnects: run.reconnectsBySource.get(run.currentCandidate ? run.currentCandidate.sourceIndex : -1) || 0,
             });
           }
@@ -1152,6 +1320,16 @@
           run.recoveryTimer = null;
         }
 
+        // 会话结束时中止所有在途探测请求，避免它们在新会话里读到过期结果。
+        for (const controller of run.controllers) {
+          try {
+            controller.abort();
+          } catch (abortError) {
+            logToHost(core.LOG_LEVELS.WARN, '中止探测请求失败：' + (abortError && abortError.message));
+          }
+        }
+
+        run.controllers.clear();
         destroyPlayer();
       }
 
@@ -1193,6 +1371,8 @@
           candidates: plan.candidates,
           queue: [],
           attempted: new Set(),
+          /** 探测请求的中止控制器：会话结束时统一 abort，避免留下半开的探测连接。 */
+          controllers: new Set(),
           stopped: false,
           switching: false,
           recovering: false,
@@ -1204,7 +1384,6 @@
           currentCandidateStartedAt: 0,
           reconnectCount: 0,
           reconnectsBySource: new Map(),
-          stalledSamples: 0,
           recoveryTimer: null,
           lastPlaybackPosition: 0,
           lastPlaybackProgressAt: Date.now(),
@@ -1214,8 +1393,8 @@
         state.roomTitle = typeof payload.title === 'string' ? payload.title : '';
 
         state.run = run;
-        setStatus('正在探测候选线路…');
-        appendLog('info', '开始播放会话 #' + run.sessionId + '（' + core.modeLabel(run) + '）');
+        setStatus('正在检测候选线路…');
+        logToHost(core.LOG_LEVELS.INFO, '开始播放会话 #' + run.sessionId + '（' + core.modeLabel(run) + '）');
 
         const queue = await buildCandidateQueue(run);
         if (!isActive(run)) {
@@ -1237,7 +1416,10 @@
 
       /**
        * 把当前档位写进正在播放的播放器（mpegts.js / hls.js 都支持热改配置）。
-       * @param {object} run 运行对象（含 extreme / extremeTargetSeconds）。
+       *
+       * 按当前候选的格式选配置：过去这里无条件写 mpegts 配置，
+       * 于是 HLS 会话上"改档位"会静默失败（hls.js 不认这些键），用户看到的是"档位改了但没生效"。
+       * @param {object} run 运行对象（含 extreme / extremeTargetSeconds / currentCandidate）。
        */
       function applyPlayerTargetConfig(run) {
         const player = state.ownedPlayer;
@@ -1245,10 +1427,14 @@
           return;
         }
 
+        const candidate = run.currentCandidate;
+        const config = candidate && core.isHlsCandidate(candidate)
+          ? core.buildHlsConfig(run.extreme)
+          : core.buildMpegtsConfig(run.extreme, run.extremeTargetSeconds);
         try {
-          player.configure(core.buildMpegtsConfig(run.extreme, run.extremeTargetSeconds));
+          player.configure(config);
         } catch (error) {
-          appendLog('warn', '应用追帧档位失败：' + (error && error.message ? error.message : error));
+          logToHost(core.LOG_LEVELS.WARN, '应用追帧档位失败：' + (error && error.message ? error.message : error));
         }
       }
 
@@ -1267,7 +1453,7 @@
       function togglePausePlayback(paused) {
         const run = state.run;
         if (!state.pausedByUser && !isActive(run)) {
-          appendLog('warn', '当前没有正在播放的会话');
+          logToHost(core.LOG_LEVELS.WARN, '当前没有正在播放的会话');
           return;
         }
 
@@ -1278,12 +1464,12 @@
           try {
             elements.video.pause();
           } catch (error) {
-            appendLog('warn', '暂停失败：' + (error && error.message ? error.message : error));
+            logToHost(core.LOG_LEVELS.WARN, '暂停失败：' + (error && error.message ? error.message : error));
           }
 
           updatePauseButton();
           setStatus('已暂停（保留当前地址）');
-          appendLog('info', '已暂停播放，会话与地址保留');
+          logToHost(core.LOG_LEVELS.INFO, '已暂停播放，会话与地址保留');
           report(outbound.STATUS, '已暂停播放', run, run ? run.currentCandidate : null);
           return;
         }
@@ -1308,10 +1494,10 @@
         updatePauseButton();
         elements.video.play().then(function onResumed() {
           setStatus('已继续播放');
-          appendLog('info', '已从当前位置继续播放');
+          logToHost(core.LOG_LEVELS.INFO, '已从当前位置继续播放');
           report(outbound.STATUS, '已继续播放', run, run ? run.currentCandidate : null);
         }).catch(function onFailed(error) {
-          appendLog('error', '继续播放失败：' + (error && error.message ? error.message : error));
+          logToHost(core.LOG_LEVELS.ERROR, '继续播放失败：' + (error && error.message ? error.message : error));
           setHintLocked('继续播放失败，请重新点「开始播放」。', 'warn', 8000);
         });
       }
@@ -1353,7 +1539,7 @@
         report(outbound.REQUEST_PLAY, '页面请求开始播放');
         if (!silent) {
           setStatus('正在请求主程序开始播放…');
-          appendLog('info', '已请求主程序开始播放当前已解析的房间');
+          logToHost(core.LOG_LEVELS.INFO, '已请求主程序开始播放当前已解析的房间');
         }
       }
 
@@ -1361,9 +1547,9 @@
       function handleChase(payload) {
         const keep = payload && payload.keepSeconds;
         if (chaseToLiveEdge(keep)) {
-          appendLog('info', '已追帧到直播最新位置');
+          logToHost(core.LOG_LEVELS.INFO, '已追帧到直播最新位置');
         } else {
-          appendLog('warn', '追帧失败：缓冲区为空');
+          logToHost(core.LOG_LEVELS.WARN, '追帧失败：缓冲区为空');
         }
       }
 
@@ -1387,8 +1573,8 @@
         setStatus('未连接');
       }
 
-      /** 更新音量：界面与视频元素用同一份夹取后的百分比。 */
-      function applyVolume(value, remember) {
+      /** 更新音量：界面与视频元素用同一份夹取后的百分比；有声音时同时记住它供"点画面切换静音"使用。 */
+      function applyVolume(value) {
         const percent = core.clampVolumePercent(value);
         elements.video.volume = core.volumePercentToGain(percent);
         elements.video.muted = core.shouldMuteAtVolume(percent);
@@ -1399,11 +1585,13 @@
         window.setTimeout(function hideVolume() {
           elements.volDisplay.classList.add('hidden');
         }, 1500);
-        if (remember && percent > 0) {
-          state.lastVolume = percent;
-        }
-
+        /*
+          只要确实有声音就记下这个音量：video 元素默认带 muted 属性（与参考播放页一致，
+          避免首帧前的试音），起播兜底路径会立刻用本函数恢复音量。
+          若只在 remember=true 时记录，兜底恢复后"点画面切换静音"会退回到 0%。
+        */
         if (percent > 0) {
+          state.lastVolume = percent;
           state.muteToggleVolume = percent;
         }
       }
@@ -1411,12 +1599,12 @@
       /** 绑定控件事件。 */
       function bindControls() {
         elements.volume.addEventListener('input', function onVolumeInput() {
-          applyVolume(elements.volume.value, true);
+          applyVolume(elements.volume.value);
         });
 
         elements.video.addEventListener('wheel', function onWheel(event) {
           event.preventDefault();
-          applyVolume(elements.video.volume * 100 + (event.deltaY < 0 ? 10 : -10), true);
+          applyVolume(elements.video.volume * 100 + (event.deltaY < 0 ? 10 : -10));
         }, { passive: false });
 
         elements.video.addEventListener('click', function onVideoClick() {
@@ -1427,7 +1615,7 @@
           }
 
           const next = elements.video.muted ? state.lastVolume : 0;
-          applyVolume(next, false);
+          applyVolume(next);
         });
 
         /*
@@ -1444,9 +1632,9 @@
           const request = target.requestFullscreen();
           if (request && typeof request.then === 'function') {
             request.then(function onEntered() {
-              appendLog('info', '已进入全屏');
+              logToHost(core.LOG_LEVELS.INFO, '已进入全屏');
             }).catch(function onFailed(error) {
-              appendLog('error', '进入全屏失败：' + (error && error.message ? error.message : error));
+              logToHost(core.LOG_LEVELS.ERROR, '进入全屏失败：' + (error && error.message ? error.message : error));
               setHintLocked('进入全屏失败，可尝试双击画面或按 F11。', 'warn', 6000);
             });
           }
@@ -1456,7 +1644,7 @@
           const request = document.exitFullscreen();
           if (request && typeof request.then === 'function') {
             request.catch(function onFailed(error) {
-              appendLog('error', '退出全屏失败：' + (error && error.message ? error.message : error));
+              logToHost(core.LOG_LEVELS.ERROR, '退出全屏失败：' + (error && error.message ? error.message : error));
             });
           }
         }
@@ -1497,11 +1685,6 @@
             event.preventDefault();
             toggleFullscreen();
           }
-        });
-
-        elements.toggleLog.addEventListener('click', function onToggleLog() {
-          const hidden = elements.log.classList.toggle('hidden');
-          elements.toggleLog.textContent = hidden ? '显示日志' : '隐藏日志';
         });
 
         elements.qualitySelect.addEventListener('change', function onQualityChange() {
@@ -1630,12 +1813,12 @@
             break;
           default:
             if (payload.type === 'volume') {
-              applyVolume(payload.value, true);
+              applyVolume(payload.value);
             } else if (payload.type === 'bridge-info') {
               state.bridgeBaseAddress = typeof payload.baseAddress === 'string' ? payload.baseAddress : '';
-              appendLog('info', '桥接服务地址：' + (state.bridgeBaseAddress || '未启动'));
+              logToHost(core.LOG_LEVELS.INFO, '桥接服务地址：' + (state.bridgeBaseAddress || '未启动'));
             } else {
-              appendLog('warn', '收到未知消息类型：' + payload.type);
+              logToHost(core.LOG_LEVELS.WARN, '收到未知消息类型：' + payload.type);
             }
 
             break;
@@ -1644,7 +1827,7 @@
 
       bindControls();
       renderTargets({ extremeTargetMs: core.DEFAULT_EXTREME_TARGET_MS });
-      applyVolume(core.INITIAL_VOLUME_PERCENT, true);
+      applyVolume(core.INITIAL_VOLUME_PERCENT);
       updatePauseButton();
       showEmptyState();
       updateModeHint();
@@ -1653,7 +1836,7 @@
         hostChannel.onMessage(handleHostMessage);
       } else {
         setHint('当前不在 StreamPilot 主程序内运行：可直接用 mpv 播放解析出的地址。', 'warn');
-        appendLog('warn', '未检测到 WebView2 宿主通道，控件仍可用于本地调试。');
+        logToHost(core.LOG_LEVELS.WARN, '未检测到 WebView2 宿主通道，控件仍可用于本地调试。');
       }
 
       report(outbound.READY, 'StreamPilot 播放器已加载。', null, null, {

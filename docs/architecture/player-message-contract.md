@@ -66,18 +66,15 @@
 | `candidates[].label` | ➖ | 画质标签（展示用） |
 
 页面行为：规范化候选（丢弃空 URL、按 `sourceIndex:url` 去重）→ 过滤不可播放的格式与不支持的编码 →
-**按宿主给出的顺序直接连接第一条，不做任何网络探测** → 连不上时按同顺序依次切换。
-（探测会与 mpegts/hls.js 竞争同一条直播长连接，实测会让画面反复起播与断流，因此已整体移除。）
+**候选多于一条时并行探测**（`GET` + `cache:'no-store'`，拿到响应头立刻 `abort()`，绝不读响应体，
+超时 1200 ms；只有一条候选时不探测）→ **不按探测耗时重排队**：把"响应正常"的候选提到前面、
+组内仍按宿主顺序，返回 4xx/5xx 的候选直接丢弃 → 连不上时按同顺序依次切换。
 
-### 1.2 `chase`
+探测只承担两件事：提前丢弃返回 HTTP 错误的线路、给宿主留下诊断记录（`checking` / `probe-result` /
+`probe-rejected`）。**不按耗时排序**是因为走本地中继时该耗时主要由回环与中继转发决定，
+与实际 CDN 质量无关，按它排序只会打乱宿主的平台优先级（详见 `docs/architecture/playback-strategy.md` 第 4 节）。
 
-```json
-{ "type": "chase", "keepSeconds": 0.08 }
-```
-
-跳到缓冲末端前 `keepSeconds` 秒（夹取到 0.02–0.5 秒，缺省 0.08）。缓冲为空时页面记录一条 Warn 日志。
-
-### 1.2.1 `target`
+### 1.2 `target`
 
 ```json
 { "type": "target", "extremeTargetMs": 250 }
@@ -159,20 +156,21 @@
 | `type` | 触发时机 | 关键 `extras` |
 |--------|----------|---------------|
 | `ready` | 页面脚本加载完成（握手） | `hevc`、`avc`（当前内核 MSE 解码能力，布尔） |
-| `checking` | 兼容保留（当前不再探测候选） | — |
-| `probe-result` | 兼容保留（当前不再探测候选） | — |
-| `probe-rejected` | 兼容保留（当前不再探测候选） | — |
-| `candidate-queue` | 候选队列生成（直接沿用宿主顺序） | `sourceIndexes`、`knownGoodCount`、`inconclusiveCount` |
+| `checking` | 候选多于一条、开始并行探测 | — |
+| `probe-result` | 单条候选探测结束（成功 / 结果不确定） | `outcome`（`good`/`inconclusive`）、`elapsedMs`、`errorName`、`errorMessage` |
+| `probe-rejected` | 单条候选返回 4xx/5xx，已被丢弃 | `outcome`、`statusCode` |
+| `candidate-queue` | 候选队列生成 | `sourceIndexes`、`knownGoodCount`、`inconclusiveCount` |
 | `candidate-active` | 开始连接某候选 | — |
 | `status` | 状态变化 | `firstFrameMs`、`mode`；暂停/继续时 `message` 为"已暂停播放"/"已继续播放" |
-| `telemetry` | 每 ≥10 s 一次 | `currentTime`、`bufferedAheadMs`、`readyState`、`networkState`、`paused`、`ended`、`playbackRate`、`secondsSinceProgress`、`droppedVideoFrames`、`totalVideoFrames`、`mode`、`extremeTargetMs`、`stallSamples`、`reconnects` |
-| `warning` | 可恢复问题（切换候选、重连、自动回落稳定档） | `errorName`、`errorMessage`、`reconnectCount`、`extremeTargetMs` |
+| `log` | 页面诊断日志（页面不再显示日志面板） | `level`（`info`/`warn`/`error`）；宿主按级别落盘并追加到"最近事件" |
+| `telemetry` | 每 ≥10 s 一次 | `currentTime`、`bufferedAheadMs`、`readyState`、`networkState`、`paused`、`ended`、`playbackRate`、`secondsSinceProgress`、`droppedVideoFrames`、`totalVideoFrames`、`mode`、`extremeTargetMs`、`reconnects` |
+| `warning` | 可恢复问题（切换候选、重连） | `errorName`、`errorMessage`、`reconnectCount` |
 | `error` | 终止性问题（含 HEVC 不受支持） | `errorMessage` |
 | `reconnecting` | 断流后重连 | `reconnectCount` |
 | `refresh-needed` | 所有候选不可用，请宿主重新解析 | — |
 | `quality` | 用户在下拉里换了画质档位 | `key`（档位键）；宿主据此按该档位重新解析并重新下发 `play` |
 | `target` | 用户在播放页底部改了追帧档位 | `extremeTargetMs`（150/200/250）；宿主只记住该值供下次播放沿用 |
-| `request-play` | 用户点了播放页底部的「开始播放」 | — ；宿主执行与左栏「解析房间/开始播放」相同的解析与下发流程 |
+| `request-play` | 用户点了播放页底部的「开始播放」 | — ；宿主执行与「解析房间」相同的解析与下发流程 |
 | `toggle-pause` | 用户点了播放页底部的「暂停播放 / 继续播放」 | — ；宿主切换暂停状态并回下发 `pause` |
 
 宿主对 `sessionId` 做**过期校验**：`sessionId` 与当前活动会话不一致时忽略该消息并记 Debug 日志
@@ -185,8 +183,9 @@
 页面与纯逻辑模块共用 `Web/player-core.js` 中的常量，禁止在页面里写字符串字面量：
 
 ```js
-core.INBOUND_MESSAGE_TYPES  // play / chase / stop / target / pause / mpv
-core.OUTBOUND_MESSAGE_TYPES // ready / checking / ... / quality / request-play / toggle-pause
+core.INBOUND_MESSAGE_TYPES  // play / chase（页面内部追帧按钮使用）/ stop / target / pause / mpv
+core.OUTBOUND_MESSAGE_TYPES // ready / checking / probe-result / probe-rejected / ... / log / quality / request-play / toggle-pause
+core.LOG_LEVELS             // info / warn / error（`log` 消息的 level 字段）
 ```
 
 宿主侧的对应常量集中在 `ShellViewModel` 的私有 `const string` 字段中。
@@ -197,4 +196,6 @@ core.OUTBOUND_MESSAGE_TYPES // ready / checking / ... / quality / request-play /
 
 - 新增字段必须**向后兼容**：页面忽略未知字段，宿主忽略未知 `type`（记 Warn 日志）。
 - 删除或改名 `type` 属于破坏性变更，必须同时更新本文件、`player.html`、`ShellViewModel` 与前端测试。
+- 宿主**不再下发** `chase`（追帧入口只在播放页底部，页面自己触发）；`INBOUND_MESSAGE_TYPES.CHASE`
+  由页面内部的「追帧」按钮使用，因此常量必须保留。
 - `Web/player-core.js` 被 `node --test tests/web` 覆盖：任何阈值或档位改动都必须同步更新用例。

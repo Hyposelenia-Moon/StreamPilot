@@ -30,6 +30,7 @@
                 <ComboBox Width="220" HorizontalAlignment="Left"
                           ItemsSource="{Binding DefaultPlatformChoices}"
                           SelectedItem="{Binding SelectedDefaultPlatform, Mode=TwoWay}"
+                          ToolTip="只在输入房间号、无法从链接识别平台时使用"
                           AutomationProperties.AutomationId="DefaultPlatformCombo">
                   <ComboBox.ItemTemplate>
                     <DataTemplate>
@@ -37,8 +38,6 @@
                     </DataTemplate>
                   </ComboBox.ItemTemplate>
                 </ComboBox>
-                <TextBlock Text="只在输入房间号、无法从链接识别平台时使用。" Style="{StaticResource MutedText}"
-                           TextWrapping="Wrap" Margin="0,8,0,0" />
               </StackPanel>
             </Border>
 
@@ -54,7 +53,7 @@
                     <ColumnDefinition Width="Auto" />
                   </Grid.ColumnDefinitions>
                   <TextBox Grid.Column="0" Text="{Binding MpvPath, UpdateSourceTrigger=PropertyChanged}" />
-                  <Button Grid.Column="1" Content="自动探测" Command="{Binding DetectMpvCommand}" Margin="8,0,0,0" />
+                  <Button Grid.Column="1" Content="探测" Command="{Binding DetectMpvCommand}" Margin="8,0,0,0" />
                   <Button Grid.Column="2" Content="浏览…" Command="{Binding BrowseMpvCommand}" />
                   <Button Grid.Column="3" Content="清空" Command="{Binding ClearMpvCommand}" Margin="0" />
                 </Grid>
@@ -109,8 +108,6 @@
                     <TextBox Text="{Binding SegmentMaxMinutes}" Width="130" HorizontalAlignment="Left" />
                   </StackPanel>
                 </Grid>
-                <TextBlock Text="分片只在关键帧处切分。" Style="{StaticResource MutedText}"
-                           TextWrapping="Wrap" Margin="0,6,0,0" />
               </StackPanel>
             </Border>
           </StackPanel>
@@ -124,8 +121,6 @@
             <Border Style="{StaticResource CardPanel}">
               <StackPanel>
                 <TextBlock Text="账号与 Cookie（可选）" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <TextBlock Text="填 Cookie 才能拿到需要登录的最高画质（虎牙「蓝光20M」、B站 4K/HDR）。获取方法见 README 第 5 节；Cookie 只用于解析，不写日志、不发 CDN。"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,0,0,10" />
 
                 <TextBlock Text="哔哩哔哩 Cookie" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
                 <TextBox Text="{Binding BilibiliCookie, UpdateSourceTrigger=PropertyChanged}" MinHeight="52"
@@ -163,9 +158,8 @@
               <StackPanel>
                 <TextBlock Text="网络" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
                 <TextBlock Text="HTTP 代理" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                <TextBox Text="{Binding Proxy, UpdateSourceTrigger=PropertyChanged}" />
-                <TextBlock Text="形如 http://127.0.0.1:10809；留空表示不使用代理，修改后需重启程序。"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,6,0,0" />
+                <TextBox Text="{Binding Proxy, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="形如 http://127.0.0.1:10809；留空表示不使用代理，修改后需重启程序" />
               </StackPanel>
             </Border>
 
@@ -179,7 +173,7 @@
                     <ColumnDefinition Width="*" />
                   </Grid.ColumnDefinitions>
                   <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                    <TextBlock Text="单次请求超时（秒）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
+                    <TextBlock Text="请求超时（秒）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
                     <TextBox Text="{Binding RequestTimeoutSeconds}" Width="130" HorizontalAlignment="Left" />
                   </StackPanel>
                   <StackPanel Grid.Column="1">
@@ -187,13 +181,10 @@
                     <TextBox Text="{Binding MaxAttempts}" Width="130" HorizontalAlignment="Left" />
                   </StackPanel>
                 </Grid>
-                <TextBlock Text="仅对超时 / 连接失败 / 5xx / 429 重试。" Style="{StaticResource MutedText}"
-                           TextWrapping="Wrap" Margin="0,6,0,0" />
 
                 <TextBlock Text="自定义 User-Agent" Style="{StaticResource MutedText}" Margin="0,12,0,4" />
-                <TextBox Text="{Binding UserAgent, UpdateSourceTrigger=PropertyChanged}" />
-                <TextBlock Text="留空使用内置 Windows Chrome UA。" Style="{StaticResource MutedText}"
-                           TextWrapping="Wrap" Margin="0,6,0,0" />
+                <TextBox Text="{Binding UserAgent, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="留空使用内置 Windows Chrome UA" />
               </StackPanel>
             </Border>
 
@@ -217,11 +208,10 @@
                   </StackPanel>
                   <StackPanel Grid.Column="2">
                     <TextBlock Text="最大重连次数" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                    <TextBox Text="{Binding MaxReconnectAttempts}" Width="110" HorizontalAlignment="Left" />
+                    <TextBox Text="{Binding MaxReconnectAttempts}" Width="110" HorizontalAlignment="Left"
+                             ToolTip="断流后按 2/4/8/15/30 秒退避重连，达到上限即结束本次录制" />
                   </StackPanel>
                 </Grid>
-                <TextBlock Text="断流后按 2/4/8/15/30 秒退避重连，达到上限即结束本次录制。"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,8,0,0" />
               </StackPanel>
             </Border>
 
@@ -229,21 +219,20 @@
               <StackPanel>
                 <TextBlock Text="本地桥接服务" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
                 <TextBlock Text="首选端口" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                <TextBox Text="{Binding BridgePort}" Width="150" HorizontalAlignment="Left" />
-                <CheckBox Content="启动时自动开启（mpv 外挂播放依赖它）" IsChecked="{Binding BridgeAutoStart}" Margin="0,10,0,0" />
-                <TextBlock Text="只监听 127.0.0.1；端口被占用时自动顺延。"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,6,0,0" />
+                <TextBox Text="{Binding BridgePort}" Width="150" HorizontalAlignment="Left"
+                         ToolTip="只监听 127.0.0.1；端口被占用时自动顺延" />
+                <CheckBox Content="启动时自动开启" IsChecked="{Binding BridgeAutoStart}" Margin="0,10,0,0"
+                          ToolTip="mpv 外挂播放依赖它" />
               </StackPanel>
             </Border>
 
             <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
               <StackPanel>
                 <TextBlock Text="日志" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <CheckBox Content="记录详细诊断日志（排查问题时开启）" IsChecked="{Binding VerboseDiagnostics}" Margin="0,0,0,8" />
-                <TextBlock Text="保留日志文件个数" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
+                <CheckBox Content="记录详细诊断日志" IsChecked="{Binding VerboseDiagnostics}" Margin="0,0,0,8"
+                          ToolTip="排查问题时开启" />
+                <TextBlock Text="日志文件个数" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
                 <TextBox Text="{Binding LogRetainDays}" Width="150" HorizontalAlignment="Left" />
-                <TextBlock Text="日志目录与配置目录见本页「配置与清理」。"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,6,0,0" />
 
                 <Grid Margin="0,12,0,0">
                   <Grid.ColumnDefinitions>
@@ -262,9 +251,7 @@
             <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
               <StackPanel>
                 <TextBlock Text="配置与清理" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <TextBlock Text="配置、预设、日志与网页内核缓存都在 %LOCALAPPDATA%\StreamPilot；删除该目录即可清理。"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" />
-                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
                   <Button Content="打开配置目录" Command="{Binding OpenConfigFolderCommand}" />
                   <Button Content="打开日志目录" Command="{Binding OpenLogFolderCommand}" />
                   <Button Content="打开录制目录" Command="{Binding OpenRecordingFolderCommand}" Margin="0" />

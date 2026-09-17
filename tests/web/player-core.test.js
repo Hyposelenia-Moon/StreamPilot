@@ -5,7 +5,7 @@
  *
  * 运行方式：
  *   node --test tests/web
- * 覆盖：档位归一化、候选规范化与过滤、追帧参数推导、重连退避、卡顿阈值、
+ * 覆盖：档位归一化、候选规范化与过滤、追帧参数推导、探测开关、重连退避、分模式卡顿阈值、
  *       手动追帧夹取、错误归类、音量换算、模式/状态/空态文案（正常 / 异常 / 边界三类）。
  */
 
@@ -13,15 +13,15 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const core = require('../../Web/player-core.js');
 
-test('normalizeExtremeTargetSeconds 只接受 150/200/250，其他值回落 0.2s', () => {
+test('normalizeExtremeTargetSeconds 只接受 150/200/250，其他值回落 0.25s', () => {
   assert.equal(core.normalizeExtremeTargetSeconds(150), 0.15);
   assert.equal(core.normalizeExtremeTargetSeconds(200), 0.2);
   assert.equal(core.normalizeExtremeTargetSeconds(250), 0.25);
-  assert.equal(core.normalizeExtremeTargetSeconds(0), 0.2);
-  assert.equal(core.normalizeExtremeTargetSeconds(-1), 0.2);
+  assert.equal(core.normalizeExtremeTargetSeconds(0), 0.25);
+  assert.equal(core.normalizeExtremeTargetSeconds(-1), 0.25);
   assert.equal(core.normalizeExtremeTargetSeconds('250'), 0.25);
-  assert.equal(core.normalizeExtremeTargetSeconds(undefined), 0.2);
-  assert.equal(core.normalizeExtremeTargetSeconds(Number.NaN), 0.2);
+  assert.equal(core.normalizeExtremeTargetSeconds(undefined), 0.25);
+  assert.equal(core.normalizeExtremeTargetSeconds(Number.NaN), 0.25);
 });
 
 test('isHlsCandidate 识别三类 HLS 格式字符串', () => {
@@ -91,58 +91,58 @@ test('getReconnectDelayMs 退避序列为 250/1000，超过上限返回 -1', () 
   assert.equal(core.getReconnectDelayMs(99), -1);
 });
 
-test('getStallThresholdMs 饥饿 6s、非饥饿 9s（不按模式区分）', () => {
-  assert.equal(core.getStallThresholdMs(true), 6000);
-  assert.equal(core.getStallThresholdMs(false), 9000);
+test('getStallThresholdMs 按模式与饥饿状态取 4s/6.5s（极限）与 6s/9s（稳定）', () => {
+  assert.equal(core.getStallThresholdMs(true, true), 4000);
+  assert.equal(core.getStallThresholdMs(false, true), 6500);
+  assert.equal(core.getStallThresholdMs(true, false), 6000);
+  assert.equal(core.getStallThresholdMs(false, false), 9000);
+  assert.equal(core.getStallThresholdMs(true, undefined), 6000, '缺省按稳定档处理');
 });
 
-test('isPlaybackStalled 排除用户暂停与刚恢复播放的宽限期', () => {
+test('isPlaybackStalled 排除用户暂停与刚恢复播放的宽限期，并区分模式阈值', () => {
   const playing = { paused: false };
   const paused = { paused: true };
 
-  assert.equal(core.isPlaybackStalled(playing, 5000, true, 0, 100000), false, '未到阈值不重连');
-  assert.equal(core.isPlaybackStalled(playing, 6000, true, 0, 100000), true, '饥饿达到 6s 才重连');
-  assert.equal(core.isPlaybackStalled(playing, 9000, false, 0, 100000), true, '非饥饿 9s 触发');
-  assert.equal(core.isPlaybackStalled(paused, 60000, false, 0, 100000), false, '用户暂停不算卡顿');
+  assert.equal(core.isPlaybackStalled(playing, 3500, true, 0, 100000, true), false, '极限档未到 4s 不重连');
+  assert.equal(core.isPlaybackStalled(playing, 4000, true, 0, 100000, true), true, '极限档饥饿达到 4s 重连');
+  assert.equal(core.isPlaybackStalled(playing, 4000, true, 0, 100000, false), false, '稳定档 4s 还不重连');
+  assert.equal(core.isPlaybackStalled(playing, 6000, true, 0, 100000, false), true, '稳定档饥饿达到 6s 才重连');
+  assert.equal(core.isPlaybackStalled(playing, 6500, false, 0, 100000, true), true, '极限档硬卡 6.5s 触发');
+  assert.equal(core.isPlaybackStalled(playing, 9000, false, 0, 100000, false), true, '稳定档硬卡 9s 触发');
+  assert.equal(core.isPlaybackStalled(paused, 60000, false, 0, 100000, true), false, '用户暂停不算卡顿');
   assert.equal(
-    core.isPlaybackStalled(playing, 60000, true, 100000 - core.RESUME_GRACE_MS + 1, 100000),
+    core.isPlaybackStalled(playing, 60000, true, 100000 - core.RESUME_GRACE_MS + 1, 100000, true),
     false,
     '刚点继续播放时的静止属于重建缓冲');
   assert.equal(
-    core.isPlaybackStalled(playing, 60000, true, 100000 - core.RESUME_GRACE_MS, 100000),
+    core.isPlaybackStalled(playing, 60000, true, 100000 - core.RESUME_GRACE_MS, 100000, true),
     true,
     '宽限期结束后恢复正常判定');
 });
 
-test('applyStallFallback 连续饥饿后自动回落到稳定档', () => {
-  const run = { mode: 'extreme', extreme: true, extremeTargetMs: 150, extremeTargetSeconds: 0.15 };
-
-  for (let index = 1; index < core.STALL_FALLBACK_SAMPLES; index++) {
-    assert.equal(core.applyStallFallback(run, true), null, '未达样本上限前不改档位');
-    assert.equal(run.extremeTargetMs, 150);
-  }
-
-  assert.equal(core.applyStallFallback(run, true), core.FALLBACK_TARGET_MS, '达到上限回落稳定档');
-  assert.equal(run.extremeTargetMs, core.FALLBACK_TARGET_MS);
-  assert.equal(run.extremeTargetSeconds, core.FALLBACK_TARGET_MS / 1000);
-
-  assert.equal(core.applyStallFallback(run, true), null, '已是稳定档时不再回落');
-  assert.equal(run.stalledSamples, 1, '切换后重新开始计数（每个样本只计一次）');
-
-  const recovered = { mode: 'extreme', extreme: true, extremeTargetMs: 200, extremeTargetSeconds: 0.2 };
-  core.applyStallFallback(recovered, true);
-  core.applyStallFallback(recovered, true);
-  assert.equal(core.applyStallFallback(recovered, false), null, '恢复后计数清零');
-  assert.equal(recovered.stalledSamples, 0);
-  assert.equal(core.applyStallFallback(null, true), null);
+test('shouldProbeCandidate 只在多候选时探测', () => {
+  assert.equal(core.shouldProbeCandidate(0), false);
+  assert.equal(core.shouldProbeCandidate(1), false, '单候选探测零收益却会多占一条上游连接');
+  assert.equal(core.shouldProbeCandidate(2), true);
+  assert.equal(core.shouldProbeCandidate(8), true);
+  assert.equal(core.PROBE_TIMEOUT_MS, 1200, '探测超时与参考播放页一致');
 });
 
-test('shouldRecoverAfterLoadingComplete 只在真的断流时重连', () => {
+test('shouldRecoverAfterLoadingComplete 只在真的断流时重连，且按模式取阈值', () => {
   const now = 100000;
-  const live = { playbackStarted: true, lastPlaybackProgressAt: now - 1000 };
+  const live = { playbackStarted: true, lastPlaybackProgressAt: now - 1000, extreme: true };
+  const stable = { playbackStarted: true, lastPlaybackProgressAt: now - 1000, extreme: false };
 
   assert.equal(core.shouldRecoverAfterLoadingComplete(live, now, false), false, '缓冲取满不重连');
   assert.equal(core.shouldRecoverAfterLoadingComplete(live, now, true), true, '缓冲已空必须重连');
+  assert.equal(
+    core.shouldRecoverAfterLoadingComplete({ playbackStarted: true, lastPlaybackProgressAt: now - 7000, extreme: true }, now, false),
+    true,
+    '极限档画面 7s 不动必须重连（阈值 6.5s）');
+  assert.equal(
+    core.shouldRecoverAfterLoadingComplete({ playbackStarted: true, lastPlaybackProgressAt: now - 7000, extreme: false }, now, false),
+    false,
+    '稳定档 7s 未到 9s 阈值，继续等');
   assert.equal(
     core.shouldRecoverAfterLoadingComplete({ playbackStarted: true, lastPlaybackProgressAt: now - 20000 }, now, false),
     true,
@@ -387,9 +387,13 @@ test('空态提示指向播放页底部的「开始播放」', () => {
   assert.equal(core.AUTOPLAY_BLOCKED_HINT.includes('点一下画面'), true, '自动播放被拦时给出可执行的下一步');
 });
 
-test('消息契约包含播放页侧的请求消息', () => {
+test('消息契约包含播放页侧的请求消息与页面日志', () => {
   assert.equal(core.INBOUND_MESSAGE_TYPES.PAUSE, 'pause');
   assert.equal(core.INBOUND_MESSAGE_TYPES.MPV, 'mpv');
   assert.equal(core.OUTBOUND_MESSAGE_TYPES.REQUEST_PLAY, 'request-play');
   assert.equal(core.OUTBOUND_MESSAGE_TYPES.TOGGLE_PAUSE, 'toggle-pause');
+  assert.equal(core.OUTBOUND_MESSAGE_TYPES.LOG, 'log', '页面日志只上报宿主，页面不再显示日志面板');
+  assert.equal(core.LOG_LEVELS.INFO, 'info');
+  assert.equal(core.LOG_LEVELS.WARN, 'warn');
+  assert.equal(core.LOG_LEVELS.ERROR, 'error');
 });

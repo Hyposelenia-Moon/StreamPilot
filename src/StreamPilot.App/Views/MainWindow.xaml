@@ -39,15 +39,14 @@
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0" Text="StreamPilot 控制台" FontWeight="SemiBold" />
             <Button Grid.Column="1" Content="⚙ 设置" Command="{Binding OpenSettingsCommand}"
-                    ToolTip="默认平台、Cookie、录制、日志"
                     Padding="12,7" Margin="0" AutomationProperties.AutomationId="OpenSettingsButton" />
           </Grid>
         </Border>
 
-        <!-- 单页控制面板：预设 → 直播源 → 播放控制 → 状态 → 录制 -->
+        <!-- 单页控制面板：预设 → 直播源 → 状态 → 录制（播放控制入口只在画面下方） -->
         <ScrollViewer Grid.Row="1" x:Name="ControlTabs" VerticalScrollBarVisibility="Auto" Padding="14,12,14,18">
           <StackPanel>
-            <!-- ===== 预设（独立成区，位于「直播源」上方） ===== -->
+            <!-- ===== 预设 ===== -->
             <Border Style="{StaticResource CardPanel}">
               <Grid>
                 <Grid.RowDefinitions>
@@ -88,19 +87,6 @@
                            TextWrapping="Wrap" Margin="0,6,0,8" />
 
                 <StackPanel Grid.Row="2">
-                  <TextBlock Text="填好房间号后点「新增预设」。" TextWrapping="Wrap" Margin="0,0,0,4">
-                    <TextBlock.Style>
-                      <Style TargetType="TextBlock" BasedOn="{StaticResource MutedText}">
-                        <Setter Property="Visibility" Value="Collapsed" />
-                        <Style.Triggers>
-                          <DataTrigger Binding="{Binding HasPresets}" Value="False">
-                            <Setter Property="Visibility" Value="Visible" />
-                          </DataTrigger>
-                        </Style.Triggers>
-                      </Style>
-                    </TextBlock.Style>
-                  </TextBlock>
-
                   <ListBox ItemsSource="{Binding PresetItems}"
                            SelectedItem="{Binding SelectedPresetItem, Mode=TwoWay}"
                            MaxHeight="240"
@@ -180,39 +166,15 @@
 
                 <!-- 平台不可选：解析时按输入链接的域名自动识别，识别不出时用设置里的默认平台 -->
                 <TextBlock Text="{Binding PlatformStatusText}" FontWeight="SemiBold" TextWrapping="Wrap" />
-                <TextBlock Text="{Binding PlatformHintText}" Style="{StaticResource MutedText}"
-                           TextWrapping="Wrap" Margin="0,4,0,0" />
 
                 <TextBlock Text="房间号 / 直播间链接" Style="{StaticResource MutedText}" Margin="0,10,0,4" />
                 <TextBox Text="{Binding RoomInput, UpdateSourceTrigger=PropertyChanged}" />
-                <TextBlock Text="{Binding RoomUrlHint}" Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,5,0,0" />
 
                 <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-                  <Button Content="解析房间" Command="{Binding ResolveCommand}" Style="{StaticResource PrimaryButton}" />
+                  <Button Content="解析房间" Command="{Binding ResolveCommand}" Style="{StaticResource PrimaryButton}"
+                          ToolTip="支持房间号或直播间链接；粘贴链接时按域名自动识别平台" />
                   <Button Content="mpv 播放" Command="{Binding MpvCommand}" Margin="0" />
                 </StackPanel>
-              </StackPanel>
-            </Border>
-
-            <!-- ===== 播放控制（开始播放、追帧、档位、暂停都在右侧播放页底部） ===== -->
-            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
-              <StackPanel>
-                <TextBlock Text="播放控制" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <Button Command="{Binding StopCommand}" Padding="16,7" HorizontalAlignment="Left"
-                        ToolTip="暂停不结束会话，「继续播放」从当前位置恢复；开始播放 / 追帧 / 档位在播放页底部">
-                  <TextBlock>
-                    <TextBlock.Style>
-                      <Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
-                        <Setter Property="Text" Value="暂停播放" />
-                        <Style.Triggers>
-                          <DataTrigger Binding="{Binding IsPlaybackPaused}" Value="True">
-                            <Setter Property="Text" Value="继续播放" />
-                          </DataTrigger>
-                        </Style.Triggers>
-                      </Style>
-                    </TextBlock.Style>
-                  </TextBlock>
-                </Button>
               </StackPanel>
             </Border>
 
@@ -238,11 +200,10 @@
 
             <!-- ===== 录制 ===== -->
             <TextBlock Text="直播回放录制" Style="{StaticResource SectionTitle}" Margin="0,14,0,4" />
-            <TextBlock Text="原样保存直播流：不转码；超出分片上限或主播断流时自动开新分片。"
-                       Style="{StaticResource MutedText}" TextWrapping="Wrap" />
 
             <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-              <Button Content="开始录制" Command="{Binding StartRecordingCommand}" Style="{StaticResource PrimaryButton}" />
+              <Button Content="开始录制" Command="{Binding StartRecordingCommand}" Style="{StaticResource PrimaryButton}"
+                      ToolTip="原样保存直播流，不转码；超出分片上限或主播断流时自动开新分片" />
               <Button Content="停止录制" Command="{Binding StopRecordingCommand}" />
               <Button Content="打开目录" Command="{Binding OpenRecordingFolderCommand}" Margin="0" />
             </StackPanel>
@@ -250,7 +211,7 @@
             <Border Style="{StaticResource CardPanel}" Margin="0,10,0,0">
               <StackPanel>
                 <TextBlock Text="{Binding RecordingSummary}" TextWrapping="Wrap" />
-                <TextBlock Text="{Binding RecordingDirectory, StringFormat=输出：{0}}" Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,2,0,0" />
+                <TextBlock Text="{Binding RecordingDirectory, StringFormat=输出目录：{0}}" Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,2,0,0" />
               </StackPanel>
             </Border>
           </StackPanel>
