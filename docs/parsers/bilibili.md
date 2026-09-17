@@ -27,7 +27,12 @@
   注意 `accept_qn[0]` 是**最低**档，不能当成最高档使用。
 - **官方档位名与标记**来自 `playurl_info.playurl.g_qn_desc[]`：`qn` + `desc` + `hdr_desc` + `hdr_type`
   + `media_base_desc.detail_desc.desc/tag`（完整官方名，例如 `1080P 原画`）与 `media_base_desc.brief_desc`。
-- 请求的 `qn` 与实际生效档位（`codec[].current_qn` 或请求值）写入 `SelectedQualityKey`；
+- **兜底链**（保证画质下拉永远有内容）：`accept_qn` 并集 → `g_qn_desc[].qn` → 调用方请求的 `qn`
+  → 响应里第一个 `codec[].current_qn`（`ReadStreamingQualityNumber`）。
+  最后两级的名称回退到内置命名（如 `1080P 原画` / `1080P 蓝光`），**不加任何来源不明的后缀**。
+  这条兜底针对的是"房间接口没给 `g_qn_desc` 也没给 `accept_qn`"的响应，
+  此时旧实现会返回空档位列表，页面上表现为"这个房间没有画质"。
+- 请求的 `qn` 与实际生效档位（请求值命中可用档位时用请求值，否则取最高可用档）写入 `SelectedQualityKey`；
   用户选的键不在可用列表里时回退到最高档并记 `Warn`。
 - 匿名请求通常只能拿到较低档位（例如 1080P 原画）；要拿 4K/HDR/杜比需要在设置里填自己的 `SESSDATA`。
 

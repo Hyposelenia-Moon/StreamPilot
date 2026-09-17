@@ -174,26 +174,25 @@
     }
 
     /*
-      画质档位与全屏放在画面下方（footer）：
+      画质、追帧档位与播放控制都放在画面下方的 footer：
       贴着画面的按钮比页头更容易点到，也避免页头在窄窗口里挤成一团。
     */
-    #qualityBox {
+    #qualityBox,
+    #targetBox {
       display: inline-flex;
       align-items: center;
       gap: 6px;
       white-space: nowrap;
     }
 
-    #qualityBox.hidden {
-      display: none;
-    }
-
-    #qualityBox .qualityLabel {
+    #qualityBox .qualityLabel,
+    #targetBox .qualityLabel {
       color: #5b6472;
       font-size: 15px;
     }
 
-    #qualitySelect {
+    #qualitySelect,
+    #targetSelect {
       cursor: pointer;
       border-radius: 8px;
       height: 36px;
@@ -206,8 +205,16 @@
       max-width: 220px;
     }
 
-    #qualitySelect:hover {
+    #qualitySelect:hover,
+    #targetSelect:hover {
       border-color: #1b4fd8;
+    }
+
+    #playBtn,
+    #pauseBtn {
+      padding: 10px 18px;
+      font-size: 15px;
+      border-radius: 8px;
     }
 
     #fsBtn {
@@ -392,10 +399,7 @@
 <body>
   <div id="root">
     <!--
-      播放页只保留"观看相关"的控件（模式提示、画质、全屏、音量、可选的日志面板）。
-      追帧档位与播放控制（解析 / 开始播放 / 追帧 / mpv 播放）统一放在主界面左侧面板，
-      避免同一个设置或动作在多处各有一份。
-      页头只留模式提示：它常驻显示"当前档位 + 播放状态"，值得占据整行。
+      播放页集中承载观看与播放控制：开始播放、追帧、追帧档位、暂停/继续、画质、全屏、音量。
     -->
     <header>
       <span id="modeHint" class="hintText">等待直播源</span>
@@ -413,7 +417,14 @@
         <input id="volume" type="range" min="0" max="100" step="1" value="30" />
         <span id="volumeLabel">30%</span>
         <span class="spacer"></span>
-        <label id="qualityBox" class="hidden" for="qualitySelect">
+        <button type="button" id="chaseBtn" title="跳到直播最新位置">追帧</button>
+        <label id="targetBox" for="targetSelect">
+          <span class="qualityLabel">追帧档位</span>
+          <select id="targetSelect"></select>
+        </label>
+        <button type="button" id="pauseBtn">暂停播放</button>
+        <button type="button" id="playBtn" title="播放左侧已解析的直播间">开始播放</button>
+        <label id="qualityBox" for="qualitySelect">
           <span class="qualityLabel">画质</span>
           <select id="qualitySelect"></select>
         </label>
@@ -463,6 +474,11 @@
         fsBtn: document.getElementById('fsBtn'),
         qualityBox: document.getElementById('qualityBox'),
         qualitySelect: document.getElementById('qualitySelect'),
+        targetBox: document.getElementById('targetBox'),
+        targetSelect: document.getElementById('targetSelect'),
+        playBtn: document.getElementById('playBtn'),
+        pauseBtn: document.getElementById('pauseBtn'),
+        chaseBtn: document.getElementById('chaseBtn'),
         toggleLog: document.getElementById('toggleLog'),
         stage: document.getElementById('stage'),
       };
@@ -482,11 +498,16 @@
         autoplayStartedAt: 0,
         hintLockUntil: 0,
         eventSequence: 0,
-        probeControllers: [],
         telemetryTimer: null,
         refreshRequested: false,
         capabilities: { hevc: false, avc: false },
         qualityKey: '',
+        targetMs: core.DEFAULT_EXTREME_TARGET_MS,
+        // 用户暂停不销毁播放器：保留会话与地址，继续播放时从当前位置恢复。
+        pausedByUser: false,
+        pausedAtSeconds: 0,
+        // 刚恢复播放的时间戳：这段时间内的静止属于重建缓冲，不判卡顿。
+        resumedAt: 0,
       };
 
       const hevcMseSupported = Boolean(window.MediaSource)
@@ -598,8 +619,6 @@
           state.telemetryTimer = null;
         }
 
-        abortProbes();
-
         const player = state.ownedPlayer;
         state.ownedPlayer = null;
         if (!player) {
@@ -639,19 +658,6 @@
         elements.video.playbackRate = 1;
       }
 
-      /** 取消所有进行中的候选探测。 */
-      function abortProbes() {
-        for (const controller of state.probeControllers) {
-          try {
-            controller.abort();
-          } catch (error) {
-            appendLog('warn', '取消探测失败：' + error.message);
-          }
-        }
-
-        state.probeControllers = [];
-      }
-
       /** 带超时的 Promise 包装。 */
       function awaitWithTimeout(promise, timeoutMs, timeoutMessage, onTimeout) {
         let timer = null;
@@ -680,140 +686,25 @@
       }
 
       /**
-       * 探测单个候选是否可达。
+       * 生成候选队列：直接沿用宿主给的顺序，不做任何网络探测。
        *
-       * 探测只为"排序"服务，因此拿到状态码后必须立刻 abort：直播流是长连接，
-       * 不主动断开就会一直占着这条连接。
-       * 实测（斗鱼房间 1811143）：同一签名地址的**第 2 条**连接会被上游在 0.2–0.4 秒内切断，
-       * 于是"探测量到 200、紧随其后的播放连接秒断"，首帧永远起不来。
-       * @param {object} candidate 候选（至少含 url）。
-       * @param {number} timeoutMs 探测超时（毫秒）。
-       * @returns {Promise<{outcome:string,statusCode?:number,elapsedMs:number,errorName?:string,errorMessage?:string}>} 探测结论。
-       */
-      async function probeCandidate(candidate, timeoutMs) {
-        const controller = new AbortController();
-        state.probeControllers.push(controller);
-        const startedAt = performance.now();
-        try {
-          const response = await awaitWithTimeout(
-            fetch(candidate.url, {
-              method: 'GET',
-              mode: 'cors',
-              cache: 'no-store',
-              credentials: 'omit',
-              referrerPolicy: 'no-referrer-when-downgrade',
-              signal: controller.signal,
-            }),
-            timeoutMs,
-            '候选探测超时',
-            function abortOnTimeout() {
-              controller.abort();
-            });
-
-          const elapsedMs = Math.round(performance.now() - startedAt);
-          const outcome = response.status >= 200 && response.status < 300
-            ? 'good'
-            : (response.status >= 400 ? 'rejected' : 'inconclusive');
-
-          // 拿到状态码就够了：立刻断开，把这条连接让给真正的播放器。
-          controller.abort();
-          return { outcome: outcome, statusCode: response.status, elapsedMs: elapsedMs };
-        } catch (error) {
-          const elapsedMs = Math.round(performance.now() - startedAt);
-          if (error && error.name === 'TimeoutError') {
-            return { outcome: 'inconclusive', elapsedMs: elapsedMs };
-          }
-
-          return {
-            outcome: 'inconclusive',
-            elapsedMs: elapsedMs,
-            errorName: error && error.name,
-            errorMessage: error && error.message,
-          };
-        }
-      }
-
-      /**
-       * 并行探测候选，按"已知可用优先、延迟升序"重排队列。
-       *
-       * 只有 1 条候选时**跳过探测**：探测对排序毫无收益，却会额外占用这条唯一的直播连接。
+       * 直播地址是长连接，探测（哪怕是 200 就 abort）都会与随后的 mpegts/hls.js 连接
+       * 竞争同一个地址：实测会出现"探测量到 200、紧随其后的播放连接被上游切断"，
+       * 画面因此反复起播、断流、重连，看起来就是持续卡顿。
+       * 现在一律"先连第一个候选"，连不上再由 switchToNextCandidate 顺序重试。
+       * @param {object} run 运行对象。
+       * @returns {Promise<Array<object>>} 待尝试的候选队列。
        */
       async function buildCandidateQueue(run) {
-        if (run.candidates.length === 0) {
-          return [];
-        }
-
-        if (run.candidates.length === 1) {
-          appendLog('info', '只有 1 条候选线路，跳过探测直接连接');
-          report(outbound.CANDIDATE_QUEUE, '只有 1 条候选线路，已跳过探测', run, run.candidates[0], {
-            sourceIndexes: [run.candidates[0].sourceIndex],
-            knownGoodCount: 0,
-            inconclusiveCount: 1,
-          });
-          return run.candidates.slice();
-        }
-
-        report(outbound.CHECKING, '正在探测 ' + run.candidates.length + ' 个候选线路…', run);
-        const good = [];
-        const inconclusive = [];
-        const results = await Promise.all(run.candidates.map(function probe(candidate) {
-          return probeCandidate(candidate, core.PROBE_TIMEOUT_MS);
-        }));
-
-        results.forEach(function classify(result, index) {
-          if (!isActive(run)) {
-            return;
-          }
-
-          const candidate = run.candidates[index];
-          if (result.outcome === 'good') {
-            good.push({ candidate: candidate, elapsedMs: result.elapsedMs });
-            report(outbound.PROBE_RESULT, candidate.host + ' 可用', run, candidate, {
-              outcome: 'good',
-              elapsedMs: result.elapsedMs,
-              statusCode: result.statusCode,
-            });
-            return;
-          }
-
-          if (result.outcome === 'rejected') {
-            report(outbound.PROBE_REJECTED, candidate.host + ' 拒绝（HTTP ' + result.statusCode + '）', run, candidate, {
-              outcome: 'rejected',
-              elapsedMs: result.elapsedMs,
-              statusCode: result.statusCode,
-            });
-            return;
-          }
-
-          inconclusive.push(candidate);
-          const detail = result.errorMessage
-            ? candidate.host + ' 探测失败：' + result.errorMessage
-            : candidate.host + ' 结果不确定（HTTP ' + result.statusCode + '）';
-          report(outbound.PROBE_RESULT, detail, run, candidate, {
-            outcome: 'inconclusive',
-            elapsedMs: result.elapsedMs,
-            statusCode: result.statusCode,
-            errorName: result.errorName,
-            errorMessage: result.errorMessage,
-          });
-        });
-
-        good.sort(function byLatency(left, right) {
-          return left.elapsedMs - right.elapsedMs;
-        });
-
-        const queue = good.map(function pick(entry) {
-          return entry.candidate;
-        }).concat(inconclusive);
-
-        report(outbound.CANDIDATE_QUEUE, '可用线路 ' + good.length + ' 个，待尝试 ' + queue.length + ' 个', run, null, {
+        const queue = run.candidates.slice();
+        appendLog('info', '按宿主给出的线路顺序直接连接（共 ' + queue.length + ' 条，不做额外探测）');
+        report(outbound.CANDIDATE_QUEUE, '线路顺序已就绪，共 ' + queue.length + ' 条', run, queue[0] || null, {
           sourceIndexes: queue.map(function index(item) {
             return item.sourceIndex;
           }),
-          knownGoodCount: good.length,
-          inconclusiveCount: inconclusive.length,
+          knownGoodCount: 0,
+          inconclusiveCount: 0,
         });
-
         return queue;
       }
 
@@ -826,7 +717,9 @@
         run.currentCandidate = candidate;
         state.currentStreamUrl = candidate.url;
         state.currentReferer = candidate.referer || '';
+        state.pausedByUser = false;
         updateModeHint();
+        updatePauseButton();
         report(outbound.CANDIDATE_ACTIVE, '正在连接 ' + candidate.host, run, candidate);
 
         destroyPlayer();
@@ -947,13 +840,17 @@
       function markPlaybackStarted(run, candidate, startedAt) {
         run.playbackStarted = true;
         run.everPlayed = true;
+        run.stalledSamples = 0;
         state.autoplayBlocked = false;
+        state.pausedByUser = false;
+        state.resumedAt = 0;
         run.lastPlaybackPosition = elements.video.currentTime;
         run.lastPlaybackProgressAt = Date.now();
         run.currentCandidateStartedAt = Date.now();
         const firstFrameMs = Math.round(performance.now() - startedAt);
         elements.hint.classList.add('hidden');
         updateModeHint();
+        updatePauseButton();
         setStatus(core.formatPlaybackStatusText(run));
         appendLog('ok', '首帧 ' + firstFrameMs + ' ms（' + candidate.host + '）');
         report(outbound.STATUS, '播放已开始', run, candidate, { firstFrameMs: firstFrameMs, mode: run.mode });
@@ -1014,6 +911,18 @@
               return;
             }
 
+            /*
+              直播流没有"下载结束"：取满缓冲后 mpegts.js 也会报一次 LOADING_COMPLETE，
+              此时重连等于固定间隔地重建连接，画面必然一顿一顿。
+              只有画面确实不再前进或缓冲已空时才按断流处理。
+            */
+            const buffered = core.getLocalBufferSeconds(elements.video.buffered, elements.video.currentTime);
+            const starved = core.looksStarved(elements.video, buffered);
+            if (!core.shouldRecoverAfterLoadingComplete(run, Date.now(), starved)) {
+              appendLog('info', '缓冲已取满，等待播放消耗（不重连）');
+              return;
+            }
+
             recoverAfterInterruption(run, candidate, '直播连接已结束');
           });
           return;
@@ -1047,8 +956,8 @@
       /** HEVC 无法解码时的终止处理：明确提示并建议使用 mpv。 */
       function handleHevcUnsupported(run, candidate, description) {
         const message = hevcMseSupported
-          ? '该直播流实际为 HEVC 编码，但系统拒绝了对应的 MSE 解码器；请点击「mpv 播放」。'
-          : '该直播流实际为 HEVC（H.265）编码，当前系统不支持 HEVC 解码，请点击「mpv 播放」。';
+          ? '该直播流实际为 HEVC 编码，但系统拒绝了对应的 MSE 解码器；请改用左栏「mpv 播放」。'
+          : '该直播流实际为 HEVC（H.265）编码，当前系统不支持 HEVC 解码，请改用左栏「mpv 播放」。';
         report(outbound.ERROR, message, run, candidate, { errorMessage: description });
         stopRun(run);
         destroyPlayer();
@@ -1162,9 +1071,26 @@
           const silenceMs = Date.now() - run.lastPlaybackProgressAt;
           const localBuffer = core.getLocalBufferSeconds(video.buffered, video.currentTime);
           const starved = core.looksStarved(video, localBuffer);
-          const threshold = core.getStallThresholdMs(run.extreme, starved);
 
-          if (run.playbackStarted && !run.switching && !run.reconnecting && silenceMs >= threshold) {
+          /*
+            抖动网络上极限档会反复饥饿：硬顶只会持续丢帧。
+            连续饥饿达到阈值时自动回落到稳定档并提示，避免"看着看着就卡住"。
+          */
+          const fallbackTarget = core.applyStallFallback(run, starved);
+          if (fallbackTarget !== null) {
+            applyPlayerTargetConfig(run);
+            appendLog('warn', core.AUTO_FALLBACK_MESSAGE + '（' + fallbackTarget + ' ms）');
+            setStatus(core.AUTO_FALLBACK_MESSAGE + '（' + fallbackTarget + ' ms）');
+            report(outbound.WARNING, core.AUTO_FALLBACK_MESSAGE, run, run.currentCandidate, {
+              extremeTargetMs: fallbackTarget,
+              stallSamples: core.STALL_FALLBACK_SAMPLES,
+            });
+            syncTargetSelect();
+            updateModeHint();
+          }
+
+          if (run.playbackStarted && !run.switching && !run.reconnecting
+            && core.isPlaybackStalled(video, silenceMs, starved, state.resumedAt, Date.now())) {
             recoverAfterInterruption(run, run.currentCandidate, '画面进度超过 ' + Math.round(silenceMs / 1000) + ' 秒未前进');
             return;
           }
@@ -1189,6 +1115,9 @@
               droppedVideoFrames: quality ? quality.droppedVideoFrames : null,
               totalVideoFrames: quality ? quality.totalVideoFrames : null,
               mode: run.mode,
+              extremeTargetMs: run.extremeTargetMs,
+              stallSamples: run.stalledSamples || 0,
+              reconnects: run.reconnectsBySource.get(run.currentCandidate ? run.currentCandidate.sourceIndex : -1) || 0,
             });
           }
         }, core.TELEMETRY_INTERVAL_MS);
@@ -1228,6 +1157,7 @@
 
       /** 处理宿主下发的 play 消息。 */
       async function handlePlay(payload) {
+        renderTargets(payload);
         if (state.run) {
           // 切换画质/重新解析时先给一句话，避免旧画面销毁后出现纯黑屏。
           setHint('正在切换到新线路…', 'info');
@@ -1236,6 +1166,8 @@
         }
 
         state.refreshRequested = false;
+        state.pausedByUser = false;
+        state.resumedAt = 0;
         const normalized = core.buildPlaybackPlan(
           payload,
           canPlayFlv(),
@@ -1272,6 +1204,7 @@
           currentCandidateStartedAt: 0,
           reconnectCount: 0,
           reconnectsBySource: new Map(),
+          stalledSamples: 0,
           recoveryTimer: null,
           lastPlaybackPosition: 0,
           lastPlaybackProgressAt: Date.now(),
@@ -1302,6 +1235,128 @@
         await startCandidate(run, queue[0]);
       }
 
+      /**
+       * 把当前档位写进正在播放的播放器（mpegts.js / hls.js 都支持热改配置）。
+       * @param {object} run 运行对象（含 extreme / extremeTargetSeconds）。
+       */
+      function applyPlayerTargetConfig(run) {
+        const player = state.ownedPlayer;
+        if (!player || typeof player.configure !== 'function') {
+          return;
+        }
+
+        try {
+          player.configure(core.buildMpegtsConfig(run.extreme, run.extremeTargetSeconds));
+        } catch (error) {
+          appendLog('warn', '应用追帧档位失败：' + (error && error.message ? error.message : error));
+        }
+      }
+
+      /** 刷新"暂停播放 / 继续播放"按钮文案与画面状态提示。 */
+      function updatePauseButton() {
+        const paused = state.pausedByUser;
+        elements.pauseBtn.textContent = paused ? '继续播放' : '暂停播放';
+        elements.pauseBtn.title = paused ? '从当前位置继续播放' : '暂停但不结束会话（地址与缓冲保留）';
+        updateModeHint();
+      }
+
+      /**
+       * 暂停 / 继续播放：暂停不销毁播放器，保留会话与当前地址。
+       * @param {boolean} [paused] 目标状态；缺省时在两种状态之间切换。
+       */
+      function togglePausePlayback(paused) {
+        const run = state.run;
+        if (!state.pausedByUser && !isActive(run)) {
+          appendLog('warn', '当前没有正在播放的会话');
+          return;
+        }
+
+        const wantPause = typeof paused === 'boolean' ? paused : !state.pausedByUser;
+        if (wantPause) {
+          state.pausedByUser = true;
+          state.pausedAtSeconds = elements.video.currentTime;
+          try {
+            elements.video.pause();
+          } catch (error) {
+            appendLog('warn', '暂停失败：' + (error && error.message ? error.message : error));
+          }
+
+          updatePauseButton();
+          setStatus('已暂停（保留当前地址）');
+          appendLog('info', '已暂停播放，会话与地址保留');
+          report(outbound.STATUS, '已暂停播放', run, run ? run.currentCandidate : null);
+          return;
+        }
+
+        resumePlayback(run);
+      }
+
+      /** 继续播放：离直播边缘太远时先跳到缓冲末端，避免落后越来越多。 */
+      function resumePlayback(run) {
+        state.pausedByUser = false;
+        state.resumedAt = Date.now();
+        if (run) {
+          run.lastPlaybackProgressAt = state.resumedAt;
+          run.lastPlaybackPosition = elements.video.currentTime;
+        }
+
+        const buffered = core.getLocalBufferSeconds(elements.video.buffered, elements.video.currentTime);
+        if (buffered !== null && buffered > core.PLAY_RESTORE_TOLERANCE_SECONDS) {
+          chaseToLiveEdge(core.CHASE_KEEP_DEFAULT_SECONDS);
+        }
+
+        updatePauseButton();
+        elements.video.play().then(function onResumed() {
+          setStatus('已继续播放');
+          appendLog('info', '已从当前位置继续播放');
+          report(outbound.STATUS, '已继续播放', run, run ? run.currentCandidate : null);
+        }).catch(function onFailed(error) {
+          appendLog('error', '继续播放失败：' + (error && error.message ? error.message : error));
+          setHintLocked('继续播放失败，请重新点「开始播放」。', 'warn', 8000);
+        });
+      }
+
+      /** 把当前档位同步到页面的档位下拉。 */
+      function syncTargetSelect() {
+        const value = String(state.run && Number.isFinite(state.run.extremeTargetMs)
+          ? state.run.extremeTargetMs
+          : state.targetMs);
+        if (elements.targetSelect.value !== value) {
+          elements.targetSelect.value = value;
+        }
+      }
+
+      /**
+       * 渲染追帧档位下拉：档位清单来自 player-core，页面不写死数字。
+       * @param {object} payload 宿主下发的 play 消息（缺省时用页面记住的档位）。
+       */
+      function renderTargets(payload) {
+        const selected = core.normalizeExtremeTargetSeconds(payload && payload.extremeTargetMs) * 1000;
+        elements.targetSelect.replaceChildren();
+        for (const milliseconds of core.EXTREME_TARGETS_MS) {
+          const option = document.createElement('option');
+          option.value = String(milliseconds);
+          option.textContent = milliseconds + ' ms';
+          option.selected = milliseconds === selected;
+          elements.targetSelect.appendChild(option);
+        }
+
+        state.targetMs = selected;
+        syncTargetSelect();
+      }
+
+      /**
+       * 请求宿主开始播放当前已解析的直播间。
+       * @param {boolean} silent 为 true 时不改状态行（页面初始化阶段的静默同步）。
+       */
+      function requestPlayFromHost(silent) {
+        report(outbound.REQUEST_PLAY, '页面请求开始播放');
+        if (!silent) {
+          setStatus('正在请求主程序开始播放…');
+          appendLog('info', '已请求主程序开始播放当前已解析的房间');
+        }
+      }
+
       /** 处理宿主下发的 chase 消息。 */
       function handleChase(payload) {
         const keep = payload && payload.keepSeconds;
@@ -1312,7 +1367,7 @@
         }
       }
 
-      /** 处理宿主下发的 stop 消息。 */
+      /** 处理宿主下发的 stop 消息（兼容旧宿主：结束会话并回到空态）。 */
       function handleStop() {
         if (state.run) {
           report(outbound.STATUS, '播放已停止', state.run, state.run.currentCandidate);
@@ -1324,6 +1379,9 @@
         state.currentStreamUrl = '';
         state.autoplayBlocked = false;
         state.autoplayStartedAt = 0;
+        state.pausedByUser = false;
+        state.resumedAt = 0;
+        updatePauseButton();
         updateModeHint();
         showEmptyState();
         setStatus('未连接');
@@ -1455,10 +1513,61 @@
           state.qualityKey = key;
           report(outbound.QUALITY, '切换画质：' + (elements.qualitySelect.selectedOptions[0]?.textContent || key), state.run, state.run?.currentCandidate, { key: key });
         });
+
+        elements.chaseBtn.addEventListener('click', function onChaseClick() {
+          handleChase({ keepSeconds: core.CHASE_KEEP_DEFAULT_SECONDS });
+        });
+
+        elements.targetSelect.addEventListener('change', function onTargetChange() {
+          const milliseconds = Number(elements.targetSelect.value);
+          if (!core.EXTREME_TARGETS_MS.includes(milliseconds)) {
+            return;
+          }
+
+          const run = state.run;
+          if (!run || !applyExtremeTargetValue(run, milliseconds)) {
+            state.targetMs = core.normalizeExtremeTargetSeconds(milliseconds) * 1000;
+            return;
+          }
+
+          applyPlayerTargetConfig(run);
+          updateModeHint();
+          if (chaseToLiveEdge(core.CHASE_KEEP_DEFAULT_SECONDS)) {
+            report(outbound.STATUS, '追帧档位已切换为 ' + run.extremeTargetMs + ' ms', run, run.currentCandidate);
+          }
+
+          state.targetMs = run.extremeTargetMs;
+          report(outbound.TARGET, '追帧档位：' + run.extremeTargetMs + ' ms', run, run.currentCandidate, {
+            extremeTargetMs: run.extremeTargetMs,
+          });
+        });
+
+        elements.pauseBtn.addEventListener('click', function onPauseClick() {
+          togglePausePlayback();
+        });
+
+        elements.playBtn.addEventListener('click', function onPlayClick() {
+          requestPlayFromHost(false);
+        });
       }
 
       /**
-       * 渲染画质下拉：平台只给一档时隐藏整个控件。
+       * 本地热切换追帧档位并记下当前值。
+       * @param {object} run 运行对象。
+       * @param {number} milliseconds 目标延迟（毫秒），仅接受三档。
+       * @returns {boolean} 档位发生变化返回 true。
+       */
+      function applyExtremeTargetValue(run, milliseconds) {
+        if (!core.applyExtremeTarget(run, milliseconds)) {
+          return false;
+        }
+
+        state.targetMs = run.extremeTargetMs;
+        return true;
+      }
+
+      /**
+       * 渲染画质下拉：始终显示，只有一档时显示当前档位并禁用切换。
        * @param {object} payload 宿主下发的 play 消息。
        */
       function renderQualities(payload) {
@@ -1473,22 +1582,26 @@
           elements.qualitySelect.appendChild(option);
         }
 
-        const multiple = normalized.items.length > 1;
-        elements.qualityBox.classList.toggle('hidden', !multiple);
-        elements.qualitySelect.disabled = !multiple;
+        // 只有一档也显示：用户需要看到"当前就是最高档"，而不是控件凭空消失。
+        const canSwitch = normalized.items.length > 1;
+        elements.qualitySelect.disabled = !canSwitch;
+        elements.qualitySelect.title = canSwitch ? '切换画质档位' : '当前房间只有这一个档位';
       }
 
-      /** 追帧档位热切换：不重连，只改当前运行对象的追帧目标并立即追帧。 */
+      /** 追帧档位热切换（宿主下发 target 消息时调用，不重连）。 */
       function handleTargetChange(payload) {
-        const changed = core.applyExtremeTarget(state.run, payload.extremeTargetMs);
-        updateModeHint();
-        if (!changed || !state.run) {
+        const run = state.run;
+        if (!run || !applyExtremeTargetValue(run, Number(payload.extremeTargetMs))) {
+          state.targetMs = core.normalizeExtremeTargetSeconds(payload.extremeTargetMs) * 1000;
+          syncTargetSelect();
           return;
         }
 
-        // 目标延迟变小了：立刻向缓冲末端追一次（保留 0.08 秒），让新档位马上生效。
-        if (chaseToLiveEdge(0.08)) {
-          report(outbound.STATUS, '追帧档位已切换为 ' + state.run.extremeTargetMs + ' ms', state.run, state.run.currentCandidate);
+        applyPlayerTargetConfig(run);
+        syncTargetSelect();
+        updateModeHint();
+        if (chaseToLiveEdge(core.CHASE_KEEP_DEFAULT_SECONDS)) {
+          report(outbound.STATUS, '追帧档位已切换为 ' + run.extremeTargetMs + ' ms', run, run.currentCandidate);
         }
       }
 
@@ -1512,6 +1625,9 @@
           case core.INBOUND_MESSAGE_TYPES.TARGET:
             handleTargetChange(payload);
             break;
+          case core.INBOUND_MESSAGE_TYPES.PAUSE:
+            togglePausePlayback(typeof payload.paused === 'boolean' ? payload.paused : undefined);
+            break;
           default:
             if (payload.type === 'volume') {
               applyVolume(payload.value, true);
@@ -1527,7 +1643,9 @@
       }
 
       bindControls();
+      renderTargets({ extremeTargetMs: core.DEFAULT_EXTREME_TARGET_MS });
       applyVolume(core.INITIAL_VOLUME_PERCENT, true);
+      updatePauseButton();
       showEmptyState();
       updateModeHint();
 

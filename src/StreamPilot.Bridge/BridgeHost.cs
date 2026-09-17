@@ -98,7 +98,11 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
             UseCookies = false,
             AllowAutoRedirect = true,
             AutomaticDecompression = System.Net.DecompressionMethods.None,
-            PooledConnectionLifetime = TimeSpan.FromMinutes(10),
+
+            // 中继拉的是直播长连接：连接池的"回收寿命"会把一条正在读的流一起换掉，
+            // 表现为固定时长的"看着看着断一下"（页面随后重连）。
+            // 这里显式关闭回收，连接何时结束只由流本身与空闲超时决定。
+            PooledConnectionLifetime = Timeout.InfiniteTimeSpan,
             ConnectTimeout = TimeSpan.FromSeconds(UpstreamConnectTimeoutSeconds),
         })
         {

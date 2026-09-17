@@ -437,6 +437,48 @@ public sealed class PlatformParserTests
         Assert.Equal("720P 超清", qualities[2].Label);
     }
 
+    /// <summary>
+    /// B站：<c>g_qn_desc</c> 与 <c>accept_qn</c> 都为空时，用响应里的 <c>current_qn</c>
+    /// 兜底生成一条当前档位，保证播放页的画质下拉不会空掉。
+    /// </summary>
+    [TestMethod("B站：档位声明全缺失时用 current_qn 兜底")]
+    public void BilibiliFallsBackToCurrentQualityNumber()
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            """
+            { "playurl_info": { "playurl": {
+                "stream": [ { "format": [ { "codec": [
+                  { "current_qn": 10000, "accept_qn": [],
+                    "base_url": "/live/x.flv",
+                    "url_info": [ { "host": "https://cdn.example", "extra": "?token=1" } ] } ] } ] } ] } } }
+            """);
+
+        (IReadOnlyList<QualityOption> qualities, string? selectedKey) =
+            CreateBilibiliParser().BuildQualityOptions(document.RootElement, requestedQuality: null);
+
+        Assert.Equal(1, qualities.Count, "至少要有当前这一档");
+        Assert.Equal("10000", qualities[0].Key);
+        Assert.Equal("1080P 原画", qualities[0].Label, "名称回退到内置命名");
+        Assert.True(qualities[0].IsBest);
+        Assert.Equal("10000", selectedKey);
+    }
+
+    /// <summary>B站：调用方显式请求的档位在没有其它声明时也必须出现在列表里。</summary>
+    [TestMethod("B站：请求档位在无声明时也要出现在列表")]
+    public void BilibiliKeepsRequestedQualityWhenNothingDeclared()
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            """{ "playurl_info": { "playurl": { "stream": [ { "format": [ { "codec": [ { } ] } ] } ] } } }""");
+
+        (IReadOnlyList<QualityOption> qualities, string? selectedKey) =
+            CreateBilibiliParser().BuildQualityOptions(document.RootElement, requestedQuality: 400);
+
+        Assert.Equal(1, qualities.Count);
+        Assert.Equal("400", qualities[0].Key);
+        Assert.Equal("1080P 蓝光", qualities[0].Label);
+        Assert.Equal("400", selectedKey);
+    }
+
     /// <summary>B站：hdr_type 非 0 或 detail_desc.tag 含 HDR 时补 HDR 标记。</summary>
     [TestMethod("B站：HDR 标记来自 hdr_type 与 tag 声明")]
     public void BilibiliReadsHdrFromDeclaration()
@@ -518,6 +560,41 @@ public sealed class PlatformParserTests
 
         using JsonDocument accepted = JsonDocument.Parse("""{ "status_code": 0, "data": { "data": [] } }""");
         parser.EnsureRoomEnterAccepted(accepted.RootElement, "745964462470");
+    }
+
+    /// <summary>
+    /// 抖音：进房接口的 Cookie 头必须把用户自备 Cookie 与首页会话 cookie（<c>ttwid</c>）合并。
+    /// </summary>
+    /// <remarks>
+    /// 实测根因：请求头里只能有一个 Cookie，过去直接写 <c>ttwid=...</c> 会把用户登录态整段丢掉，
+    /// 于是需要登录才下发的最高档（<c>origin</c> 原画）永远枚举不到。
+    /// </remarks>
+    [TestMethod("抖音：进房 Cookie 合并用户登录态与会话 cookie")]
+    public void DouyinMergesUserCookieWithSessionCookie()
+    {
+        string merged = DouyinParser.BuildRoomEnterCookie("session-value");
+
+        Assert.Equal("ttwid=session-value", merged, "没有用户 Cookie 时只带会话 cookie");
+        Assert.DoesNotContain("__ac_signature", merged, "不得引入任何签名");
+        Assert.DoesNotContain("a_bogus", merged, "不得引入任何签名");
+        Assert.DoesNotContain("ms_token", merged, "不得引入任何签名");
+    }
+
+    /// <summary>抖音：作用域里有用户 Cookie 时必须合并（只留一个 Cookie 头，两者都生效）。</summary>
+    [TestMethod("抖音：用户 Cookie 与会话 cookie 合并成一个头")]
+    public void DouyinKeepsUserCookieWhenSessionCookiePresent()
+    {
+        HttpTextClient client = new(new HttpClientFactory(new NetworkOptions(), NullStructuredLogger.Instance), NullStructuredLogger.Instance);
+        using (client.UseCookie("sessionid=abc; ttwid=stale; passport_csrf_token=xyz"))
+        {
+            string merged = DouyinParser.BuildRoomEnterCookie("fresh");
+            Assert.Contains("sessionid=abc", merged, "用户登录态必须保留");
+            Assert.Contains("passport_csrf_token=xyz", merged, "用户登录态必须保留");
+            Assert.Contains("ttwid=fresh", merged, "首页下发的会话 cookie 必须保留");
+            Assert.DoesNotContain("ttwid=stale", merged, "同名 cookie 只保留首页下发的值");
+        }
+
+        Assert.Equal("ttwid=fresh", DouyinParser.BuildRoomEnterCookie("fresh"), "作用域释放后不再带入用户 Cookie");
     }
 
     private static YyParser CreateYyParser() =>
@@ -721,6 +798,70 @@ public sealed class PlatformParserTests
         Assert.Equal("hd", qualities[0].Key, "有视频档时视频档在前");
         Assert.Equal("hd", selected);
         Assert.Equal("ao", qualities[1].Key);
+    }
+
+    /// <summary>
+    /// 抖音：键优先级固定为 origin → real_origin → uhd → hd → sd → ld → FULL_HD1 → HD1 → SD1 → SD2 → ao，
+    /// 「原画」这一档只能来自 <c>origin</c>。
+    /// </summary>
+    [TestMethod("抖音：档位键优先级与「原画」来源")]
+    public void DouyinOrdersQualitiesByDocumentedPriority()
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            """
+            { "stream_url": {
+                "flv_pull_url": {
+                  "ao": "https://cdn.example/ao.flv",
+                  "SD2": "https://cdn.example/sd2.flv",
+                  "SD1": "https://cdn.example/sd1.flv",
+                  "HD1": "https://cdn.example/hd1.flv",
+                  "FULL_HD1": "https://cdn.example/full.flv",
+                  "ld": "https://cdn.example/ld.flv",
+                  "sd": "https://cdn.example/sd.flv",
+                  "hd": "https://cdn.example/hd.flv",
+                  "uhd": "https://cdn.example/uhd.flv",
+                  "real_origin": "https://cdn.example/real.flv",
+                  "origin": "https://cdn.example/origin.flv" } } }
+            """);
+
+        (IReadOnlyList<QualityOption> qualities, string? selected) =
+            CreateDouyinParser().BuildQualityOptions(document.RootElement, preferredQualityKey: null);
+
+        string[] expected =
+        [
+            "origin", "real_origin", "uhd", "hd", "sd", "ld",
+            "FULL_HD1", "HD1", "SD1", "SD2", "ao",
+        ];
+
+        Assert.Equal(expected.Length, qualities.Count);
+        for (int index = 0; index < expected.Length; index++)
+        {
+            Assert.Equal(expected[index], qualities[index].Key, "第 " + index + " 项必须符合文档给出的优先级");
+        }
+
+        Assert.Equal("原画", qualities[0].Label, "「原画」只能来自 origin");
+        Assert.Equal("真原画", qualities[1].Label, "real_origin 不得使用「原画」标签");
+        Assert.Equal("origin", selected);
+    }
+
+    /// <summary>抖音：平台没有给出 <c>origin</c> 时，最高档如实落在下一优先级，不伪造「原画」。</summary>
+    [TestMethod("抖音：缺少 origin 时不伪造原画档")]
+    public void DouyinDoesNotInventOriginQuality()
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            """{ "stream_url": { "flv_pull_url": { "uhd": "https://cdn.example/uhd.flv", "hd": "https://cdn.example/hd.flv" } } }""");
+
+        (IReadOnlyList<QualityOption> qualities, string? selected) =
+            CreateDouyinParser().BuildQualityOptions(document.RootElement, preferredQualityKey: null);
+
+        Assert.Equal(2, qualities.Count);
+        Assert.Equal("uhd", qualities[0].Key);
+        Assert.Equal("蓝光", qualities[0].Label, "没有 origin 时最高档就是 uhd 蓝光");
+        Assert.Equal("uhd", selected);
+        foreach (QualityOption option in qualities)
+        {
+            Assert.False(string.Equals("原画", option.Label, StringComparison.Ordinal), "平台没给 origin 就不得出现「原画」");
+        }
     }
 
     /// <summary>抖音：风控/验证码中间页只用于把失败原因说清楚，不触发任何绕过逻辑。</summary>

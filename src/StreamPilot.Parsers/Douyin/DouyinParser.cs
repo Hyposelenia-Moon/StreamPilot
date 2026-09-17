@@ -231,6 +231,19 @@ internal sealed class DouyinParser : PlatformParserBase
     /// <summary>码率单位判定阈值：不小于该值视为 bps（需换算为 kbps）。</summary>
     private const int BitrateBpsThreshold = 1000;
 
+    /// <summary>Cookie 名值对之间的分隔符。</summary>
+    private const char CookiePairSeparator = ';';
+
+    /// <summary>拼接 Cookie 头时分隔名值对的字符串。</summary>
+    private const string CookiePairJoiner = "; ";
+
+    /// <summary>会话 cookie 名前缀（用于避免与用户自备 Cookie 重复）。</summary>
+    private const string SessionCookiePrefix = DouyinWebSession.CookieName + "=";
+
+    /// <summary>档位诊断日志的说明文本。</summary>
+    private const string QualityDiagnosticsMessage =
+        "抖音档位诊断：以下为本次响应里实际出现的档位键出处（用于确认 origin 原画档是否存在）。";
+
     /// <summary>1 kbps 对应的比特数。</summary>
     private const int BitsPerKilobit = 1000;
 
@@ -1129,7 +1142,7 @@ internal sealed class DouyinParser : PlatformParserBase
             Headers = new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["Referer"] = string.Concat(RoomUrlReferer, roomId),
-                [CookieHeaderName] = string.Concat(DouyinWebSession.CookieName, "=", ttwid),
+                [CookieHeaderName] = BuildRoomEnterCookie(ttwid),
             },
         };
 
@@ -1188,6 +1201,40 @@ internal sealed class DouyinParser : PlatformParserBase
             BuildQualityOptions(room, preferredQualityKey);
         _ = CollectCandidates(builder, room, RoomEnterOperation, selectedQualityKey, out string title, out string category);
         return CreateRoom(roomId, anchorName, title, category, builder, qualities, selectedQualityKey);
+    }
+
+    /// <summary>
+    /// 拼接进房接口的 Cookie 头：用户自备 Cookie 在前，首页会话 cookie（<c>ttwid</c>）在后。
+    /// </summary>
+    /// <param name="ttwid">首页下发的会话 cookie 值。</param>
+    /// <returns>合并后的 Cookie 头（不含 cookie 名重复项）。</returns>
+    /// <remarks>
+    /// 请求头里只能有一个 Cookie：过去这里直接写 <c>ttwid=...</c>，于是
+    /// <see cref="HttpTextClient"/> 的"显式 Cookie 优先"规则把用户自备的登录态整段丢掉，
+    /// 需要登录才下发的最高档（<c>origin</c> 原画）因此永远枚举不到。
+    /// 现在把用户 Cookie 与会话 cookie 合并，两者同时生效；全程不涉及任何平台签名。
+    /// 返回值属于登录凭证，禁止写入日志。
+    /// </remarks>
+    internal static string BuildRoomEnterCookie(string ttwid)
+    {
+        List<string> pairs = [];
+        string? configured = HttpTextClient.ReadCookieScope();
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            foreach (string raw in configured.Split(CookiePairSeparator, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string pair = raw.Trim();
+                if (pair.Length == 0 || pair.StartsWith(SessionCookiePrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                pairs.Add(pair);
+            }
+        }
+
+        pairs.Add(string.Concat(DouyinWebSession.CookieName, "=", ttwid));
+        return string.Join(CookiePairJoiner, pairs);
     }
 
     /// <summary>定位进房响应里的 room 对象（<c>data.data[0]</c>，兼容 <c>data.room</c>）。</summary>
@@ -1454,6 +1501,7 @@ internal sealed class DouyinParser : PlatformParserBase
     {
         JsonElement streamUrl = GetPropertyOrUndefined(room, StreamUrlField);
         List<DouyinQualityDeclaration> declared = ReadDeclaredQualities(streamUrl);
+        LogQualityDiagnostics(streamUrl, declared);
         List<string> available = [];
         foreach (DouyinQualityDeclaration declaration in declared)
         {
@@ -1502,10 +1550,14 @@ internal sealed class DouyinParser : PlatformParserBase
     /// <summary>
     /// 在档位列表中查找调用方指定的档位键。
     /// </summary>
-    /// <param name="qualities">可用档位列表。</param>
+    /// <param name="qualities">可用档位列表（已按从高到低排序）。</param>
     /// <param name="preferredQualityKey">调用方指定的档位键。</param>
     /// <returns>命中的档位键；未指定或无法命中时返回 <see langword="null"/>。</returns>
-    /// <remarks>无法命中时记 Warn 并使用最高档，而不是让解析失败。</remarks>
+    /// <remarks>
+    /// 无法精确命中时按档位等级就近回落（用户上次选了「超清」，这次房间只有「高清」就取高清），
+    /// 而不是无条件跳到最高档：后者会让用户以为"我选的档位没生效"。
+    /// 仍然记 Warn，便于排查平台档位改名。
+    /// </remarks>
     private string? MatchPreferredQuality(IReadOnlyList<QualityOption> qualities, string? preferredQualityKey)
     {
         if (string.IsNullOrWhiteSpace(preferredQualityKey)
@@ -1522,11 +1574,13 @@ internal sealed class DouyinParser : PlatformParserBase
             }
         }
 
+        string fallback = qualities[0].Key;
         Logger.Warn(ModuleName, "抖音档位键无法命中，回退到最高档。", new Dictionary<string, object?>
         {
             ["operation"] = StreamUrlOperation,
             ["preferredQualityKey"] = preferredQualityKey,
-            ["fallbackQualityKey"] = qualities[0].Key,
+            ["fallbackQualityKey"] = fallback,
+            ["availableKeys"] = string.Join(',', qualities.Select(static option => option.Key)),
         });
 
         return null;
@@ -1565,6 +1619,44 @@ internal sealed class DouyinParser : PlatformParserBase
         }
 
         return declarations;
+    }
+
+    /// <summary>
+    /// 记录本次响应里出现的档位键出处，用于确认最高档（<c>origin</c> 原画）是否存在。
+    /// </summary>
+    /// <param name="streamUrl">抖音 room.stream_url 对象。</param>
+    /// <param name="declared">官方档位声明列表。</param>
+    /// <remarks>
+    /// 只记录档位键名，绝不记录地址与查询参数（地址里带签名）。
+    /// 排查"抖音没有原画档"时打开详细诊断日志，即可看到平台到底给了哪些键。
+    /// </remarks>
+    private void LogQualityDiagnostics(JsonElement streamUrl, List<DouyinQualityDeclaration> declared)
+    {
+        List<string> declaredKeys = [];
+        foreach (DouyinQualityDeclaration declaration in declared)
+        {
+            declaredKeys.Add(declaration.Key);
+        }
+
+        List<string> flvKeys = [];
+        AddQualityKeysFromMap(streamUrl, FlvPullUrlField, flvKeys);
+        List<string> hlsKeys = [];
+        AddQualityKeysFromMap(streamUrl, HlsPullUrlMapField, hlsKeys);
+        List<string> directKeys = [];
+        AddDirectQualityKeys(streamUrl, directKeys);
+
+        Logger.Debug(ModuleName, QualityDiagnosticsMessage, new Dictionary<string, object?>
+        {
+            ["operation"] = StreamUrlOperation,
+            ["declaredQualities"] = string.Join(',', declaredKeys),
+            ["flvPullUrl"] = string.Join(',', flvKeys),
+            ["hlsPullUrlMap"] = string.Join(',', hlsKeys),
+            ["streamUrlDirect"] = string.Join(',', directKeys),
+            ["hasOrigin"] = declaredKeys.Contains(QualityKeyOrigin, StringComparer.OrdinalIgnoreCase)
+                || flvKeys.Contains(QualityKeyOrigin, StringComparer.OrdinalIgnoreCase)
+                || hlsKeys.Contains(QualityKeyOrigin, StringComparer.OrdinalIgnoreCase)
+                || directKeys.Contains(QualityKeyOrigin, StringComparer.OrdinalIgnoreCase),
+        });
     }
 
     /// <summary>按优先级定位档位声明数组。</summary>

@@ -14,16 +14,13 @@
 /** 极限追帧允许的目标延迟档位（毫秒）。 */
 const EXTREME_TARGETS_MS = Object.freeze([150, 200, 250]);
 
-/** 极限追帧默认目标延迟（毫秒）。 */
+/** 极限追帧默认目标延迟（毫秒），同时也是非法档位的回落值与稳定模式下的等价目标。 */
 const DEFAULT_EXTREME_TARGET_MS = 250;
-
-/** 稳定模式下的目标延迟（毫秒）。 */
-const STABLE_TARGET_MS = 200;
 
 /** 每个候选最多重连次数。 */
 const MAX_RECONNECTS_PER_CANDIDATE = 2;
 
-/** CDN 候选探测超时（毫秒）。 */
+/** CDN 候选探测超时（毫秒，与参考播放页一致）。 */
 const PROBE_TIMEOUT_MS = 1200;
 
 /** 稳定模式首帧超时（毫秒）。 */
@@ -47,20 +44,36 @@ const TELEMETRY_REPORT_INTERVAL_MS = 10000;
 /** 判定播放进度前进的最小差值（秒）。 */
 const PROGRESS_EPSILON_SECONDS = 0.015;
 
+/** 暂停后恢复播放时允许的位置容差（秒）：超出视为流已被上游丢弃。 */
+const PLAY_RESTORE_TOLERANCE_SECONDS = 3;
+
+/** 恢复播放后暂不判定卡顿的时长（毫秒）：给播放器重建缓冲的时间。 */
+const RESUME_GRACE_MS = 4000;
+
 /** 判定本地缓冲饥饿的阈值（秒）。 */
 const STARVED_BUFFER_SECONDS = 0.15;
 
-/** 卡顿判定阈值（毫秒）：极限追帧模式。 */
-const STALL_THRESHOLD_EXTREME_MS = 4000;
+/** 判定画面停滞的最低就绪状态（HAVE_FUTURE_DATA 及以上才算能继续播）。 */
+const READY_STATE_PLAYABLE = 3;
 
-/** 卡顿判定阈值（毫秒）：稳定模式。 */
-const STALL_THRESHOLD_STABLE_MS = 6000;
+/*
+ * 卡顿判定阈值（毫秒，与参考播放页逐项一致）。
+ *
+ * 极限档的目标延迟本来就贴着物理下限，buffer 偶尔见底属于预期；
+ * 但一旦真的停住，恢复必须比稳定档更快，否则用户看到的是"卡住好几秒"。
+ * 参考播放页因此对极限档给出更短的阈值（4s / 6.5s），稳定档给 6s / 9s。
+ */
+/** 卡顿判定阈值（毫秒）：缓冲饥饿（网络供不上）。 */
+const STALL_THRESHOLD_STARVED_MS = 6000;
 
-/** 硬卡顿判定阈值（毫秒）：极限追帧模式。 */
-const HARD_STALL_THRESHOLD_EXTREME_MS = 6500;
+/** 卡顿判定阈值（毫秒）：缓冲充足但画面不动（播放器真卡住）。 */
+const STALL_THRESHOLD_IDLE_MS = 9000;
 
-/** 硬卡顿判定阈值（毫秒）：稳定模式。 */
-const HARD_STALL_THRESHOLD_STABLE_MS = 9000;
+/** 极限档的饥饿卡顿阈值（毫秒）。 */
+const EXTREME_STALL_THRESHOLD_STARVED_MS = 4000;
+
+/** 极限档的硬卡顿阈值（毫秒）。 */
+const EXTREME_STALL_THRESHOLD_IDLE_MS = 6500;
 
 /** 手动追帧保留的缓冲下限（秒）。 */
 const CHASE_KEEP_MIN_SECONDS = 0.02;
@@ -137,8 +150,8 @@ const INITIAL_VOLUME_PERCENT = 30;
 /** 空态提示标题。 */
 const EMPTY_HINT_TITLE = '等待直播源';
 
-/** 空态提示里的操作指引：真正要点的按钮在主界面左侧面板，不在播放页内。 */
-const EMPTY_HINT_ACTION = '在左侧点「开始播放」即可观看';
+/** 空态提示里的操作指引：真正要点的按钮在播放页底部，不在别处。 */
+const EMPTY_HINT_ACTION = '点下方「开始播放」即可观看';
 
 /** 自动播放被浏览器策略拦截时的提示（需要用户先与页面交互一次）。 */
 const AUTOPLAY_BLOCKED_HINT = '浏览器暂时拦住了自动播放，点一下画面即可开始播放。';
@@ -156,8 +169,11 @@ const MODE_HINT_PLAYING = '播放中';
 const INBOUND_MESSAGE_TYPES = Object.freeze({
   PLAY: 'play',
   CHASE: 'chase',
-  STOP: 'stop',
   TARGET: 'target',
+  PAUSE: 'pause',
+  MPV: 'mpv',
+  /** 兼容保留：旧宿主仍可能下发 stop（语义等同"结束会话"）。 */
+  STOP: 'stop',
 });
 
 /** 页面消息类型：页面 → 宿主。 */
@@ -177,6 +193,17 @@ const OUTBOUND_MESSAGE_TYPES = Object.freeze({
   FULLSCREEN_ENTER: 'fullscreen-enter',
   FULLSCREEN_EXIT: 'fullscreen-exit',
   QUALITY: 'quality',
+  REQUEST_PLAY: 'request-play',
+  TOGGLE_PAUSE: 'toggle-pause',
+  /** 页面日志：页面本身不再显示日志面板，所有诊断文本只进宿主日志。 */
+  LOG: 'log',
+});
+
+/** 页面日志级别（与宿主日志级别同名，宿主据此选择落盘级别）。 */
+const LOG_LEVELS = Object.freeze({
+  INFO: 'info',
+  WARN: 'warn',
+  ERROR: 'error',
 });
 
 /**
@@ -303,16 +330,36 @@ function getReconnectDelayMs(reconnectCount) {
 
 /**
  * 计算卡顿判定阈值。
- * @param {boolean} extreme 是否极限追帧模式。
- * @param {boolean} looksStarved 是否处于饥饿状态（暂停/无缓冲/readyState 偏低）。
+ * @param {boolean} looksStarved 是否处于饥饿状态（无缓冲或 readyState 偏低）。
  * @returns {number} 判定阈值毫秒数。
  */
-function getStallThresholdMs(extreme, looksStarved) {
-  if (extreme) {
-    return looksStarved ? STALL_THRESHOLD_EXTREME_MS : HARD_STALL_THRESHOLD_EXTREME_MS;
+function getStallThresholdMs(looksStarved) {
+  // 极限档无法降低物理延迟上限：网络抖动时饥饿是预期现象，
+  // 阈值给足重缓冲时间，避免几秒不动就重连，造成"断断续续"。
+  return looksStarved ? STALL_THRESHOLD_STARVED_MS : STALL_THRESHOLD_IDLE_MS;
+}
+
+/**
+ * 判断当前是否应当按"画面停滞"触发重连。
+ * @param {{paused?:boolean}} video 视频元素状态快照。
+ * @param {number} silenceMs 画面进度停止前进的时长（毫秒）。
+ * @param {boolean} starved 是否处于缓冲饥饿。
+ * @param {number} resumedAt 最近一次手动恢复播放的时间戳（毫秒，0 表示没有）。
+ * @param {number} now 当前时间戳（毫秒）。
+ * @returns {boolean} 应当重连返回 true。
+ */
+function isPlaybackStalled(video, silenceMs, starved, resumedAt, now) {
+  // 用户手动暂停时画面本来就不前进，这不是卡顿。
+  if (video && video.paused) {
+    return false;
   }
 
-  return looksStarved ? STALL_THRESHOLD_STABLE_MS : HARD_STALL_THRESHOLD_STABLE_MS;
+  // 刚点过"继续播放"时播放器正在重建缓冲，这段时间的静止属于预期。
+  if (resumedAt > 0 && Number(now) - Number(resumedAt) < RESUME_GRACE_MS) {
+    return false;
+  }
+
+  return Number(silenceMs) >= getStallThresholdMs(starved);
 }
 
 /**
@@ -354,7 +401,7 @@ function getLocalBufferSeconds(buffered, currentTime) {
 
 /**
  * 判断是否处于缓冲饥饿状态。
- * @param {{paused:boolean,ended:boolean,readyState:number}} video 视频元素状态快照。
+ * @param {{readyState:number}} video 视频元素状态快照。
  * @param {number|null} localBufferSeconds 本地缓冲剩余秒数。
  * @returns {boolean} 饥饿返回 true。
  */
@@ -363,9 +410,9 @@ function looksStarved(video, localBufferSeconds) {
     return true;
   }
 
-  return !!video.paused
-    || !!video.ended
-    || video.readyState < 3
+  // 只按"还能不能继续解码"判断：paused / ended 是播放意图，不是饥饿，
+  // 把它们算作饥饿会让用户暂停时被误判成卡顿并触发重连。
+  return video.readyState < READY_STATE_PLAYABLE
     || localBufferSeconds === null
     || localBufferSeconds < STARVED_BUFFER_SECONDS;
 }
@@ -478,6 +525,26 @@ function shouldHideHint(run) {
 }
 
 /**
+ * 判断 mpegts.js 触发 LOADING_COMPLETE 后是否应当重连。
+ *
+ * 直播流没有"下载结束"这回事：浏览器取满缓冲后 mpegts.js 也会报告一次
+ * LOADING_COMPLETE，此时重连会白白新建连接并让画面重新起播，看起来就是固定间隔的卡顿。
+ * 只有画面确实不再前进（超过停滞阈值）或缓冲已空时才按断流处理。
+ * @param {{lastPlaybackProgressAt?:number}} run 运行对象。
+ * @param {number} now 当前时间戳（毫秒）。
+ * @param {boolean} starved 是否处于缓冲饥饿。
+ * @returns {boolean} 应当重连返回 true。
+ */
+function shouldRecoverAfterLoadingComplete(run, now, starved) {
+  if (!run || !run.playbackStarted) {
+    return false;
+  }
+
+  const silenceMs = Number(now) - Number(run.lastPlaybackProgressAt || 0);
+  return starved || silenceMs >= getStallThresholdMs(false);
+}
+
+/**
  * 根据宿主下发的 play 消息构造规范化的播放计划。
  * @param {object} payload 宿主消息。
  * @param {boolean} canPlayFlv mpegts.js 是否可用。
@@ -543,6 +610,35 @@ function applyExtremeTarget(run, extremeTargetMs) {
   run.extreme = true;
   run.mode = 'extreme';
   return changed;
+}
+
+/**
+ * 记录一次遥测样本并按需自动退出极限追帧。
+ *
+ * 极限档在抖动网络上会反复饥饿与丢帧，硬顶只会让画面持续卡顿；
+ * 连续饥饿样本达到 STALL_FALLBACK_SAMPLES 时把目标延迟放宽到 FALLBACK_TARGET_MS，
+ * 先保证画面连续，再由用户决定是否调回。
+ * @param {object} run 运行对象（含 extreme / extremeTargetMs）。
+ * @param {boolean} starved 本样本是否处于缓冲饥饿。
+ * @returns {number|null} 放宽后的目标延迟（毫秒）；无需切换时返回 null。
+ */
+function applyStallFallback(run, starved) {
+  if (!run || typeof run !== 'object') {
+    return null;
+  }
+
+  run.stalledSamples = starved ? (run.stalledSamples || 0) + 1 : 0;
+  if (!run.extreme || run.stalledSamples < STALL_FALLBACK_SAMPLES) {
+    return null;
+  }
+
+  run.stalledSamples = 0;
+  if (run.extremeTargetMs === FALLBACK_TARGET_MS) {
+    return null;
+  }
+
+  applyExtremeTarget(run, FALLBACK_TARGET_MS);
+  return run.extremeTargetMs;
 }
 
 /**
@@ -638,6 +734,11 @@ const StreamPilotPlayerCore = {
   TELEMETRY_INTERVAL_MS,
   TELEMETRY_REPORT_INTERVAL_MS,
   RECONNECT_COUNTER_RESET_MS,
+  STALL_FALLBACK_SAMPLES,
+  FALLBACK_TARGET_MS,
+  AUTO_FALLBACK_MESSAGE,
+  PLAY_RESTORE_TOLERANCE_SECONDS,
+  RESUME_GRACE_MS,
   VOLUME_PERCENT_SCALE,
   MIN_VOLUME_PERCENT,
   MAX_VOLUME_PERCENT,
@@ -657,6 +758,7 @@ const StreamPilotPlayerCore = {
   buildHlsConfig,
   getReconnectDelayMs,
   getStallThresholdMs,
+  isPlaybackStalled,
   computeChaseTargetSeconds,
   hasProgressed,
   getLocalBufferSeconds,
@@ -673,9 +775,11 @@ const StreamPilotPlayerCore = {
   buildPlaybackPlan,
   normalizeQualities,
   applyExtremeTarget,
+  applyStallFallback,
   isHttpStatusInvalid,
   isMseError,
   isHevcUnsupportedDescription,
+  shouldRecoverAfterLoadingComplete,
 };
 
 if (typeof module !== 'undefined' && module.exports) {

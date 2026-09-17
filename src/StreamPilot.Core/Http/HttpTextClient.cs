@@ -92,6 +92,18 @@ public sealed class HttpTextClient
         return new CookieScope(previous);
     }
 
+    /// <summary>
+    /// 读取当前作用域的 Cookie 原文。
+    /// </summary>
+    /// <returns>当前作用域的 Cookie；未设置时返回 <see langword="null"/>。</returns>
+    /// <remarks>
+    /// 供需要把"用户自备 Cookie"与平台会话 cookie 合并成同一个请求头的解析器使用
+    /// （请求头只能出现一个 Cookie，显式设置会覆盖作用域值）。
+    /// 返回值属于登录凭证，禁止写入日志。
+    /// </remarks>
+    public static string? ReadCookieScope() =>
+        string.IsNullOrWhiteSpace(CookieScopeValue.Value) ? null : CookieScopeValue.Value;
+
     /// <summary>发送请求并返回完整响应快照。</summary>
     /// <param name="spec">请求描述。</param>
     /// <param name="cancellationToken">取消令牌。</param>

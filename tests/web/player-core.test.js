@@ -91,11 +91,67 @@ test('getReconnectDelayMs 退避序列为 250/1000，超过上限返回 -1', () 
   assert.equal(core.getReconnectDelayMs(99), -1);
 });
 
-test('getStallThresholdMs 按模式与饥饿状态选择阈值', () => {
-  assert.equal(core.getStallThresholdMs(true, true), 4000);
-  assert.equal(core.getStallThresholdMs(true, false), 6500);
-  assert.equal(core.getStallThresholdMs(false, true), 6000);
-  assert.equal(core.getStallThresholdMs(false, false), 9000);
+test('getStallThresholdMs 饥饿 6s、非饥饿 9s（不按模式区分）', () => {
+  assert.equal(core.getStallThresholdMs(true), 6000);
+  assert.equal(core.getStallThresholdMs(false), 9000);
+});
+
+test('isPlaybackStalled 排除用户暂停与刚恢复播放的宽限期', () => {
+  const playing = { paused: false };
+  const paused = { paused: true };
+
+  assert.equal(core.isPlaybackStalled(playing, 5000, true, 0, 100000), false, '未到阈值不重连');
+  assert.equal(core.isPlaybackStalled(playing, 6000, true, 0, 100000), true, '饥饿达到 6s 才重连');
+  assert.equal(core.isPlaybackStalled(playing, 9000, false, 0, 100000), true, '非饥饿 9s 触发');
+  assert.equal(core.isPlaybackStalled(paused, 60000, false, 0, 100000), false, '用户暂停不算卡顿');
+  assert.equal(
+    core.isPlaybackStalled(playing, 60000, true, 100000 - core.RESUME_GRACE_MS + 1, 100000),
+    false,
+    '刚点继续播放时的静止属于重建缓冲');
+  assert.equal(
+    core.isPlaybackStalled(playing, 60000, true, 100000 - core.RESUME_GRACE_MS, 100000),
+    true,
+    '宽限期结束后恢复正常判定');
+});
+
+test('applyStallFallback 连续饥饿后自动回落到稳定档', () => {
+  const run = { mode: 'extreme', extreme: true, extremeTargetMs: 150, extremeTargetSeconds: 0.15 };
+
+  for (let index = 1; index < core.STALL_FALLBACK_SAMPLES; index++) {
+    assert.equal(core.applyStallFallback(run, true), null, '未达样本上限前不改档位');
+    assert.equal(run.extremeTargetMs, 150);
+  }
+
+  assert.equal(core.applyStallFallback(run, true), core.FALLBACK_TARGET_MS, '达到上限回落稳定档');
+  assert.equal(run.extremeTargetMs, core.FALLBACK_TARGET_MS);
+  assert.equal(run.extremeTargetSeconds, core.FALLBACK_TARGET_MS / 1000);
+
+  assert.equal(core.applyStallFallback(run, true), null, '已是稳定档时不再回落');
+  assert.equal(run.stalledSamples, 1, '切换后重新开始计数（每个样本只计一次）');
+
+  const recovered = { mode: 'extreme', extreme: true, extremeTargetMs: 200, extremeTargetSeconds: 0.2 };
+  core.applyStallFallback(recovered, true);
+  core.applyStallFallback(recovered, true);
+  assert.equal(core.applyStallFallback(recovered, false), null, '恢复后计数清零');
+  assert.equal(recovered.stalledSamples, 0);
+  assert.equal(core.applyStallFallback(null, true), null);
+});
+
+test('shouldRecoverAfterLoadingComplete 只在真的断流时重连', () => {
+  const now = 100000;
+  const live = { playbackStarted: true, lastPlaybackProgressAt: now - 1000 };
+
+  assert.equal(core.shouldRecoverAfterLoadingComplete(live, now, false), false, '缓冲取满不重连');
+  assert.equal(core.shouldRecoverAfterLoadingComplete(live, now, true), true, '缓冲已空必须重连');
+  assert.equal(
+    core.shouldRecoverAfterLoadingComplete({ playbackStarted: true, lastPlaybackProgressAt: now - 20000 }, now, false),
+    true,
+    '画面长时间不动必须重连');
+  assert.equal(
+    core.shouldRecoverAfterLoadingComplete({ playbackStarted: false, lastPlaybackProgressAt: now - 20000 }, now, false),
+    false,
+    '还没起播时不按断流处理');
+  assert.equal(core.shouldRecoverAfterLoadingComplete(null, now, true), false);
 });
 
 test('computeChaseTargetSeconds 夹取保留量并保证不为负', () => {
@@ -115,10 +171,16 @@ test('hasProgressed / getLocalBufferSeconds / looksStarved 边界行为', () => 
   assert.equal(core.getLocalBufferSeconds({ length: 1, start: () => 0, end: () => 5 }, 4.5), 0.5);
   assert.equal(core.getLocalBufferSeconds({ length: 1, start: () => 0, end: () => 5 }, 9), 0);
 
-  assert.equal(core.looksStarved({ paused: true, ended: false, readyState: 4 }, 2), true);
-  assert.equal(core.looksStarved({ paused: false, ended: false, readyState: 4 }, 0.1), true);
+  assert.equal(core.looksStarved({ paused: false, ended: false, readyState: 4 }, 0.1), true, '缓冲太少算饥饿');
   assert.equal(core.looksStarved({ paused: false, ended: false, readyState: 4 }, 0.5), false);
+  assert.equal(core.looksStarved({ paused: false, ended: false, readyState: 2 }, 5), true, 'readyState 不足算饥饿');
+  assert.equal(core.looksStarved({ paused: false, ended: false, readyState: 4 }, null), true);
   assert.equal(core.looksStarved(null, 1), true);
+  assert.equal(
+    core.looksStarved({ paused: true, ended: false, readyState: 4 }, 5),
+    false,
+    '用户暂停且缓冲充足不是饥饿（否则暂停会被误判成卡顿）');
+  assert.equal(core.looksStarved({ paused: false, ended: true, readyState: 4 }, 5), false, '播放结束不是饥饿');
 });
 
 test('buildPlaybackPlan 过滤不可播放与 HEVC 候选并标记模式', () => {
@@ -318,9 +380,16 @@ test('退出全屏不把已在播放的提示重新显示成空态', () => {
   assert.equal(core.shouldHideHint(null), false);
 });
 
-test('空态提示指向左侧主界面的「开始播放」', () => {
+test('空态提示指向播放页底部的「开始播放」', () => {
   assert.equal(core.EMPTY_HINT_TITLE, '等待直播源');
-  assert.equal(core.EMPTY_HINT_ACTION.includes('左侧'), true, '按钮在主界面左侧，必须说清楚位置');
   assert.equal(core.EMPTY_HINT_ACTION.includes('开始播放'), true);
+  assert.equal(core.EMPTY_HINT_ACTION.includes('下方'), true, '按钮在播放页底部，必须说清楚位置');
   assert.equal(core.AUTOPLAY_BLOCKED_HINT.includes('点一下画面'), true, '自动播放被拦时给出可执行的下一步');
+});
+
+test('消息契约包含播放页侧的请求消息', () => {
+  assert.equal(core.INBOUND_MESSAGE_TYPES.PAUSE, 'pause');
+  assert.equal(core.INBOUND_MESSAGE_TYPES.MPV, 'mpv');
+  assert.equal(core.OUTBOUND_MESSAGE_TYPES.REQUEST_PLAY, 'request-play');
+  assert.equal(core.OUTBOUND_MESSAGE_TYPES.TOGGLE_PAUSE, 'toggle-pause');
 });

@@ -918,8 +918,10 @@ internal sealed class BilibiliParser : PlatformParserBase
     /// <returns>档位列表（按从高到低）与实际生效的档位键。</returns>
     /// <remarks>
     /// 官方把名称放在 <c>g_qn_desc</c>（<c>qn</c> + <c>desc</c> + <c>hdr_desc</c> +
-    /// <c>media_base_desc.detail_desc.desc/tag</c>），可用档位放在 <c>codec[].accept_qn</c>；
-    /// 两者都缺失时退化为"只有最高档"。
+    /// <c>media_base_desc.detail_desc.desc/tag</c>），可用档位放在 <c>codec[].accept_qn</c>。
+    /// 两者都缺失时依次回退到调用方请求的 qn、响应里第一个 <c>current_qn</c>；
+    /// 名称改用内置命名（见 <see cref="BuildQualityLabel"/>），保证下拉里至少有一条当前档位，
+    /// 不会出现"接口没声明名称就整个画质控件空掉"的情况。
     /// </remarks>
     internal (IReadOnlyList<QualityOption> Qualities, string? SelectedKey) BuildQualityOptions(
         JsonElement playData,
@@ -927,6 +929,7 @@ internal sealed class BilibiliParser : PlatformParserBase
     {
         Dictionary<int, QualityDeclaration> declarations = ReadQualityDeclarations(playData);
         List<int> available = ReadAcceptedQualities(playData);
+        int acceptedCount = available.Count;
         if (available.Count == 0)
         {
             available.AddRange(declarations.Keys);
@@ -935,6 +938,12 @@ internal sealed class BilibiliParser : PlatformParserBase
         if (available.Count == 0 && requestedQuality is { } requested)
         {
             available.Add(requested);
+        }
+
+        int? observedQuality = available.Count == 0 ? ReadStreamingQualityNumber(playData) : null;
+        if (observedQuality is { } observed)
+        {
+            available.Add(observed);
         }
 
         available.Sort(static (left, right) => right.CompareTo(left));
@@ -957,12 +966,61 @@ internal sealed class BilibiliParser : PlatformParserBase
         Logger.Debug(ModuleName, "B站档位已按接口声明命名（高帧率/HDR 均取自 g_qn_desc，不按档位语义推断）。", new Dictionary<string, object?>
         {
             ["declaredQualities"] = DescribeDeclarations(available, declarations),
+            ["declarationCount"] = declarations.Count,
+            ["acceptedCount"] = acceptedCount,
+            ["streamingQuality"] = observedQuality,
             ["has4K"] = has4K,
             ["requestedQuality"] = requestedQuality,
             ["effectiveQuality"] = effective,
         });
 
         return (options, effective?.ToString(CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// 读取播放响应里声明的"当前实际画质"（<c>codec[].current_qn</c>）。
+    /// </summary>
+    /// <param name="playData">播放信息 data 节点。</param>
+    /// <returns>第一个带有 <c>current_qn</c> 的编码档位；没有时返回 <see langword="null"/>。</returns>
+    /// <remarks>
+    /// 只作为档位列表的最后兜底：部分房间的 <c>g_qn_desc</c> 与 <c>accept_qn</c> 都为空，
+    /// 但 <c>current_qn</c> 一定存在（否则上游给不出地址），用来保证画质下拉始终有内容。
+    /// </remarks>
+    private static int? ReadStreamingQualityNumber(JsonElement playData)
+    {
+        if (!TryReadProperty(playData, "playurl_info", out JsonElement info)
+            || !TryReadProperty(info, "playurl", out JsonElement playUrl)
+            || !TryReadProperty(playUrl, "stream", out JsonElement streams)
+            || streams.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (JsonElement stream in streams.EnumerateArray())
+        {
+            if (!TryReadProperty(stream, "format", out JsonElement formats) || formats.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            foreach (JsonElement format in formats.EnumerateArray())
+            {
+                if (!TryReadProperty(format, "codec", out JsonElement codecs) || codecs.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                foreach (JsonElement codec in codecs.EnumerateArray())
+                {
+                    if (TryReadInt32(codec, "current_qn", out int currentQuality))
+                    {
+                        return currentQuality;
+                    }
+                }
+            }
+        }
+
+        return null;
     }
 
     /// <summary>把可用档位及其高帧率/HDR 标记拼成一行日志文本。</summary>

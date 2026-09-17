@@ -20,15 +20,13 @@
     </Grid.RowDefinitions>
 
     <TabControl Grid.Row="0" Margin="14,12,14,8">
-      <!-- ============ 常用：只放新手需要改的东西 ============ -->
+      <!-- ============ 常用：只放日常会改的设置项 ============ -->
       <TabItem Header="常用">
         <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="4,10,4,4">
           <StackPanel>
             <Border Style="{StaticResource CardPanel}">
               <StackPanel>
                 <TextBlock Text="默认平台" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <TextBlock Text="主界面已取消平台下拉：解析时按输入链接的域名自动识别；只有房间号无法识别域名时才用这里的默认平台。"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,0,0,8" />
                 <ComboBox Width="220" HorizontalAlignment="Left"
                           ItemsSource="{Binding DefaultPlatformChoices}"
                           SelectedItem="{Binding SelectedDefaultPlatform, Mode=TwoWay}"
@@ -39,13 +37,15 @@
                     </DataTemplate>
                   </ComboBox.ItemTemplate>
                 </ComboBox>
+                <TextBlock Text="只在输入房间号、无法从链接识别平台时使用。" Style="{StaticResource MutedText}"
+                           TextWrapping="Wrap" Margin="0,8,0,0" />
               </StackPanel>
             </Border>
 
             <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
               <StackPanel>
                 <TextBlock Text="mpv 外挂播放" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <TextBlock Text="mpv 可执行文件路径" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
+                <TextBlock Text="mpv 路径" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
                 <Grid>
                   <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
@@ -58,10 +58,6 @@
                   <Button Grid.Column="2" Content="浏览…" Command="{Binding BrowseMpvCommand}" />
                   <Button Grid.Column="3" Content="清空" Command="{Binding ClearMpvCommand}" Margin="0" />
                 </Grid>
-                <TextBlock Text="留空时按顺序查找：tools\mpv\mpv.exe → tools\mpv.exe → PATH → 常见安装位置。点「自动探测」可把结果写成绝对路径。"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,6,0,0" />
-                <TextBlock Text="StreamPilot 只向 mpv 传窗口标题与防盗链 Referer，不附加画质、缓存、倍速等任何播放参数；这些请在 mpv 自己的配置文件里设置。"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,0" />
               </StackPanel>
             </Border>
 
@@ -71,7 +67,7 @@
                 <CheckBox Content="解析成功后自动开始播放" IsChecked="{Binding AutoPlayOnResolve}" Margin="0,0,0,8" />
                 <CheckBox Content="解析成功后自动调用 mpv 播放" IsChecked="{Binding AutoLaunchMpv}" />
 
-                <TextBlock Text="默认音量（可在播放页随时调整）" Style="{StaticResource MutedText}" Margin="0,12,0,4" />
+                <TextBlock Text="默认音量" Style="{StaticResource MutedText}" Margin="0,12,0,4" />
                 <Grid>
                   <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
@@ -82,15 +78,13 @@
                   <TextBlock Grid.Column="1" Text="{Binding Volume, StringFormat={}{0}%}" Style="{StaticResource MutedText}"
                              MinWidth="46" TextAlignment="Right" Margin="8,0,0,0" />
                 </Grid>
-                <TextBlock Text="追帧档位（150 / 200 / 250 ms）在播放页底部随时切换，这里不再重复设置；程序会记住你在播放页选的档位。"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,6,0,0" />
               </StackPanel>
             </Border>
 
             <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
               <StackPanel>
                 <TextBlock Text="录制" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <TextBlock Text="录制输出根目录（留空使用「视频」目录下的 StreamPilot 子目录）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
+                <TextBlock Text="输出目录" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
                 <Grid>
                   <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
@@ -99,8 +93,6 @@
                   <TextBox Grid.Column="0" Text="{Binding RecordingDirectory, UpdateSourceTrigger=PropertyChanged}" />
                   <Button Grid.Column="1" Content="浏览…" Command="{Binding BrowseRecordingDirectoryCommand}" Margin="8,0,0,0" />
                 </Grid>
-                <TextBlock Text="实际文件按 {平台}\{主播}\ 分层，命名为「主播名-房间号-开始时间-分片序号」。"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,6,0,0" />
 
                 <Grid Margin="0,12,0,0">
                   <Grid.ColumnDefinitions>
@@ -117,88 +109,22 @@
                     <TextBox Text="{Binding SegmentMaxMinutes}" Width="130" HorizontalAlignment="Left" />
                   </StackPanel>
                 </Grid>
-                <TextBlock Text="分片只在视频关键帧处切分，保证每个分片可独立播放。"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,6,0,0" />
-              </StackPanel>
-            </Border>
-
-            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
-              <StackPanel>
-                <TextBlock Text="网络" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <TextBlock Text="HTTP 代理（留空表示不使用代理）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                <TextBox Text="{Binding Proxy, UpdateSourceTrigger=PropertyChanged}" />
-                <TextBlock Text="示例：http://127.0.0.1:10809。修改后需重启程序生效。"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,6,0,0" />
+                <TextBlock Text="分片只在关键帧处切分。" Style="{StaticResource MutedText}"
+                           TextWrapping="Wrap" Margin="0,6,0,0" />
               </StackPanel>
             </Border>
           </StackPanel>
         </ScrollViewer>
       </TabItem>
 
-      <!-- ============ 高级：默认不用改，出问题时才会进来 ============ -->
+      <!-- ============ 高级：默认不用改 ============ -->
       <TabItem Header="高级">
         <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="4,10,4,4">
           <StackPanel>
             <Border Style="{StaticResource CardPanel}">
               <StackPanel>
-                <TextBlock Text="录制稳定性" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <Grid>
-                  <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                  </Grid.ColumnDefinitions>
-                  <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                    <TextBlock Text="最长录制时长（分钟）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                    <TextBox Text="{Binding MaxDurationMinutes}" Width="110" HorizontalAlignment="Left" />
-                  </StackPanel>
-                  <StackPanel Grid.Column="1" Margin="0,0,20,0">
-                    <TextBlock Text="断流判定（秒）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                    <TextBox Text="{Binding StallTimeoutSeconds}" Width="110" HorizontalAlignment="Left" />
-                  </StackPanel>
-                  <StackPanel Grid.Column="2">
-                    <TextBlock Text="最大重连次数" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                    <TextBox Text="{Binding MaxReconnectAttempts}" Width="110" HorizontalAlignment="Left" />
-                  </StackPanel>
-                </Grid>
-                <TextBlock Text="超过断流判定时长未收到数据即重连，退避 2/4/8/15/30 秒；达到上限后结束本次录制并写入元数据。"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,8,0,0" />
-              </StackPanel>
-            </Border>
-
-            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
-              <StackPanel>
-                <TextBlock Text="请求细节" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <Grid>
-                  <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                  </Grid.ColumnDefinitions>
-                  <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                    <TextBlock Text="单次请求超时（秒）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                    <TextBox Text="{Binding RequestTimeoutSeconds}" Width="130" HorizontalAlignment="Left" />
-                  </StackPanel>
-                  <StackPanel Grid.Column="1">
-                    <TextBlock Text="最大尝试次数（含首次）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                    <TextBox Text="{Binding MaxAttempts}" Width="130" HorizontalAlignment="Left" />
-                  </StackPanel>
-                </Grid>
-                <TextBlock Text="仅对超时 / 连接失败 / 5xx / 429 重试。"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,6,0,0" />
-
-                <TextBlock Text="自定义 User-Agent（留空使用内置 Windows Chrome UA）" Style="{StaticResource MutedText}" Margin="0,12,0,4" />
-                <TextBox Text="{Binding UserAgent, UpdateSourceTrigger=PropertyChanged}" />
-              </StackPanel>
-            </Border>
-
-            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
-              <StackPanel>
                 <TextBlock Text="账号与 Cookie（可选）" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <TextBlock Text="填 Cookie 才能拿到需要登录的最高画质（例如虎牙“蓝光20M”、B站 4K/HDR）。获取方法：登录官网 → F12 → Network → 刷新 → 任一平台接口请求 → 复制请求标头里 Cookie 冒号后的内容。"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,0,0,8" />
-                <TextBlock Text="Cookie 仅保存在本机 %LOCALAPPDATA%\StreamPilot\config.json，不写入日志、不随程序发布；只用于解析接口换地址，播放时不会发给 CDN，主播看不到你。留空即匿名解析。"
+                <TextBlock Text="填 Cookie 才能拿到需要登录的最高画质（虎牙「蓝光20M」、B站 4K/HDR）。获取方法见 README 第 5 节；Cookie 只用于解析，不写日志、不发 CDN。"
                            Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,0,0,10" />
 
                 <TextBlock Text="哔哩哔哩 Cookie" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
@@ -235,11 +161,77 @@
 
             <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
               <StackPanel>
+                <TextBlock Text="网络" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
+                <TextBlock Text="HTTP 代理" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
+                <TextBox Text="{Binding Proxy, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBlock Text="形如 http://127.0.0.1:10809；留空表示不使用代理，修改后需重启程序。"
+                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,6,0,0" />
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
+              <StackPanel>
+                <TextBlock Text="请求细节" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                  </Grid.ColumnDefinitions>
+                  <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                    <TextBlock Text="单次请求超时（秒）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
+                    <TextBox Text="{Binding RequestTimeoutSeconds}" Width="130" HorizontalAlignment="Left" />
+                  </StackPanel>
+                  <StackPanel Grid.Column="1">
+                    <TextBlock Text="最大尝试次数（含首次）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
+                    <TextBox Text="{Binding MaxAttempts}" Width="130" HorizontalAlignment="Left" />
+                  </StackPanel>
+                </Grid>
+                <TextBlock Text="仅对超时 / 连接失败 / 5xx / 429 重试。" Style="{StaticResource MutedText}"
+                           TextWrapping="Wrap" Margin="0,6,0,0" />
+
+                <TextBlock Text="自定义 User-Agent" Style="{StaticResource MutedText}" Margin="0,12,0,4" />
+                <TextBox Text="{Binding UserAgent, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBlock Text="留空使用内置 Windows Chrome UA。" Style="{StaticResource MutedText}"
+                           TextWrapping="Wrap" Margin="0,6,0,0" />
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
+              <StackPanel>
+                <TextBlock Text="录制稳定性" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                  </Grid.ColumnDefinitions>
+                  <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                    <TextBlock Text="最长录制时长（分钟）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
+                    <TextBox Text="{Binding MaxDurationMinutes}" Width="110" HorizontalAlignment="Left" />
+                  </StackPanel>
+                  <StackPanel Grid.Column="1" Margin="0,0,20,0">
+                    <TextBlock Text="断流判定（秒）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
+                    <TextBox Text="{Binding StallTimeoutSeconds}" Width="110" HorizontalAlignment="Left" />
+                  </StackPanel>
+                  <StackPanel Grid.Column="2">
+                    <TextBlock Text="最大重连次数" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
+                    <TextBox Text="{Binding MaxReconnectAttempts}" Width="110" HorizontalAlignment="Left" />
+                  </StackPanel>
+                </Grid>
+                <TextBlock Text="断流后按 2/4/8/15/30 秒退避重连，达到上限即结束本次录制。"
+                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,8,0,0" />
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
+              <StackPanel>
                 <TextBlock Text="本地桥接服务" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <TextBlock Text="首选端口（仅监听 127.0.0.1；被占用时自动顺延）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
+                <TextBlock Text="首选端口" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
                 <TextBox Text="{Binding BridgePort}" Width="150" HorizontalAlignment="Left" />
-                <CheckBox Content="启动程序时自动开启桥接服务（mpv 外挂播放依赖它）" IsChecked="{Binding BridgeAutoStart}" Margin="0,10,0,0" />
-                <TextBlock Text="桥接端口不会暴露到公网：监听前缀固定为 127.0.0.1，出现通配地址会直接拒绝启动。"
+                <CheckBox Content="启动时自动开启（mpv 外挂播放依赖它）" IsChecked="{Binding BridgeAutoStart}" Margin="0,10,0,0" />
+                <TextBlock Text="只监听 127.0.0.1；端口被占用时自动顺延。"
                            Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,6,0,0" />
               </StackPanel>
             </Border>
@@ -247,10 +239,10 @@
             <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
               <StackPanel>
                 <TextBlock Text="日志" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <CheckBox Content="记录详细诊断日志（排查问题时再开启）" IsChecked="{Binding VerboseDiagnostics}" Margin="0,0,0,8" />
+                <CheckBox Content="记录详细诊断日志（排查问题时开启）" IsChecked="{Binding VerboseDiagnostics}" Margin="0,0,0,8" />
                 <TextBlock Text="保留日志文件个数" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
                 <TextBox Text="{Binding LogRetainDays}" Width="150" HorizontalAlignment="Left" />
-                <TextBlock Text="日志目录：%LOCALAPPDATA%\StreamPilot\logs（Cookie 与签名参数已自动脱敏）"
+                <TextBlock Text="日志目录与配置目录见本页「配置与清理」。"
                            Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,6,0,0" />
 
                 <Grid Margin="0,12,0,0">
@@ -270,10 +262,8 @@
             <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
               <StackPanel>
                 <TextBlock Text="配置与清理" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <TextBlock Text="配置文件：%LOCALAPPDATA%\StreamPilot\config.json" Style="{StaticResource MutedText}" TextWrapping="Wrap" />
-                <TextBlock Text="预设文件：%LOCALAPPDATA%\StreamPilot\presets.json" Style="{StaticResource MutedText}" TextWrapping="Wrap" />
-                <TextBlock Text="卸载或清理时删除整个 %LOCALAPPDATA%\StreamPilot 目录即可（含配置、预设、日志与 WebView2 缓存）。"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,0" />
+                <TextBlock Text="配置、预设、日志与网页内核缓存都在 %LOCALAPPDATA%\StreamPilot；删除该目录即可清理。"
+                           Style="{StaticResource MutedText}" TextWrapping="Wrap" />
                 <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                   <Button Content="打开配置目录" Command="{Binding OpenConfigFolderCommand}" />
                   <Button Content="打开日志目录" Command="{Binding OpenLogFolderCommand}" />

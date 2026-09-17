@@ -47,8 +47,17 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>宿主要求页面追帧的消息类型。</summary>
     private const string HostChaseType = "chase";
 
-    /// <summary>宿主要求页面停止的消息类型。</summary>
-    private const string HostStopType = "stop";
+    /// <summary>宿主要求页面暂停或继续播放的消息类型。</summary>
+    private const string HostPauseType = "pause";
+
+    /// <summary>页面请求宿主开始播放的消息类型。</summary>
+    private const string PlayerRequestPlayType = "request-play";
+
+    /// <summary>页面请求宿主在暂停与继续之间切换的消息类型。</summary>
+    private const string PlayerTogglePauseType = "toggle-pause";
+
+    /// <summary>宿主下发消息里的暂停状态字段名。</summary>
+    private const string PausedFieldName = "paused";
 
     /// <summary>
     /// 追帧档位消息类型（双向同名）：档位入口只在播放页底部，宿主要求热切换的同名消息由播放页处理。
@@ -76,6 +85,18 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// 这里给出上限：达到上限后停止自动重试并给出可操作的提示，避免无休止重连。
     /// </remarks>
     private const int MaxAutomaticReResolves = 2;
+
+    /// <summary>遥测里需要落盘的数字字段（消息字段名 → 日志字段名）。</summary>
+    private static readonly (string Message, string Log)[] TelemetryNumberFields =
+    [
+        ("bufferedAheadMs", "bufferedAheadMs"),
+        ("secondsSinceProgress", "secondsSinceProgress"),
+        ("droppedVideoFrames", "droppedVideoFrames"),
+        ("totalVideoFrames", "totalVideoFrames"),
+        ("extremeTargetMs", "extremeTargetMs"),
+        ("stallSamples", "stallSamples"),
+        ("reconnects", "reconnects"),
+    ];
 
     /// <summary>自动识别平台失败时的提示（界面与状态栏共用）。</summary>
     private const string PlatformDetectionHint = "无法自动识别平台：请在链接中包含平台域名，或在设置里指定默认平台。";
@@ -143,6 +164,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>连续自动重新解析的次数（播放出画后清零）。</summary>
     private int _automaticReResolveCount;
 
+    /// <summary>播放页是否处于用户暂停状态（暂停不销毁会话，按钮据此显示"继续播放"）。</summary>
+    private bool _isPlaybackPaused;
+
     /// <summary>用户选择的画质档位键；为空表示取平台最高档。</summary>
     private string? _preferredQualityKey;
 
@@ -176,7 +200,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
         ResolveCommand = new AsyncRelayCommand(_ => ResolveFromUserAsync(), HandleCommandErrorAsync, _ => !IsBusy);
         PlayCommand = new AsyncRelayCommand(_ => PlayFromUserAsync(), HandleCommandErrorAsync, _ => _currentRoom is not null && !IsBusy);
-        StopCommand = new RelayCommand(_ => StopPlayback(), _ => _isPlayerReady);
+        StopCommand = new RelayCommand(_ => TogglePause(), _ => _isPlayerReady);
         ChaseCommand = new RelayCommand(_ => SendToPlayer(new { type = HostChaseType, keepSeconds = ChaseKeepSeconds }), _ => _isPlayerReady);
         MpvCommand = new AsyncRelayCommand(_ => PlayWithMpvAsync(), HandleCommandErrorAsync, _ => _currentRoom is not null);
         StartRecordingCommand = new AsyncRelayCommand(_ => StartRecordingAsync(), HandleCommandErrorAsync, _ => _currentRoom is not null && _recordingSession is null);
@@ -395,6 +419,20 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         set => SetField(ref _volume, Math.Clamp(value, 0, 100));
     }
 
+    /// <summary>播放页是否处于用户暂停状态。</summary>
+    /// <remarks>
+    /// 暂停不销毁播放会话：地址与播放器都保留，继续播放时从当前位置恢复。
+    /// 界面上的按钮文案据此在「暂停播放」与「继续播放」之间切换。
+    /// </remarks>
+    public bool IsPlaybackPaused
+    {
+        get => _isPlaybackPaused;
+        private set => SetField(ref _isPlaybackPaused, value);
+    }
+
+    /// <summary>是否已经解析出可播放的直播间（播放页的「开始播放」按钮据此启用）。</summary>
+    public bool PlayAvailable => _currentRoom is not null && !_isBusy;
+
     /// <summary>是否正在执行耗时操作。</summary>
     public bool IsBusy
     {
@@ -403,6 +441,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _isBusy, value))
             {
+                OnPropertyChanged(nameof(PlayAvailable));
                 RaiseCommandStates();
             }
         }
@@ -540,6 +579,11 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
                 case PlayerTelemetryType:
                     PlayerTelemetry = BuildTelemetrySummary(root);
+                    // 遥测里的 paused 是页面的权威状态：用户直接点画面或播放页按钮都会反映到这里。
+                    IsPlaybackPaused = ReadPausedFlag(root) ?? _isPlaybackPaused;
+
+                    // 结构化落盘：排查"卡顿/断流"时按 10 秒粒度统计缓冲、丢帧与重连次数。
+                    _logger.Info(_moduleName, "播放遥测。", BuildTelemetryFields(root));
                     break;
 
                 case PlayerStatusType:
@@ -552,6 +596,15 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
                         // 真的看到了画面，之前的自动重试计数作废。
                         _automaticReResolveCount = 0;
+                        IsPlaybackPaused = false;
+                    }
+                    else if (message.Contains("已暂停播放", StringComparison.Ordinal))
+                    {
+                        IsPlaybackPaused = true;
+                    }
+                    else if (message.Contains("已继续播放", StringComparison.Ordinal))
+                    {
+                        IsPlaybackPaused = false;
                     }
 
                     break;
@@ -584,6 +637,16 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                         ApplyPlayerTarget(targetMs);
                     }
 
+                    break;
+
+                case PlayerRequestPlayType:
+                    AppendLog("播放页请求开始播放。");
+                    _automaticReResolveCount = 0;
+                    _ = PlayWithErrorHandlingAsync();
+                    break;
+
+                case PlayerTogglePauseType:
+                    TogglePause();
                     break;
 
                 default:
@@ -744,6 +807,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
             PlaybackPlan plan = await _playback.PrepareAsync(request, CancellationToken.None).ConfigureAwait(true);
             _activeSessionId = plan.SessionId;
+
+            // 新会话一定是从播放状态开始，按钮回到「暂停播放」。
+            IsPlaybackPaused = false;
 
             // 档位入口在播放页底部，播放计划里的目标值即"当前档位"，记下来供下次播放沿用。
             if (plan.ExtremeTargetMs != _extremeTargetMs)
@@ -1084,13 +1150,36 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         return usable;
     }
 
-    private void StopPlayback()
+    /// <summary>
+    /// 暂停或继续播放。
+    /// </summary>
+    /// <remarks>
+    /// 暂停等价于"原地停住"：不结束播放会话、不释放中继、不清空当前地址，
+    /// 播放页保留播放器与缓冲，继续播放时从当前位置恢复。
+    /// </remarks>
+    private void TogglePause()
     {
-        _activeSessionId = 0;
-        _playback.StopActive();
-        SendToPlayer(new { type = HostStopType });
-        StatusMessage = "已停止播放。";
-        AppendLog("已停止播放");
+        bool paused = !_isPlaybackPaused;
+        IsPlaybackPaused = paused;
+        SendToPlayer(new { type = HostPauseType, paused = paused });
+        StatusMessage = paused ? "已暂停播放（会话与地址保留）。" : "已继续播放。";
+        AppendLog(StatusMessage);
+    }
+
+    /// <summary>
+    /// 播放页请求开始播放：走与用户点「开始播放」完全相同的路径，并统一上报异常。
+    /// </summary>
+    /// <returns>异步任务。</returns>
+    private async Task PlayWithErrorHandlingAsync()
+    {
+        try
+        {
+            await PlayFromUserAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
+        {
+            await HandleCommandErrorAsync(exception).ConfigureAwait(true);
+        }
     }
 
     /// <summary>
@@ -1159,6 +1248,20 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         }
 
         return element.TryGetInt32(out int value) ? value : null;
+    }
+
+    /// <summary>读取播放页遥测里的暂停标记。</summary>
+    /// <param name="root">消息根元素。</param>
+    /// <returns>暂停返回 <see langword="true"/>、播放返回 <see langword="false"/>；字段缺失时返回 <see langword="null"/>。</returns>
+    private static bool? ReadPausedFlag(JsonElement root)
+    {
+        if (!root.TryGetProperty(PausedFieldName, out JsonElement element)
+            || element.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            return null;
+        }
+
+        return element.GetBoolean();
     }
 
     /// <summary>打开独立的设置窗口，保存后立即生效并把新音量下发给播放页。</summary>
@@ -1585,6 +1688,38 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         return $"缓冲 {buffered} · 倍速 {rate} · 丢帧 {dropped}";
     }
 
+    /// <summary>
+    /// 把一条播放遥测转成结构化日志字段（用于排查卡顿：缓冲、丢帧、饥饿样本、重连次数）。
+    /// </summary>
+    /// <param name="root">遥测消息根元素。</param>
+    /// <returns>结构化字段字典（缺失字段不写入，避免落盘一堆占位符）。</returns>
+    private static Dictionary<string, object?> BuildTelemetryFields(JsonElement root)
+    {
+        Dictionary<string, object?> fields = new(StringComparer.Ordinal)
+        {
+            ["mode"] = ReadTelemetryText(root, "mode"),
+        };
+
+        foreach ((string field, string name) in TelemetryNumberFields)
+        {
+            if (root.TryGetProperty(field, out JsonElement element) && element.ValueKind == JsonValueKind.Number)
+            {
+                fields[name] = element.TryGetInt32(out int value) ? value : element.GetDouble();
+            }
+        }
+
+        return fields;
+    }
+
+    /// <summary>读取遥测里的字符串字段。</summary>
+    /// <param name="root">遥测消息根元素。</param>
+    /// <param name="name">字段名。</param>
+    /// <returns>字段值；缺失时返回空字符串。</returns>
+    private static string ReadTelemetryText(JsonElement root, string name) =>
+        root.TryGetProperty(name, out JsonElement element) && element.ValueKind == JsonValueKind.String
+            ? element.GetString() ?? string.Empty
+            : string.Empty;
+
     private void AppendLog(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -1636,6 +1771,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         (MpvCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (StopCommand as RelayCommand)?.RaiseCanExecuteChanged();
         (ChaseCommand as RelayCommand)?.RaiseCanExecuteChanged();
+        OnPropertyChanged(nameof(PlayAvailable));
     }
 
     private static int NormalizeTarget(int value)

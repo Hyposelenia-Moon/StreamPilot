@@ -48,9 +48,9 @@
 |------|------|------|
 | `sessionId` | ✅ | 播放会话号；页面回传时带上，宿主据此丢弃过期会话消息 |
 | `mode` | ✅ | `extreme`（极限追帧）或 `stable`（稳定缓冲） |
-| `extremeTargetMs` | ✅ | 仅 150 / 200 / 250 有效，其他值页面回落为 200 ms |
+| `extremeTargetMs` | ✅ | 仅 150 / 200 / 250 有效，其他值页面回落为 250 ms |
 | `title` | ➖ | 用于 mpv 窗口标题 |
-| `qualities` | ➖ | 平台可选画质档位；≤1 项时页面隐藏画质下拉 |
+| `qualities` | ➖ | 平台可选画质档位；**只有一档时也显示**（当前档位可见但不可切换），为空时下拉为空 |
 | `qualities[].key` | ✅ | 平台档位键（B站 qn、虎牙码率、斗鱼 rate、抖音拉流键…），页面原样回传 |
 | `qualities[].label` | ✅ | 档位显示名（尽量与官方直播间一致） |
 | `qualities[].bitrateKbps` | ➖ | 码率（kbps），有则在下拉里显示 |
@@ -66,7 +66,8 @@
 | `candidates[].label` | ➖ | 画质标签（展示用） |
 
 页面行为：规范化候选（丢弃空 URL、按 `sourceIndex:url` 去重）→ 过滤不可播放的格式与不支持的编码 →
-并行探测所有候选（1.2 s 上限）→ 已知可用按延迟升序、之后是结果不确定的 → 依次尝试。
+**按宿主给出的顺序直接连接第一条，不做任何网络探测** → 连不上时按同顺序依次切换。
+（探测会与 mpegts/hls.js 竞争同一条直播长连接，实测会让画面反复起播与断流，因此已整体移除。）
 
 ### 1.2 `chase`
 
@@ -86,13 +87,14 @@
 并立即向缓冲末端追一次；页面随后回一条 `status`（"追帧档位已切换为 250 ms"）。
 宿主在没有活动会话时只记住该值，下次 `play` 时生效。
 
-### 1.3 `stop`
+### 1.3 `stop`（兼容保留）
 
 ```json
 { "type": "stop" }
 ```
 
-停止当前会话、销毁播放器、清空当前流地址、提示回到“等待直播源”。
+**宿主的「暂停播放」不再下发它**（改用 1.7 的 `pause`）：停止当前会话、销毁播放器、
+清空当前流地址、提示回到"等待直播源"。页面保留该处理只为兼容旧版宿主。
 
 ### 1.4 `presets`（宿主主动下发）
 
@@ -117,6 +119,25 @@
 页面据此调用 `GET {baseAddress}/play?url=&title=&referer=` 启动 mpv。
 `baseAddress` 为空字符串表示桥接服务未启动，页面会给出明确提示。
 
+### 1.7 `pause`
+
+```json
+{ "type": "pause", "paused": true }
+```
+
+暂停 / 继续播放。**暂停不销毁会话**：播放器、当前地址与缓冲全部保留，页面只调用
+`video.pause()`；`paused: false` 时从当前位置恢复，若落后直播边缘超过 3 秒则先追帧到缓冲末端。
+页面随后回一条 `status`（"已暂停播放" / "已继续播放"）。
+
+### 1.8 `mpv`
+
+```json
+{ "type": "mpv" }
+```
+
+宿主要求播放页用本地桥接服务启动 mpv。播放页当前未内置该按钮（左栏「mpv 播放」直接走宿主），
+常量保留在 `INBOUND_MESSAGE_TYPES` 中供后续使用。
+
 ---
 
 ## 2. 页面 → 宿主
@@ -138,18 +159,21 @@
 | `type` | 触发时机 | 关键 `extras` |
 |--------|----------|---------------|
 | `ready` | 页面脚本加载完成（握手） | `hevc`、`avc`（当前内核 MSE 解码能力，布尔） |
-| `checking` | 开始探测候选 | — |
-| `probe-result` | 单个候选探测完成 | `outcome`（`good`/`inconclusive`）、`elapsedMs`、`statusCode` |
-| `probe-rejected` | 候选返回 4xx/5xx | `outcome: rejected`、`statusCode` |
-| `candidate-queue` | 候选队列生成 | `sourceIndexes`、`knownGoodCount`、`inconclusiveCount` |
+| `checking` | 兼容保留（当前不再探测候选） | — |
+| `probe-result` | 兼容保留（当前不再探测候选） | — |
+| `probe-rejected` | 兼容保留（当前不再探测候选） | — |
+| `candidate-queue` | 候选队列生成（直接沿用宿主顺序） | `sourceIndexes`、`knownGoodCount`、`inconclusiveCount` |
 | `candidate-active` | 开始连接某候选 | — |
-| `status` | 状态变化 | `firstFrameMs`、`mode`；页面请求预设时 `message` 含“请求预设列表” |
-| `telemetry` | 每 ≥10 s 一次 | `currentTime`、`bufferedAheadMs`、`readyState`、`networkState`、`paused`、`ended`、`playbackRate`、`secondsSinceProgress`、`droppedVideoFrames`、`totalVideoFrames`、`mode` |
-| `warning` | 可恢复问题（切换候选、重连） | `errorName`、`errorMessage`、`reconnectCount` |
+| `status` | 状态变化 | `firstFrameMs`、`mode`；暂停/继续时 `message` 为"已暂停播放"/"已继续播放" |
+| `telemetry` | 每 ≥10 s 一次 | `currentTime`、`bufferedAheadMs`、`readyState`、`networkState`、`paused`、`ended`、`playbackRate`、`secondsSinceProgress`、`droppedVideoFrames`、`totalVideoFrames`、`mode`、`extremeTargetMs`、`stallSamples`、`reconnects` |
+| `warning` | 可恢复问题（切换候选、重连、自动回落稳定档） | `errorName`、`errorMessage`、`reconnectCount`、`extremeTargetMs` |
 | `error` | 终止性问题（含 HEVC 不受支持） | `errorMessage` |
 | `reconnecting` | 断流后重连 | `reconnectCount` |
 | `refresh-needed` | 所有候选不可用，请宿主重新解析 | — |
 | `quality` | 用户在下拉里换了画质档位 | `key`（档位键）；宿主据此按该档位重新解析并重新下发 `play` |
+| `target` | 用户在播放页底部改了追帧档位 | `extremeTargetMs`（150/200/250）；宿主只记住该值供下次播放沿用 |
+| `request-play` | 用户点了播放页底部的「开始播放」 | — ；宿主执行与左栏「解析房间/开始播放」相同的解析与下发流程 |
+| `toggle-pause` | 用户点了播放页底部的「暂停播放 / 继续播放」 | — ；宿主切换暂停状态并回下发 `pause` |
 
 宿主对 `sessionId` 做**过期校验**：`sessionId` 与当前活动会话不一致时忽略该消息并记 Debug 日志
 （`Ignored message from stale playback session`）。
@@ -161,8 +185,8 @@
 页面与纯逻辑模块共用 `Web/player-core.js` 中的常量，禁止在页面里写字符串字面量：
 
 ```js
-core.INBOUND_MESSAGE_TYPES  // play / chase / stop
-core.OUTBOUND_MESSAGE_TYPES // ready / checking / probe-result / ... / quality
+core.INBOUND_MESSAGE_TYPES  // play / chase / stop / target / pause / mpv
+core.OUTBOUND_MESSAGE_TYPES // ready / checking / ... / quality / request-play / toggle-pause
 ```
 
 宿主侧的对应常量集中在 `ShellViewModel` 的私有 `const string` 字段中。

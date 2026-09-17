@@ -16,10 +16,47 @@
 
 | 步骤 | 方法与地址 | 请求头 | 说明 |
 |------|-----------|--------|------|
-| 1（主路径） | `GET https://live.douyin.com/{roomId}` | `Referer: https://live.douyin.com/` | 整页只抓一次：主路径抽内嵌状态，备用路径顺带取主播 `sec_uid` |
-| 2（回退路径 A） | `GET https://live.douyin.com/webcast/room/web/enter/?aid=6383&app_name=douyin_web&live_id=1&device_platform=web&language=zh-CN&enter_from=web_live&cookie_enabled=true&screen_width=1920&screen_height=1080&browser_language=zh-CN&browser_platform=Win32&browser_name=Chrome&browser_version=131.0.0.0&web_rid={roomId}` | `Referer: https://live.douyin.com/{roomId}` + `Cookie: ttwid={首页下发的会话 cookie}` | 主路径没有可解析状态时使用 |
+| 1（主路径） | `GET https://live.douyin.com/{roomId}` | `Referer: https://live.douyin.com/` + 用户自备 Cookie（若已配置） | 整页只抓一次：主路径抽内嵌状态，备用路径顺带取主播 `sec_uid` |
+| 2（回退路径 A） | `GET https://live.douyin.com/webcast/room/web/enter/?aid=6383&app_name=douyin_web&live_id=1&device_platform=web&language=zh-CN&enter_from=web_live&cookie_enabled=true&screen_width=1920&screen_height=1080&browser_language=zh-CN&browser_platform=Win32&browser_name=Chrome&browser_version=131.0.0.0&web_rid={roomId}` | `Referer: https://live.douyin.com/{roomId}` + `Cookie: {用户自备 Cookie}; ttwid={首页下发的会话 cookie}` | 主路径没有可解析状态时使用 |
 | 2.0（取会话 cookie） | `GET https://live.douyin.com/` | 无 | 只读 `Set-Cookie` 里的 `ttwid`，内存缓存 30 分钟；**这是服务器给每个访客下发的普通会话 cookie，不是签名** |
-| 3（回退路径 B） | `GET https://webcast.amemv.com/webcast/room/reflow/info/?type_id=0&live_id=1&room_id={roomId}[&sec_user_id={secUid}]&version_code=99.99.99&app_id=1128` | `Referer: https://live.douyin.com/` | 前两条都失败时的最后兜底；实测固定返回 `10011` |
+| 3（回退路径 B） | `GET https://webcast.amemv.com/webcast/room/reflow/info/?type_id=0&live_id=1&room_id={roomId}[&sec_user_id={secUid}]&version_code=99.99.99&app_id=1128` | `Referer: https://live.douyin.com/` + 用户自备 Cookie（若已配置） | 前两条都失败时的最后兜底；实测固定返回 `10011` |
+
+### Cookie 作用域（用户自备 Cookie 必须覆盖全部解析请求）
+
+用户自备 Cookie 通过 `HttpTextClient.UseCookie(query.Cookie)` 设置成 **AsyncLocal 作用域**，
+`DouyinParser.OnParseAsync` 在进入时建立该作用域，作用域内**所有** `HttpTextClient` 请求都会自动带上它
+（页面、进房、reflow 三条路径都覆盖）。
+
+**实测根因（本轮的修复点）**：进房接口的请求头里过去直接写 `Cookie: ttwid=...`，
+而 `HttpTextClient` 的规则是"请求头已显式带 Cookie 就不再补作用域 Cookie"（避免出现两个 Cookie 头）。
+结果是**用户自备的登录态在进房请求里被整段丢掉**，而进房接口正是抖音回退路径里唯一给出可用
+`stream_url` 的通道：登录态缺失时平台不下发需要登录的最高档（`origin` 原画），
+用户看到的现象就是"抖音能播，但没有原画档"。
+
+现在的做法：`BuildRoomEnterCookie(ttwid)` 把
+- 用户自备 Cookie（去掉其中的 `ttwid=` 名值对，避免同名重复）放在前面，
+- 首页下发的 `ttwid=` 放在最后，
+
+拼成一个 Cookie 头（`Cookie: <用户 Cookie>; ttwid=<...>`），两者同时生效。
+全程不涉及任何签名，返回值属于登录凭证，**禁止写入日志**。
+
+### 档位诊断日志
+
+`BuildQualityOptions` 每次都会记一条 `Debug` 级诊断，直接给出本次响应里档位键的出处：
+
+| 字段 | 含义 |
+|------|------|
+| `declaredQualities` | `options.qualities[].sdk_key` 给出的键（可能为空） |
+| `flvPullUrl` | `stream_url.flv_pull_url` 的键集合 |
+| `hlsPullUrlMap` | `stream_url.hls_pull_url_map` 的键集合 |
+| `streamUrlDirect` | 直接挂在 `stream_url` 上的已知档位键 |
+| `hasOrigin` | 上述任一处是否出现 `origin`（"真无 origin"还是"有但没取到"一看即知） |
+
+只记键名，**不记地址与查询参数**（地址里带签名）。排查"没有原画档"时打开
+设置 → 高级 → 「记录详细诊断日志」，然后在日志里搜 `抖音档位诊断`。
+
+> 本机开发环境无法访问 `live.douyin.com`（网络受限），因此本条诊断**尚未在真实在播房间上取到原始输出**；
+> 代码路径与键集合口径已按线上结构实现并被单测覆盖（见文末"未确认 / 已知风险"）。
 
 ### 主路径：内嵌状态抽取（不用正则截断）
 
@@ -161,7 +198,10 @@ reflow 响应里的房间数据对象按 `data.data`、`data` 两种包装兼容
 
 ## 画质与编码
 
-- 画质由 `FULL_HD1/HD1/SD1/SD2` 映射（`QualityNames.FromDouyinQualityName`）；
+- 画质按"新键名优先、老键名同义"的规则映射（`MapDouyinQuality`）：
+  `origin`/`real_origin` → 1080P 高帧率档、`uhd`/`hd` → 1080P、
+  `sd` → 720P、`ld`/`SD2` → 480P，老式 `FULL_HD1`/`HD1` 走 `QualityNames.FromDouyinQualityName`；
+  面向用户显示的档位名一律以 `QualityOption.Label` 为准（它优先取平台自己的名字）；
 - 抖音部分直播间为 HEVC：编码按 `Unknown` 之外的已知值填充，若 Web 端无法解码，
   播放页会提示使用「mpv 播放」（mpv 支持 HEVC 硬解 + 超分）。
 
@@ -169,10 +209,12 @@ reflow 响应里的房间数据对象按 `data.data`、`data` 两种包装兼容
 
 - 档位来源优先 `options.qualities[]`（`sdk_key` + `name` + `v_bit_rate`），
   缺失时退回 `flv_pull_url` / `hls_pull_url_map` / `stream_url` 的键名；
-- 官方档位顺序（从高到低）：`origin` 原画 → `uhd` 蓝光 → `hd` 超清 → `sd` 高清 → `ld` 标清；
-  `real_origin`（真原画）紧随 `origin`，纯音频档 `ao` 排在最后（避免有视频档时被当成最高档）；
-  老键名（`FULL_HD1`/`HD1`/`SD1`/`SD2`）按同义档位处理，键名原样作为 `QualityOption.Key`；
-- `QualityOption.Label` 优先用平台给的 `options.qualities[].name`，
+- **键优先级（从高到低，实现见 `KnownQualityKeyOrder`）**：
+  `origin` → `real_origin` → `uhd` → `hd` → `sd` → `ld` → `FULL_HD1` → `HD1` → `SD1` → `SD2` → `ao`；
+  纯音频档 `ao` 排最后，避免有视频档时被当成最高档；
+- **「原画」这一档只能来自 `origin`**：内置中文名映射里只有 `origin` → `原画`，
+  `real_origin` → `真原画`（见 `DescribeQualityKey`）。平台没有下发 `origin` 时不会伪造该档；
+- `QualityOption.Label` 优先用平台给的 `options.qualities[].name`（平台口径优先），
   缺失时才用上面的内置中文名；
 - 抖音是六个平台里**唯一在接口里直接给出码率**的（`v_bit_rate`），填入 `BitrateKbps`
   （若字段单位是 bps 则换算为 kbps）；
@@ -181,6 +223,11 @@ reflow 响应里的房间数据对象按 `data.data`、`data` 两种包装兼容
 
 ## 未确认 / 已知风险
 
+- **"原画档缺失"的最终确认需要真实在播房间**：本轮修复了"C注入作用域被进房请求的显式 Cookie 顶掉"
+  这一确定缺陷，并补齐了档位键诊断日志；但本机开发环境无法访问 `live.douyin.com`，
+  因此**没有在真实在播房间上取到 `options.qualities` / `flv_pull_url` / `hls_pull_url_map` 的原始键集合**。
+  判定口径：打开详细诊断日志后看 `hasOrigin`——`false` 表示平台确实没下发 `origin`（属平台侧限制，
+  需要登录态或该房间本身没有原画），`true` 表示有 `origin` 但未被采用（属解析缺陷，请附日志反馈）；
 - **"在播房间的 `stream_url` 未直接观测到"**：本文所有响应片段都来自当前处于**已结束**状态
   （`status=4`）的房间，因此只验证到"能明确判定未开播 / 房间不存在"。
   在播房间的 `stream_url` 结构与主路径 `room` 同构（`flv_pull_url` / `hls_pull_url_map`），
