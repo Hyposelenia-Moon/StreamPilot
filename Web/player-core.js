@@ -205,13 +205,20 @@ const STATUS_SEGMENT_SEPARATOR = ' · ';
 /** 延迟分段的单位后缀（毫秒）。 */
 const LATENCY_UNIT_SUFFIX = ' ms';
 
+/** 状态行括号分段（追帧状态）的左括号。 */
+const STATUS_PARENTHESIS_OPEN = '（';
+
+/** 状态行括号分段（追帧状态）的右括号。 */
+const STATUS_PARENTHESIS_CLOSE = '）';
+
 /** 取不到真实延迟时状态行不再追加该分段，绝不显示占位数字。 */
 const LATENCY_PLACEHOLDER = null;
 
 /*
  * 合并后的「追帧 / 停止追帧」按钮只有一处入口，判定入口统一是 `shouldAutoChase`：
  *  - 按钮文案描述"点下去会发生什么"（`chaseButtonLabel`）：正在自动追帧时是「停止追帧」，否则是「追帧」；
- *  - 状态行分段描述"当前处在哪个状态"（`CHASE_STATE_SUFFIXES`）：两种状态都有标记，
+ *  - 状态行末尾的括号分段描述"当前处在哪个状态"（`CHASE_STATUS_LABELS`）：追帧中直接给当前模式与
+ *    目标档位（`modeLabel`），未追帧给固定的 `未开启追帧`，两种状态都有标记，
  *    用户才能一眼看出追帧到底开没开（只在"已停止"时加分段会让"正在追帧"无从确认）。
  */
 
@@ -223,12 +230,10 @@ const CHASE_BUTTON_LABELS = Object.freeze({
   STOP: '停止追帧',
 });
 
-/** 状态行上的追帧状态分段。 */
-const CHASE_STATE_SUFFIXES = Object.freeze({
-  /** 自动追帧进行中。 */
-  ACTIVE: '追帧中',
-  /** 已停止自动追帧。 */
-  STOPPED: '已停止追帧',
+/** 状态行末尾括号分段里的追帧状态取值。 */
+const CHASE_STATUS_LABELS = Object.freeze({
+  /** 已停止自动追帧（固定文案，此时括号里不再显示模式与目标档位）。 */
+  STOPPED: '未开启追帧',
 });
 
 /** 停止追帧时写入 mpegts.js 的"永不触发"延迟阈值（秒）。 */
@@ -243,7 +248,7 @@ const CHASE_DISABLED_PLAYBACK_RATE = 1;
 /*
  * 宿主状态消息（`host-status`）在画面下方状态行上的保留时长。
  *
- * 为什么需要"保留"：状态行同时要显示页面自己的播放状态（"播放中 · 稳定缓冲"），
+ * 为什么需要"保留"：状态行同时要显示页面自己的播放状态（"播放中（稳定缓冲）"），
  * 而宿主的失败原因（"解析失败：主播未开播"）更需要用户读到。规则是
  * "宿主消息覆盖显示，超时后回落播放状态"；级别越高保留越久——错误原因需要阅读时间，
  * 而操作反馈（"已新增预设"）看到即可。
@@ -476,23 +481,42 @@ function shouldAutoChase(run) {
 }
 
 /**
- * 把状态行基础文案与实际延迟拼成最终显示文本。
+ * 判断延迟是否是**可用**的实测值。
  *
- * 延迟取遥测里的**真实测量值**（见播放页的 `formatLatencyText`），
- * 取不到时（null / NaN / Infinity / 负数）不追加该分段，绝不显示占位或档位数字。
- * @param {*} base 基础文案（例如"已连接"）。
- * @param {*} latencyMs 实际延迟毫秒数；null、非数字或非法值时不追加。
- * @returns {string} 拼接后的显示文本。
+ * 只认有限且非负的数字：`null` / `undefined` / `NaN` / `Infinity` / 负数 / 非数字字符串
+ * 都不是有效测量，调用方据此不显示延迟分段。
+ * @param {*} latencyMs 待校验的延迟毫秒数。
+ * @returns {boolean} 可用返回 true。
  */
-function formatStatusWithLatency(base, latencyMs) {
-  const text = String(base === null || base === undefined ? '' : base);
-  const latency = Number(latencyMs);
-  if (latencyMs === null || latencyMs === undefined || !Number.isFinite(latency) || latency < 0) {
-    return text;
+function isValidLatencyMs(latencyMs) {
+  if (latencyMs === null || latencyMs === undefined) {
+    return false;
   }
 
-  const segment = Math.round(latency) + LATENCY_UNIT_SUFFIX;
-  return text.length > 0 ? text + STATUS_SEGMENT_SEPARATOR + segment : segment;
+  const latency = Number(latencyMs);
+  return Number.isFinite(latency) && latency >= 0;
+}
+
+/**
+ * 生成状态行的延迟分段（`318 ms`）。
+ *
+ * 取不到有效实测值时返回 `null`（而不是空串），调用方据此**整段省略**，绝不显示占位数字。
+ * @param {*} latencyMs 实际延迟毫秒数；非法值返回 null。
+ * @returns {string|null} 延迟分段；无有效测量值返回 null。
+ */
+function formatLatencySegment(latencyMs) {
+  return isValidLatencyMs(latencyMs) ? Math.round(Number(latencyMs)) + LATENCY_UNIT_SUFFIX : null;
+}
+
+/**
+ * 用统一分隔符拼接状态行的各个分段，跳过取不到的分段。
+ * @param {Array<string|null|undefined>} segments 分段列表（顺序即显示顺序）。
+ * @returns {string} 拼接后的文本。
+ */
+function joinStatusSegments(segments) {
+  return segments.filter(function (segment) {
+    return Boolean(segment);
+  }).join(STATUS_SEGMENT_SEPARATOR);
 }
 
 /**
@@ -508,10 +532,7 @@ function readActualLatencyMs(run) {
     return LATENCY_PLACEHOLDER;
   }
 
-  const latency = Number(run.lastLatencyMs);
-  return run.lastLatencyMs === null || run.lastLatencyMs === undefined || !Number.isFinite(latency) || latency < 0
-    ? LATENCY_PLACEHOLDER
-    : latency;
+  return isValidLatencyMs(run.lastLatencyMs) ? Number(run.lastLatencyMs) : LATENCY_PLACEHOLDER;
 }
 
 /**
@@ -763,19 +784,28 @@ function isAutoplayBlocked(error) {
 }
 
 /**
+ * 状态行末尾括号分段里的追帧状态。
+ * @param {*} run 运行对象（带 `autoChaseEnabled`）。
+ * @returns {string} 正在追帧时为当前模式与目标档位（{@link modeLabel}），停止追帧时为 `未开启追帧`。
+ */
+function chaseStatusLabel(run) {
+  return shouldAutoChase(run) ? modeLabel(run) : CHASE_STATUS_LABELS.STOPPED;
+}
+
+/**
  * 底部状态行在播放开始后的文案（不显示候选主机名与 CDN 节点）。
  *
- * 组成：播放状态 + 模式/档位 + 追帧状态（追帧中 / 已停止追帧）+ **实际延迟**。
- * 延迟来自遥测实测值（{@link readActualLatencyMs}），取不到就不追加该段，不写死档位数字。
- * 追帧状态两种取值都要出现：只标注"已停止"会让"正在追帧"没有可确认的显示。
+ * 结构固定为「播放中 + 可选 ` · N ms` + `（追帧状态）`」：
+ *  - 延迟分段紧跟"播放中"，取自遥测**实测值**（{@link readActualLatencyMs}），
+ *    取不到就不显示该段，绝不写死档位数字冒充实测；
+ *  - 括号分段永远存在且放在最后（{@link chaseStatusLabel}），追帧中给出当前模式与目标档位，
+ *    停止追帧给出 `未开启追帧`。
  * @param {{mode?:string,extremeTargetMs?:number,extremeTargetSeconds?:number,autoChaseEnabled?:boolean,lastLatencyMs?:number}} run 运行对象。
  * @returns {string} 中文状态。
  */
 function formatPlaybackStatusText(run) {
-  const chaseSegment = STATUS_SEGMENT_SEPARATOR
-    + (shouldAutoChase(run) ? CHASE_STATE_SUFFIXES.ACTIVE : CHASE_STATE_SUFFIXES.STOPPED);
-  const base = MODE_HINT_PLAYING + STATUS_SEGMENT_SEPARATOR + modeLabel(run) + chaseSegment;
-  return formatStatusWithLatency(base, readActualLatencyMs(run));
+  const chaseSegment = STATUS_PARENTHESIS_OPEN + chaseStatusLabel(run) + STATUS_PARENTHESIS_CLOSE;
+  return joinStatusSegments([MODE_HINT_PLAYING, formatLatencySegment(readActualLatencyMs(run))]) + chaseSegment;
 }
 
 /**
@@ -822,7 +852,7 @@ function getHostStatusRemainingMs(hostStatus, now) {
  * 优先级规则（状态行唯一的显示判定入口，便于测试）：
  *  1. 宿主消息仍在保留期内 → 显示宿主消息，级别用宿主给的（warn/error 换成警示色）；
  *  2. 宿主消息已过期或从未收到 → 显示页面自己的播放状态，级别固定为 `info`（蓝色）。
- * 这样"解析失败：主播未开播"不会被随后的"播放中 · 稳定缓冲"盖掉（失败原因更重要），
+ * 这样"解析失败：主播未开播"不会被随后的"播放中（稳定缓冲）"盖掉（失败原因更重要），
  * 也不会永久占住状态行（用户回到画面时仍能看到直播延迟档位）。
  * @param {{message?:string,level?:string,receivedAt?:number}|null} hostStatus 最近的宿主状态消息。
  * @param {string} playbackText 页面自己的播放状态文案。
@@ -1083,8 +1113,10 @@ const StreamPilotPlayerCore = {
   STATUS_IDLE_TEXT,
   STATUS_SEGMENT_SEPARATOR,
   LATENCY_UNIT_SUFFIX,
+  STATUS_PARENTHESIS_OPEN,
+  STATUS_PARENTHESIS_CLOSE,
   CHASE_BUTTON_LABELS,
-  CHASE_STATE_SUFFIXES,
+  CHASE_STATUS_LABELS,
   HOST_STATUS_HOLD_INFO_MS,
   HOST_STATUS_HOLD_WARN_MS,
   HOST_STATUS_HOLD_ERROR_MS,
@@ -1114,10 +1146,12 @@ const StreamPilotPlayerCore = {
   shouldMuteAtVolume,
   isAutoplayBlocked,
   formatPlaybackStatusText,
-  formatStatusWithLatency,
+  isValidLatencyMs,
+  formatLatencySegment,
   readActualLatencyMs,
   shouldAutoChase,
   chaseButtonLabel,
+  chaseStatusLabel,
   normalizeStatusLevel,
   getHostStatusHoldMs,
   getHostStatusRemainingMs,

@@ -626,9 +626,9 @@
       }
 
       /**
-       * 用最近一次遥测的**真实延迟**刷新状态行（显示形如"播放中 · … · 250 ms"）。
+       * 用最近一次遥测的**真实延迟**刷新状态行（显示形如"播放中 · 318 ms（极限追帧 250 ms）"）。
        *
-       * 延迟与状态文案的拼接逻辑在纯函数 `core.formatPlaybackStatusText` / `core.formatStatusWithLatency` 里，
+       * 延迟与状态文案的拼接逻辑在纯函数 `core.formatPlaybackStatusText` / `core.formatLatencySegment` 里，
        * 页面只负责把实测值写进运行对象。取不到有效测量值时该分段整体不显示，不写占位数字。
        * @param {object} run 运行对象（带 lastLatencyMs / autoChaseEnabled）。
        */

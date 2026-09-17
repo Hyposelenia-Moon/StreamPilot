@@ -229,7 +229,7 @@ StreamPilot/
 | `dotnet build StreamPilot.slnx -c Debug` | **0 警告 / 0 错误**（`TreatWarningsAsErrors=true`） |
 | `build\test.ps1` | **四个阶段全部通过** |
 | C# 单元测试 | **131 / 131 通过**（`tests/StreamPilot.Tests/Cases/*.cs`） |
-| 前端回归测试 | **46 / 46 通过**（`tests/web/player-core.test.js`，`node --test`） |
+| 前端回归测试 | **47 / 47 通过**（`tests/web/player-core.test.js`，`node --test`） |
 | 静态红线自检 | 通过 |
 | `node build/analyze-csharp.mjs` | **101 文件 / 23282 行 / 156 类型 / 749 方法**，未发现结构性问题 |
 | 发布产物 | `StreamPilot-windows-v0.1.0.zip`（+ `zip.sha256` 校验值文件，见 `build\publish.ps1`） |

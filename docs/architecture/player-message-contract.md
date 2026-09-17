@@ -233,10 +233,12 @@ core.OUTBOUND_MESSAGE_TYPES // ready / checking / probe-result / probe-rejected 
 core.LOG_LEVELS             // info / warn / error（`log` 与 `host-status` 的 level 字段共用同一套级别）
 core.STATUS_IDLE_TEXT       // 未连接（页面初始化与停止播放后的状态行文案）
 core.CHASE_BUTTON_LABELS   // 追帧 / 停止追帧（画面底部合并后的追帧按钮文案，由 chaseButtonLabel 取用）
-core.CHASE_STATE_SUFFIXES  // 追帧中 / 已停止追帧（状态行上的追帧状态分段，两种状态都显示）
+core.CHASE_STATUS_LABELS   // 未开启追帧（状态行末尾括号分段里"没在追帧"时的固定文案）
 core.chaseButtonLabel      // 合并按钮文案判定（入参为 shouldAutoChase 的结果）
 core.shouldAutoChase       // 追帧开关判定（字段缺失视为开启，仅显式 false 表示已停止）
-core.formatStatusWithLatency // 状态行拼接实际延迟（非法值不追加该分段）
+core.chaseStatusLabel      // 状态行末尾括号分段取值（追帧中给 modeLabel，停止后给 未开启追帧）
+core.formatLatencySegment  // 状态行的延迟分段（非法值返回 null，由调用方整段省略）
+core.formatPlaybackStatusText // 播放中的整条状态行（播放中 + 可选延迟分段 + 末尾括号分段）
 core.HOST_STATUS_HOLD_MS    // host-status 按级别在状态行上的保留时长（info 6s / warn 12s / error 20s）
 core.resolveStatusLine      // 状态行显示判定（宿主消息优先，超时回落播放状态）
 ```

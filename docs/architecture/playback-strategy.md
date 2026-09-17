@@ -225,10 +225,10 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
 分模式卡顿阈值（含"用户暂停不判卡顿"与恢复宽限期）、缓冲失控阈值与处置顺序（含宽限期与用尽后交回重连）、
 探测开关、`LOADING_COMPLETE` 重连条件、手动追帧夹取、进度判定与缓冲计算、播放计划过滤、错误归类、首帧超时选择、
 画质下拉规范化（档位键回落与码率标签）、消息契约（含 `log`、页面侧请求消息与 `request-stop`）、
-**状态行实际延迟拼接（`formatStatusWithLatency` 的合法值 / `null` / `NaN` / 负数 / 空基础文案）**、
+**状态行延迟分段（`formatLatencySegment` / `isValidLatencyMs` 的合法值 / `null` / `NaN` / 负数）**、
 **追帧开关（`shouldAutoChase` 的默认开启与显式停止、`chaseButtonLabel` 两侧文案、
 停止追帧对 mpegts.js / hls.js 配置的影响，且不改变缓冲策略）**、
-**追帧状态在状态行上的分段（`追帧中` / `已停止追帧` 两侧都要有）**、播放页静态结构（顶部提示已彻底移除、
+**状态行整条文案（`formatPlaybackStatusText` 的四种逐字形态，以及旧的 `· 追帧中` / `已停止追帧` 形态不再出现）**、播放页静态结构（顶部提示已彻底移除、
 播放控制三键顺序为 开始 → 暂停/继续 → 停止、追帧相关按钮只剩合并后的 `#chaseBtn` 一个）。
 
 ## 8. 画质档位切换
@@ -298,15 +298,17 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
 
 ## 11. 状态行显示实际延迟
 
-画面下方状态行（`#statusLine`）在播放状态下追加**遥测实测的延迟**，形如 `播放中 · 极限追帧 250 ms · 318 ms`：
+画面下方状态行（`#statusLine`）在播放状态下显示形如 `播放中 · 318 ms（极限追帧 250 ms）`：
 
 - 数据来源：遥测每轮（`TELEMETRY_INTERVAL_MS = 500 ms`）把 `getLocalBufferSeconds(...)` 的结果写进
   `run.lastLatencyMs`，与 `telemetry` 消息里的 `bufferedAheadMs` **同源同值**；
-- 拼接是纯函数 `core.formatStatusWithLatency(base, latencyMs)`：`latencyMs` 为 `null` / `NaN` / `Infinity` / 负数时
-  **不追加该分段**，绝不显示占位数字；
+- 结构固定为「`播放中` + 可选 ` · N ms` + `（追帧状态）`」：**延迟分段紧跟"播放中"，括号分段永远存在且放在最后**；
+- 延迟分段是纯函数 `core.formatLatencySegment(latencyMs)`：`latencyMs` 为 `null` / `NaN` / `Infinity` / 负数时
+  返回 `null`，调用方**整段省略**，绝不显示占位数字（此时写作 `播放中（极限追帧 250 ms）`）；
 - 刻意**不**用追帧档位（150/200/250）冒充延迟：那是目标值，不是实际值；
-- 状态行上的追帧状态分段对**两种状态都显示**（`core.CHASE_STATE_SUFFIXES`）：`… · 追帧中 · 318 ms` /
-  `… · 已停止追帧 · 900 ms`，不再只在"已停止"时加标注——只标注一侧时"追帧到底开没开"无法确认。
+- 括号分段取值由 `core.chaseStatusLabel(run)` 给出（常量 `core.CHASE_STATUS_LABELS`）：正在追帧时是当前模式与
+  目标档位（`modeLabel`，如 `极限追帧 250 ms`），停止追帧时是固定的 `未开启追帧`
+  （此时不显示模式与档位）——两种状态都有标记，只标注一侧时"追帧到底开没开"无法确认。
 
 ## 12. 桥接中继的稳定性约束
 

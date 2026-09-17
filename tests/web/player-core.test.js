@@ -422,47 +422,73 @@ test('播放页不再包含顶部提示元素，且播放按钮顺序为 开始 
 test('formatPlaybackStatusText 状态行不显示候选主机名', () => {
   assert.equal(
     core.formatPlaybackStatusText({ mode: 'extreme', extremeTargetMs: 150, currentCandidate: { host: 'a.example' } }),
-    '播放中 · 极限追帧 150 ms · 追帧中');
+    '播放中（极限追帧 150 ms）');
   assert.equal(
     core.formatPlaybackStatusText({ mode: 'stable', currentCandidate: { host: 'a.example' } }),
-    '播放中 · 稳定缓冲 · 追帧中');
+    '播放中（稳定缓冲）');
 });
 
-test('formatPlaybackStatusText 追加遥测实测延迟，取不到实测值时不显示该段', () => {
+test('formatPlaybackStatusText 逐字给出四种形态：延迟分段紧跟播放中，括号分段永远在最后', () => {
   assert.equal(
     core.formatPlaybackStatusText({ mode: 'extreme', extremeTargetMs: 250, lastLatencyMs: 318 }),
-    '播放中 · 极限追帧 250 ms · 追帧中 · 318 ms',
-    '显示的是遥测实测值，不是档位值');
+    '播放中 · 318 ms（极限追帧 250 ms）',
+    '正在追帧：延迟用遥测实测值，括号里是当前模式与目标档位');
   assert.equal(
-    core.formatPlaybackStatusText({ mode: 'extreme', extremeTargetMs: 250, lastLatencyMs: 318.6 }),
-    '播放中 · 极限追帧 250 ms · 追帧中 · 319 ms',
-    '实测值四舍五入到整数毫秒');
-  assert.equal(
-    core.formatPlaybackStatusText({ mode: 'extreme', extremeTargetMs: 250, lastLatencyMs: null }),
-    '播放中 · 极限追帧 250 ms · 追帧中',
-    '没有遥测时不显示延迟段，也不拿档位值凑数');
+    core.formatPlaybackStatusText({ mode: 'extreme', extremeTargetMs: 250, autoChaseEnabled: false, lastLatencyMs: 900 }),
+    '播放中 · 900 ms（未开启追帧）',
+    '停止追帧：括号里是固定文案，不再显示模式与目标档位');
   assert.equal(
     core.formatPlaybackStatusText({ mode: 'extreme', extremeTargetMs: 250 }),
-    '播放中 · 极限追帧 250 ms · 追帧中',
-    '从未遥测过（字段缺失）同样不显示延迟段');
+    '播放中（极限追帧 250 ms）',
+    '取不到实测延迟：不显示延迟分段，也绝不用档位值冒充实测');
+  assert.equal(
+    core.formatPlaybackStatusText({ mode: 'extreme', extremeTargetMs: 250, autoChaseEnabled: false }),
+    '播放中（未开启追帧）');
+
+  assert.equal(
+    core.formatPlaybackStatusText({ mode: 'extreme', extremeTargetMs: 250, lastLatencyMs: 318.6 }),
+    '播放中 · 319 ms（极限追帧 250 ms）',
+    '实测值四舍五入到整数毫秒');
   assert.equal(
     core.formatPlaybackStatusText({ mode: 'stable', lastLatencyMs: Number.NaN }),
-    '播放中 · 稳定缓冲 · 追帧中',
+    '播放中（稳定缓冲）',
     '非法实测值不得显示成 NaN ms');
 });
 
-test('formatStatusWithLatency 只拼接合法延迟，非法值一律不追加该段', () => {
-  assert.equal(core.formatStatusWithLatency('已连接', 250), '已连接 · 250 ms');
-  assert.equal(core.formatStatusWithLatency('已连接', 0), '已连接 · 0 ms', '0 ms 是合法实测值');
-  assert.equal(core.formatStatusWithLatency('已连接', 249.5), '已连接 · 250 ms');
-  assert.equal(core.formatStatusWithLatency('已连接', null), '已连接');
-  assert.equal(core.formatStatusWithLatency('已连接', undefined), '已连接');
-  assert.equal(core.formatStatusWithLatency('已连接', Number.NaN), '已连接');
-  assert.equal(core.formatStatusWithLatency('已连接', Number.POSITIVE_INFINITY), '已连接');
-  assert.equal(core.formatStatusWithLatency('已连接', -1), '已连接', '负延迟是非法测量，不能显示');
-  assert.equal(core.formatStatusWithLatency('已连接', 'abc'), '已连接');
-  assert.equal(core.formatStatusWithLatency('', 250), '250 ms', '没有基础文案时只显示延迟段');
-  assert.equal(core.formatStatusWithLatency(null, null), '', '空输入给出空串而不是 undefined');
+test('formatPlaybackStatusText 不再出现旧的 · 分隔形态', () => {
+  const chasing = core.formatPlaybackStatusText({ mode: 'extreme', extremeTargetMs: 250, lastLatencyMs: 318 });
+  const stopped = core.formatPlaybackStatusText({
+    mode: 'extreme', extremeTargetMs: 250, autoChaseEnabled: false, lastLatencyMs: 900,
+  });
+
+  [chasing, stopped].forEach((text) => {
+    assert.equal(text.includes('· 追帧中'), false, '「追帧中」不再是独立分段');
+    assert.equal(text.includes('已停止追帧'), false, '旧的「已停止追帧」文案必须消失');
+    assert.equal(text.includes('追帧中'), false, '括号分段里不再出现「追帧中」');
+    assert.equal(text.includes('· 极限追帧 250 ms ·'), false, '模式与档位不再作为独立分段出现');
+    assert.equal(text.endsWith('）'), true, '括号分段必须放在最后');
+    assert.equal(text.includes('（'), true, '括号分段必须永远存在');
+  });
+
+  assert.equal(core.CHASE_STATUS_LABELS.STOPPED, '未开启追帧');
+  assert.equal(core.CHASE_STATE_SUFFIXES, undefined, '旧的追帧状态分段常量必须删除，不留死代码');
+});
+
+test('formatLatencySegment 只给出合法延迟分段，非法值一律返回 null', () => {
+  assert.equal(core.formatLatencySegment(250), '250 ms');
+  assert.equal(core.formatLatencySegment(0), '0 ms', '0 ms 是合法实测值');
+  assert.equal(core.formatLatencySegment(249.5), '250 ms');
+  assert.equal(core.formatLatencySegment(null), null);
+  assert.equal(core.formatLatencySegment(undefined), null);
+  assert.equal(core.formatLatencySegment(Number.NaN), null);
+  assert.equal(core.formatLatencySegment(Number.POSITIVE_INFINITY), null);
+  assert.equal(core.formatLatencySegment(-1), null, '负延迟是非法测量，不能显示');
+  assert.equal(core.formatLatencySegment('abc'), null);
+  assert.equal(core.isValidLatencyMs(250), true);
+  assert.equal(core.isValidLatencyMs(0), true);
+  assert.equal(core.isValidLatencyMs(-0.5), false);
+  assert.equal(core.isValidLatencyMs('318'), true, '数字字符串按数字处理，与旧的 Number() 语义一致');
+  assert.equal(core.formatStatusWithLatency, undefined, '旧的整串拼接函数必须删除，只留分段函数');
 });
 
 test('shouldAutoChase 判定自动追帧开关（默认开启）', () => {
@@ -515,19 +541,14 @@ test('停止追帧关闭 mpegts.js / hls.js 的两路自动追帧，但不影响
   assert.equal(hlsCancelled.liveSyncDurationCount, hlsChasing.liveSyncDurationCount, '起播位置不变');
 });
 
-test('状态行必须能区分"追帧中"与"已停止追帧"（与暂停播放是两件事）', () => {
+test('chaseStatusLabel 给出括号分段取值：追帧中给模式档位，停止后给固定文案', () => {
   const stopped = { mode: 'extreme', extremeTargetMs: 250, autoChaseEnabled: false, lastLatencyMs: 900 };
-  assert.equal(
-    core.formatPlaybackStatusText(stopped),
-    '播放中 · 极限追帧 250 ms · 已停止追帧 · 900 ms',
-    '停止追帧后状态行标注，并继续显示实测延迟');
-  assert.equal(
-    core.formatPlaybackStatusText({ mode: 'extreme', extremeTargetMs: 250, autoChaseEnabled: true, lastLatencyMs: 260 }),
-    '播放中 · 极限追帧 250 ms · 追帧中 · 260 ms',
-    '追帧中也要有分段，否则无法确认追帧是否开着');
+  assert.equal(core.chaseStatusLabel(stopped), '未开启追帧');
+  assert.equal(core.chaseStatusLabel({ mode: 'extreme', extremeTargetMs: 250 }), '极限追帧 250 ms', '字段缺失视为追帧中');
+  assert.equal(core.chaseStatusLabel({ mode: 'stable' }), '稳定缓冲');
+  assert.equal(core.chaseStatusLabel(null), '未开启追帧', '没有会话时与"没在追帧"一致');
 
-  assert.equal(core.CHASE_STATE_SUFFIXES.ACTIVE, '追帧中');
-  assert.equal(core.CHASE_STATE_SUFFIXES.STOPPED, '已停止追帧');
+  assert.equal(core.CHASE_STATUS_LABELS.STOPPED, '未开启追帧');
   assert.equal(core.CHASE_CANCELLED_SUFFIX, undefined, '旧的"仅在已取消时追加"的常量必须删除');
 });
 
