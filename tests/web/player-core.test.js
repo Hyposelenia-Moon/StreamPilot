@@ -6,11 +6,15 @@
  * 运行方式：
  *   node --test tests/web
  * 覆盖：档位归一化、候选规范化与过滤、追帧参数推导、探测开关、重连退避、分模式卡顿阈值、
- *       手动追帧夹取、错误归类、音量换算、模式/状态/空态文案（正常 / 异常 / 边界三类）。
+ *       缓冲失控保护（阈值 / 处置顺序 / 宽限期）、手动追帧夹取、错误归类、音量换算、
+ *       模式/状态/空态文案、宿主状态消息（级别 / 保留时长 / 状态行优先级）、
+ *       播放页静态结构（顶部提示已移除、播放按钮顺序）（正常 / 异常 / 边界三类）。
  */
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const core = require('../../Web/player-core.js');
 
 test('normalizeExtremeTargetSeconds 只接受 150/200/250，其他值回落 0.25s', () => {
@@ -100,24 +104,75 @@ test('getStallThresholdMs 按模式与饥饿状态取 4s/6.5s（极限）与 6s/
 });
 
 test('isPlaybackStalled 排除用户暂停与刚恢复播放的宽限期，并区分模式阈值', () => {
-  const playing = { paused: false };
-  const paused = { paused: true };
-
-  assert.equal(core.isPlaybackStalled(playing, 3500, true, 0, 100000, true), false, '极限档未到 4s 不重连');
-  assert.equal(core.isPlaybackStalled(playing, 4000, true, 0, 100000, true), true, '极限档饥饿达到 4s 重连');
-  assert.equal(core.isPlaybackStalled(playing, 4000, true, 0, 100000, false), false, '稳定档 4s 还不重连');
-  assert.equal(core.isPlaybackStalled(playing, 6000, true, 0, 100000, false), true, '稳定档饥饿达到 6s 才重连');
-  assert.equal(core.isPlaybackStalled(playing, 6500, false, 0, 100000, true), true, '极限档硬卡 6.5s 触发');
-  assert.equal(core.isPlaybackStalled(playing, 9000, false, 0, 100000, false), true, '稳定档硬卡 9s 触发');
-  assert.equal(core.isPlaybackStalled(paused, 60000, false, 0, 100000, true), false, '用户暂停不算卡顿');
+  assert.equal(core.isPlaybackStalled(3500, true, 0, 100000, true, false), false, '极限档未到 4s 不重连');
+  assert.equal(core.isPlaybackStalled(4000, true, 0, 100000, true, false), true, '极限档饥饿达到 4s 重连');
+  assert.equal(core.isPlaybackStalled(4000, true, 0, 100000, false, false), false, '稳定档 4s 还不重连');
+  assert.equal(core.isPlaybackStalled(6000, true, 0, 100000, false, false), true, '稳定档饥饿达到 6s 才重连');
+  assert.equal(core.isPlaybackStalled(6500, false, 0, 100000, true, false), true, '极限档硬卡 6.5s 触发');
+  assert.equal(core.isPlaybackStalled(9000, false, 0, 100000, false, false), true, '稳定档硬卡 9s 触发');
+  assert.equal(core.isPlaybackStalled(60000, false, 0, 100000, true, true), false, '用户暂停不算卡顿');
   assert.equal(
-    core.isPlaybackStalled(playing, 60000, true, 100000 - core.RESUME_GRACE_MS + 1, 100000, true),
+    core.isPlaybackStalled(60000, true, 100000 - core.RESUME_GRACE_MS + 1, 100000, true, false),
     false,
     '刚点继续播放时的静止属于重建缓冲');
   assert.equal(
-    core.isPlaybackStalled(playing, 60000, true, 100000 - core.RESUME_GRACE_MS, 100000, true),
+    core.isPlaybackStalled(60000, true, 100000 - core.RESUME_GRACE_MS, 100000, true, false),
     true,
     '宽限期结束后恢复正常判定');
+});
+
+test('isPlaybackStalled 只认"用户暂停"，元素被非用户原因暂停时不能吃掉恢复分支', () => {
+  // 真机坏状态（B站 814）：缓冲 81.9→111.9 秒、画面 82→112 秒没前进、reconnects 恒为 0。
+  // 旧实现拿 video.paused 当"用户暂停"的门闩，元素一旦被非用户原因暂停（播放器重建时先 pause、
+  // 内核暂停元素），恢复分支就永久失效——画面停住时"没有触发任何动作"。
+  assert.equal(core.isPlaybackStalled(82000, false, 0, 100000, true, false), true, '元素暂停不等于用户暂停');
+  assert.equal(core.isPlaybackStalled(82000, false, 0, 100000, true, true), false, '用户主动暂停才是例外');
+});
+
+test('isBufferRunaway 只在缓冲远大于目标延迟且画面停滞时成立', () => {
+  assert.equal(core.BUFFER_RUNAWAY_AHEAD_SECONDS, 8, '异常下限取 8 秒');
+  assert.equal(core.isBufferRunaway(0.24, 0, false), false, '健康样本（真机 179–473 ms）不算失控');
+  assert.equal(core.isBufferRunaway(7.9, 60000, false), false, '未到 8 秒不按失控处理');
+  assert.equal(core.isBufferRunaway(8.1, core.BUFFER_RUNAWAY_SILENCE_MS - 1, false), false, '画面还在前进就不算失控');
+  assert.equal(core.isBufferRunaway(8.1, core.BUFFER_RUNAWAY_SILENCE_MS, false), true);
+  assert.equal(core.isBufferRunaway(111.891, 112000, false), true, '真机失控样本（111.891 秒 / 停滞 112 秒）');
+  assert.equal(core.isBufferRunaway(111.891, 112000, true), false, '用户暂停时缓冲增长属于预期');
+  assert.equal(core.isBufferRunaway(null, 60000, false), false, '没有缓冲区间不判失控');
+  assert.equal(core.isBufferRunaway(Number.NaN, 60000, false), false);
+});
+
+test('decideBufferRunawayAction 先恢复播放与追帧，自行处置用尽后交回重连', () => {
+  const never = Number.POSITIVE_INFINITY;
+  assert.equal(core.decideBufferRunawayAction(0.24, 0, false, false, 0, never), core.RUNAWAY_ACTIONS.NONE, '正常播放不处置');
+  assert.equal(core.decideBufferRunawayAction(111.891, 112000, true, false, 0, never), core.RUNAWAY_ACTIONS.NONE, '用户暂停不处置');
+  assert.equal(
+    core.decideBufferRunawayAction(82, 82000, false, true, 0, never),
+    core.RUNAWAY_ACTIONS.RESUME,
+    '元素被非用户原因暂停：先恢复播放（否则追帧不会被消费）');
+  assert.equal(
+    core.decideBufferRunawayAction(82, 82000, false, false, 0, never),
+    core.RUNAWAY_ACTIONS.CHASE,
+    '缓冲可直接消费：先追帧到缓冲末端');
+  assert.equal(
+    core.decideBufferRunawayAction(82, 82000, false, false, 0, core.BUFFER_RUNAWAY_CHASE_GRACE_MS - 1),
+    core.RUNAWAY_ACTIONS.NONE,
+    '刚追过帧的宽限期内不重复处置（等 seek 生效）');
+  assert.equal(
+    core.decideBufferRunawayAction(82, 82000, false, false, 0, core.BUFFER_RUNAWAY_CHASE_GRACE_MS),
+    core.RUNAWAY_ACTIONS.CHASE,
+    '宽限期结束画面仍未恢复则再追一次');
+  assert.equal(
+    core.decideBufferRunawayAction(82, 82000, false, false, core.BUFFER_RUNAWAY_MAX_CHASE_ATTEMPTS, never),
+    core.RUNAWAY_ACTIONS.RECONNECT,
+    '自行处置用尽：改走既有重连 / 切候选');
+  assert.equal(
+    core.decideBufferRunawayAction(82, 82000, false, true, core.BUFFER_RUNAWAY_MAX_CHASE_ATTEMPTS, never),
+    core.RUNAWAY_ACTIONS.RECONNECT,
+    '元素一直暂停且用尽处置次数时同样交回重连');
+  assert.equal(
+    core.decideBufferRunawayAction(82, 82000, false, false, Number.NaN, never),
+    core.RUNAWAY_ACTIONS.RECONNECT,
+    '计数异常时按"已用尽"保守处理');
 });
 
 test('shouldProbeCandidate 只在多候选时探测', () => {
@@ -337,27 +392,31 @@ test('isAutoplayBlocked 只认 NotAllowedError', () => {
   assert.equal(core.isAutoplayBlocked(undefined), false);
 });
 
-test('formatModeHint 只显示档位与播放状态，不显示候选主机名', () => {
-  const playing = {
-    mode: 'extreme',
-    extremeTargetMs: 250,
-    playbackStarted: true,
-    currentCandidate: { host: 'al-game.flv.huya.com' },
-  };
-  assert.equal(core.formatModeHint(playing), '极限追帧 250 ms · 播放中');
-  assert.equal(core.formatModeHint(playing).includes('huya'), false);
+test('顶部模式提示（modeHint / formatModeHint）已彻底移除，只剩底部状态行', () => {
+  assert.equal(core.formatModeHint, undefined, '顶部提示格式化函数必须删除，而不是留着不用');
+  assert.equal(core.MODE_HINT_IDLE, undefined);
+  assert.equal(core.MODE_HINT_CONNECTING, undefined);
+  assert.equal(core.MODE_HINT_PLAYING, '播放中', '底部状态行仍需要"播放中"文案');
+});
 
-  const connecting = {
-    mode: 'stable',
-    playbackStarted: false,
-    currentCandidate: { host: 'al-game.flv.huya.com' },
-  };
-  assert.equal(core.formatModeHint(connecting), '稳定缓冲 · 连接中');
-  assert.equal(core.formatModeHint(connecting).includes('huya'), false);
+test('播放页不再包含顶部提示元素，且播放按钮顺序为 开始 → 暂停/继续 → 停止', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
 
-  assert.equal(core.formatModeHint({ mode: 'extreme', extremeTargetMs: 150, playbackStarted: true }), '等待直播源');
-  assert.equal(core.formatModeHint(null), '等待直播源');
-  assert.equal(core.formatModeHint(undefined), '等待直播源');
+  assert.equal(html.includes('modeHint'), false, 'page 里不能再有 modeHint（元素 / CSS / JS 全部删除）');
+  assert.equal(html.includes('updateModeHint'), false);
+  assert.equal(html.includes('formatModeHint'), false);
+  assert.equal(html.includes('<header>'), false, '页头整块已删除，顶部不再有状态行');
+
+  const playIndex = html.indexOf('id="playBtn"');
+  const pauseIndex = html.indexOf('id="pauseBtn"');
+  const stopIndex = html.indexOf('id="stopBtn"');
+  assert.ok(playIndex > 0, '开始播放按钮必须存在');
+  assert.ok(pauseIndex > playIndex, '暂停/继续播放必须排在开始播放之后');
+  assert.ok(stopIndex > pauseIndex, '停止播放必须排在暂停/继续播放之后');
+
+  assert.equal(html.includes('#statusLine'), true, '画面下方的状态行保留');
+  const statusRule = html.slice(html.indexOf('#statusLine {'), html.indexOf('}', html.indexOf('#statusLine {')));
+  assert.equal(statusRule.includes('color: #2f6feb'), true, '状态行自身用主题强调蓝（AccentBrush）而不是灰字');
 });
 
 test('formatPlaybackStatusText 状态行不显示候选主机名', () => {
@@ -392,8 +451,84 @@ test('消息契约包含播放页侧的请求消息与页面日志', () => {
   assert.equal(core.INBOUND_MESSAGE_TYPES.MPV, 'mpv');
   assert.equal(core.OUTBOUND_MESSAGE_TYPES.REQUEST_PLAY, 'request-play');
   assert.equal(core.OUTBOUND_MESSAGE_TYPES.TOGGLE_PAUSE, 'toggle-pause');
+  assert.equal(core.OUTBOUND_MESSAGE_TYPES.REQUEST_STOP, 'request-stop', '停止播放要销毁播放器并释放会话，必须让宿主回收中继');
   assert.equal(core.OUTBOUND_MESSAGE_TYPES.LOG, 'log', '页面日志只上报宿主，页面不再显示日志面板');
   assert.equal(core.LOG_LEVELS.INFO, 'info');
   assert.equal(core.LOG_LEVELS.WARN, 'warn');
   assert.equal(core.LOG_LEVELS.ERROR, 'error');
+});
+
+test('宿主状态消息类型与级别归一化', () => {
+  assert.equal(core.INBOUND_MESSAGE_TYPES.HOST_STATUS, 'host-status', '宿主状态文案必须有独立的消息类型');
+  assert.equal(core.STATUS_IDLE_TEXT, '未连接');
+  assert.equal(core.normalizeStatusLevel('info'), 'info');
+  assert.equal(core.normalizeStatusLevel('warn'), 'warn');
+  assert.equal(core.normalizeStatusLevel('error'), 'error');
+  assert.equal(core.normalizeStatusLevel('ERROR'), 'error', '级别大小写不敏感');
+  assert.equal(core.normalizeStatusLevel('boom'), 'info', '未知级别回落信息级');
+  assert.equal(core.normalizeStatusLevel(undefined), 'info');
+  assert.equal(core.normalizeStatusLevel(null), 'info');
+  assert.equal(core.normalizeStatusLevel(7), 'info');
+});
+
+test('宿主状态保留时长按级别递增，未知级别按信息级', () => {
+  assert.equal(core.getHostStatusHoldMs('info'), core.HOST_STATUS_HOLD_INFO_MS);
+  assert.equal(core.getHostStatusHoldMs('warn'), core.HOST_STATUS_HOLD_WARN_MS);
+  assert.equal(core.getHostStatusHoldMs('error'), core.HOST_STATUS_HOLD_ERROR_MS);
+  assert.equal(core.getHostStatusHoldMs('boom'), core.HOST_STATUS_HOLD_INFO_MS);
+  assert.ok(core.HOST_STATUS_HOLD_INFO_MS < core.HOST_STATUS_HOLD_WARN_MS, '警告要比信息留得久');
+  assert.ok(core.HOST_STATUS_HOLD_WARN_MS < core.HOST_STATUS_HOLD_ERROR_MS, '错误要留得最久，用户需要读完失败原因');
+});
+
+test('状态行优先级：宿主失败消息覆盖播放状态，超时后回落', () => {
+  const host = { message: '解析失败：主播未开播（状态：未开播）', level: 'error', receivedAt: 1000 };
+  const hold = core.getHostStatusHoldMs('error');
+
+  const fresh = core.resolveStatusLine(host, '播放中 · 稳定缓冲', 1000 + hold - 1);
+  assert.equal(fresh.text, '解析失败：主播未开播（状态：未开播）', '保留期内显示宿主消息');
+  assert.equal(fresh.level, 'error', '级别原样带给页面用于换色');
+  assert.equal(fresh.source, core.STATUS_LINE_SOURCES.HOST);
+  assert.equal(core.getHostStatusRemainingMs(host, 1000 + hold - 1), 1);
+
+  const expired = core.resolveStatusLine(host, '播放中 · 稳定缓冲', 1000 + hold);
+  assert.equal(expired.text, '播放中 · 稳定缓冲', '到期后回落显示页面自己的播放状态');
+  assert.equal(expired.level, 'info', '回落后的播放状态用主题蓝（info）');
+  assert.equal(expired.source, core.STATUS_LINE_SOURCES.PLAYBACK);
+  assert.equal(core.getHostStatusRemainingMs(host, 1000 + hold), 0);
+
+  const justArrived = core.resolveStatusLine(
+    { message: '已新增预设「测试」', level: 'info', receivedAt: 5000 },
+    '播放中 · 稳定缓冲',
+    5000);
+  assert.equal(justArrived.text, '已新增预设「测试」', '操作反馈同样覆盖播放状态');
+  assert.equal(justArrived.level, 'info', '信息级宿主消息仍用蓝色');
+});
+
+test('状态行优先级：没有宿主消息或消息非法时一律显示播放状态', () => {
+  assert.equal(core.resolveStatusLine(null, '未连接', 1000).text, '未连接');
+  assert.equal(core.resolveStatusLine(undefined, '未连接', 1000).source, core.STATUS_LINE_SOURCES.PLAYBACK);
+  assert.equal(core.resolveStatusLine({ message: '', level: 'error', receivedAt: 0 }, '未连接', 1).text, '未连接', '空文本不算宿主消息');
+  assert.equal(core.resolveStatusLine({ message: '   ', level: 'error', receivedAt: 0 }, '未连接', 1).text, '未连接', '纯空白文本不算宿主消息');
+  assert.equal(
+    core.resolveStatusLine({ message: '就绪', receivedAt: Number.NaN }, '未连接', 1).text,
+    '未连接',
+    '时间戳非法时不能把消息永久钉在状态行上');
+  assert.equal(core.resolveStatusLine({ message: '就绪' }, '未连接', 1).text, '未连接', '缺少时间戳同样按过期处理');
+  assert.equal(core.resolveStatusLine({ message: '就绪', level: 'boom', receivedAt: 0 }, '未连接', 1).level, 'info', '未知级别回落 info');
+  assert.equal(core.resolveStatusLine(null, undefined, 1000).text, '', '没有播放状态时给出空串而不是 undefined');
+});
+
+test('宿主状态消息不得占用顶部状态行，页面也不再有日志面板', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+
+  assert.equal(html.includes('INBOUND_MESSAGE_TYPES.HOST_STATUS'), true, '页面必须处理 host-status 消息');
+  assert.equal(html.includes('applyHostStatus'), true);
+  assert.equal(html.includes('data-level="warn"') && html.includes('data-level="error"'), true, '状态行按级别换色（警示 / 错误）');
+  assert.equal(html.includes('#statusLine[data-level="warn"]'), true);
+  assert.equal(html.includes('#statusLine[data-level="error"]'), true);
+
+  assert.equal(html.includes('显示日志<'), false, '「显示日志」按钮文案必须仍然不存在');
+  assert.equal(/<[^>]*id="[^"]*[Ll]og[^"]*"/.test(html), false, '日志面板 / 日志开关元素必须仍然不存在');
+  assert.equal(html.includes('modeHint'), false, '顶部状态行必须仍然不存在');
+  assert.equal(html.includes('id="statusLine"'), true, '画面下方的状态行仍是唯一状态显示位');
 });

@@ -361,7 +361,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         VerboseDiagnostics = options.Logging.VerboseDiagnostics;
         LogRetainDays = Clamp(options.Logging.RetainedFileCount, 1, 90, 5);
 
-        StatusMessage = "修改后点「保存」生效；点「取消」不会写入任何内容。";
+        // 底部提示初始为空：只有"保存失败 / 探测结果"这类需要用户知道的结论才出现，
+        // 常驻的"修改后点保存生效"属于界面说明，放在这里只会占位并和真正的失败提示混在一起。
+        StatusMessage = string.Empty;
     }
 
     /// <summary>

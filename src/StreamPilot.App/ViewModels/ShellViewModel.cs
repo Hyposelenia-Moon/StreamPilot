@@ -50,23 +50,49 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>页面日志消息类型（页面不再显示日志面板，日志统一进宿主日志）。</summary>
     private const string PlayerLogType = "log";
 
-    /// <summary>页面日志消息里的级别字段名。</summary>
-    private const string LogLevelFieldName = "level";
+    /// <summary>宿主状态消息类型（宿主 → 页面）：把状态提示推到画面下方的状态行。</summary>
+    private const string HostStatusType = "host-status";
 
-    /// <summary>页面日志级别：信息。</summary>
-    private const string LogLevelInfo = "info";
+    /// <summary>页面消息里的级别字段名（`log` 与 `host-status` 共用）。</summary>
+    private const string LevelFieldName = "level";
 
-    /// <summary>页面日志级别：警告。</summary>
-    private const string LogLevelWarn = "warn";
+    /// <summary>消息级别：信息（画面下方状态行用主题强调蓝）。</summary>
+    private const string LevelInfo = "info";
 
-    /// <summary>页面日志级别：错误。</summary>
-    private const string LogLevelError = "error";
+    /// <summary>消息级别：警告（画面下方状态行用警示色）。</summary>
+    private const string LevelWarn = "warn";
+
+    /// <summary>消息级别：错误（画面下方状态行用错误色）。</summary>
+    private const string LevelError = "error";
+
+    /*
+     * 状态级别判定标记。
+     *
+     * `StatusMessage` 的赋值点有几十处（解析、播放、录制、预设、设置），逐个手写级别既啰嗦又容易漏，
+     * 因此集中在 setter 下发时按文本标记推断，错误优先于警告；未命中的文本按信息级处理
+     * （宁可用低调的蓝色，也不要把普通操作反馈染成告警色）。
+     */
+
+    /// <summary>错误级状态标记：失败原因要用错误色，用户一眼就知道这次操作没有成功。</summary>
+    private static readonly string[] StatusErrorMarkers =
+    [
+        "解析失败", "失败", "错误", "找不到", "未找到", "拒绝", "无法", "不受支持", "没有可用", "没有可在",
+    ];
+
+    /// <summary>警告级状态标记：需要用户先做点什么，或者宿主已经放弃了自动重试。</summary>
+    private static readonly string[] StatusWarnMarkers =
+    [
+        "请先", "请点击", "尚未", "已停止自动重试", "不是合法",
+    ];
 
     /// <summary>页面请求宿主开始播放的消息类型。</summary>
     private const string PlayerRequestPlayType = "request-play";
 
     /// <summary>页面请求宿主在暂停与继续之间切换的消息类型。</summary>
     private const string PlayerTogglePauseType = "toggle-pause";
+
+    /// <summary>页面请求停止播放（销毁播放器、释放会话）的消息类型。</summary>
+    private const string PlayerRequestStopType = "request-stop";
 
     /// <summary>宿主下发消息里的暂停状态字段名。</summary>
     private const string PausedFieldName = "paused";
@@ -104,6 +130,22 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         ("totalVideoFrames", "totalVideoFrames"),
         ("extremeTargetMs", "extremeTargetMs"),
         ("reconnects", "reconnects"),
+        ("runawayChaseAttempts", "runawayChaseAttempts"),
+    ];
+
+    /// <summary>
+    /// 遥测里需要落盘的布尔字段（消息字段名 → 日志字段名）。
+    /// </summary>
+    /// <remarks>
+    /// `paused` 是媒体元素自身的状态，`pausedByUser` 才是页面的用户意图。
+    /// 真机实测的"缓冲失控"坏状态里两者不一致（元素停了、用户没点暂停），
+    /// 排查"画面 80 秒不前进却不重连"必须能在日志里直接区分这两个字段。
+    /// </remarks>
+    private static readonly (string Message, string Log)[] TelemetryBooleanFields =
+    [
+        ("paused", "paused"),
+        ("pausedByUser", "pausedByUser"),
+        ("elementPaused", "elementPaused"),
     ];
 
     /// <summary>自动识别平台失败时的提示（状态行使用）。</summary>
@@ -411,11 +453,17 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         }
     }
 
-    /// <summary>状态提示。</summary>
+    /// <summary>状态提示（同时下发给播放页，显示在画面下方的状态行）。</summary>
     public string StatusMessage
     {
         get => _statusMessage;
-        private set => SetField(ref _statusMessage, value);
+        private set
+        {
+            if (SetField(ref _statusMessage, value))
+            {
+                PublishStatusToPlayer(value);
+            }
+        }
     }
 
     /// <summary>当前直播间标题。</summary>
@@ -538,7 +586,8 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                     break;
 
                 case PlayerStatusType:
-                    StatusMessage = message.Length == 0 ? StatusMessage : message;
+                    // 页面自己的状态文案已经显示在它自己的状态行上，这里只更新宿主，不回推（避免状态行回声）。
+                    SetPlayerReportedStatus(message.Length == 0 ? StatusMessage : message);
                     AppendLog(message);
                     if (message.Contains("播放已开始", StringComparison.Ordinal) || root.TryGetProperty("firstFrameMs", out _))
                     {
@@ -603,6 +652,10 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
                 case PlayerTogglePauseType:
                     TogglePause();
+                    break;
+
+                case PlayerRequestStopType:
+                    StopPlaybackFromPlayer();
                     break;
 
                 default:
@@ -1116,6 +1169,24 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
+    /// 播放页点了「停止播放」：画面已由页面关闭，宿主负责释放本轮中继并回到"未播放"状态。
+    /// </summary>
+    /// <remarks>
+    /// 与「暂停播放」的区别：暂停保留会话、地址与中继，可原地继续；停止等同于结束本次观看，
+    /// 中继地址是宿主注册的，页面无权释放，所以必须由这里调用
+    /// <see cref="IPlaybackCoordinator.StopActive"/> 回收新旧两轮中继，否则它们会一直挂到进程退出。
+    /// </remarks>
+    private void StopPlaybackFromPlayer()
+    {
+        _playback.StopActive();
+        _activeSessionId = 0;
+        _isPlaybackPaused = false;
+        PlayerTelemetry = "-";
+        StatusMessage = "已停止播放（画面已关闭，中继已释放）。";
+        AppendLog(StatusMessage);
+    }
+
+    /// <summary>
     /// 播放页请求开始播放：走与用户点「开始播放」完全相同的路径，并统一上报异常。
     /// </summary>
     /// <returns>异步任务。</returns>
@@ -1174,9 +1245,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             return;
         }
 
-        string level = root.TryGetProperty(LogLevelFieldName, out JsonElement levelElement) && levelElement.ValueKind == JsonValueKind.String
-            ? levelElement.GetString() ?? LogLevelInfo
-            : LogLevelInfo;
+        string level = root.TryGetProperty(LevelFieldName, out JsonElement levelElement) && levelElement.ValueKind == JsonValueKind.String
+            ? levelElement.GetString() ?? LevelInfo
+            : LevelInfo;
         Dictionary<string, object?> fields = new(StringComparer.Ordinal)
         {
             ["source"] = "player-page",
@@ -1186,10 +1257,10 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
         switch (level)
         {
-            case LogLevelError:
+            case LevelError:
                 _logger.Error(_moduleName, "播放页日志。", fields);
                 break;
-            case LogLevelWarn:
+            case LevelWarn:
                 _logger.Warn(_moduleName, "播放页日志。", fields);
                 break;
             default:
@@ -1656,6 +1727,73 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         SendMessageRequested?.Invoke(this, json);
     }
 
+    /// <summary>
+    /// 记录由播放页上报的状态文案（`status` 消息）：只更新宿主自己的字段，不再回推给页面。
+    /// </summary>
+    /// <param name="message">状态文案。</param>
+    /// <remarks>
+    /// 页面上报的文案本来就显示在页面自己的状态行上；回推一次会让状态行出现回声，
+    /// 并把"播放中 · 稳定缓冲"这类页面状态推迟到宿主消息保留期结束之后才显示。
+    /// </remarks>
+    private void SetPlayerReportedStatus(string message) =>
+        SetField(ref _statusMessage, message, nameof(StatusMessage));
+
+    /// <summary>
+    /// 把状态提示推送到播放页的画面下方状态行。
+    /// </summary>
+    /// <param name="message">状态文本。</param>
+    /// <remarks>
+    /// 左栏「当前直播」卡片删除后，宿主的状态文字在窗口里已无显示位置，画面下方是它唯一的显示位。
+    /// 级别由 <see cref="ClassifyStatusLevel"/> 按文本推断；页面据此上色并按级别保留若干秒，
+    /// 超时后回落到页面自己的播放状态（规则见 docs/architecture/player-message-contract.md 第 1.9 节）。
+    /// </remarks>
+    private void PublishStatusToPlayer(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return;
+        }
+
+        SendToPlayer(new
+        {
+            type = HostStatusType,
+            message,
+            level = ClassifyStatusLevel(message),
+        });
+    }
+
+    /// <summary>
+    /// 把状态文本归类为状态行级别。
+    /// </summary>
+    /// <param name="message">状态文本。</param>
+    /// <returns><see cref="LevelError"/>、<see cref="LevelWarn"/> 或 <see cref="LevelInfo"/>。</returns>
+    private static string ClassifyStatusLevel(string message)
+    {
+        if (ContainsAnyMarker(message, StatusErrorMarkers))
+        {
+            return LevelError;
+        }
+
+        return ContainsAnyMarker(message, StatusWarnMarkers) ? LevelWarn : LevelInfo;
+    }
+
+    /// <summary>判断文本是否命中任一标记片段。</summary>
+    /// <param name="text">待判定文本。</param>
+    /// <param name="markers">标记片段集合。</param>
+    /// <returns>命中返回 true。</returns>
+    private static bool ContainsAnyMarker(string text, string[] markers)
+    {
+        foreach (string marker in markers)
+        {
+            if (text.Contains(marker, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static string ReadFlag(JsonElement root, string name)
     {
         if (root.TryGetProperty(name, out JsonElement element) && element.ValueKind is JsonValueKind.True or JsonValueKind.False)
@@ -1697,6 +1835,14 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             if (root.TryGetProperty(field, out JsonElement element) && element.ValueKind == JsonValueKind.Number)
             {
                 fields[name] = element.TryGetInt32(out int value) ? value : element.GetDouble();
+            }
+        }
+
+        foreach ((string field, string name) in TelemetryBooleanFields)
+        {
+            if (root.TryGetProperty(field, out JsonElement element) && element.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            {
+                fields[name] = element.GetBoolean();
             }
         }
 

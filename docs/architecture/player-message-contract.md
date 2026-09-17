@@ -80,7 +80,7 @@
 { "type": "target", "extremeTargetMs": 250 }
 ```
 
-**热切换追帧档位**（不重连、不重新探测）：页面把新档位写到当前运行对象上、刷新顶部提示，
+**热切换追帧档位**（不重连、不重新探测）：页面把新档位写到当前运行对象上、刷新画面下方的状态行，
 并立即向缓冲末端追一次；页面随后回一条 `status`（"追帧档位已切换为 250 ms"）。
 宿主在没有活动会话时只记住该值，下次 `play` 时生效。
 
@@ -91,7 +91,8 @@
 ```
 
 **宿主的「暂停播放」不再下发它**（改用 1.7 的 `pause`）：停止当前会话、销毁播放器、
-清空当前流地址、提示回到"等待直播源"。页面保留该处理只为兼容旧版宿主。
+清空当前流地址、提示回到"等待直播源"。页面保留该处理只为兼容旧版宿主；
+播放页自己的「停止播放」按钮走反方向的 2.x 节 `request-stop`。
 
 ### 1.4 `presets`（宿主主动下发）
 
@@ -135,6 +136,44 @@
 宿主要求播放页用本地桥接服务启动 mpv。播放页当前未内置该按钮（左栏「mpv 播放」直接走宿主），
 常量保留在 `INBOUND_MESSAGE_TYPES` 中供后续使用。
 
+### 1.9 `host-status`
+
+```json
+{ "type": "host-status", "message": "解析失败：主播未开播（状态：未开播）", "level": "error" }
+```
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `message` | ✅ | 宿主的状态文本（即 `ShellViewModel.StatusMessage`）；纯空白视为无效消息 |
+| `level` | ➖ | `info`（默认）/ `warn` / `error`；未知值页面按 `info` 处理 |
+
+**为什么需要这条消息**：左栏「当前直播」卡片删除后，宿主的所有状态文字（"解析失败：主播未开播"、
+"找不到这个直播间"、"平台拒绝了本次请求"、"已停止自动重试…"、"已停止播放"、"已新增预设…" 等）
+在窗口里已经没有显示位置，画面下方的 `#statusLine` 是它们唯一的显示位。
+
+宿主侧：`StatusMessage` 的 setter 统一调用 `PublishStatusToPlayer`，**所有** `StatusMessage` 赋值
+（解析、播放、录制、预设、设置）都会下发；级别由 `ClassifyStatusLevel` 按文本标记推断
+（错误标记如"解析失败/失败/找不到/拒绝/无法"优先于警告标记如"请先/尚未/已停止自动重试"，
+未命中的按 `info`）。
+唯一例外是播放页自己上报的 `status` 文案（第 2 节）：它本来就显示在页面自己的状态行上，
+宿主只更新自己的字段、不再回推（`SetPlayerReportedStatus`），否则状态行会出现回声。
+
+页面侧的状态行优先级（实现为纯函数 `core.resolveStatusLine`，被 `node --test` 覆盖）：
+
+1. 宿主消息仍在保留期内 → 显示宿主消息（`level` 原样用于换色，`info` 用主题强调蓝 `#2f6feb`，
+   `warn` 用警示色 `#b45309`，`error` 用错误色 `#c0392b`）；
+2. 宿主消息已过期或从未收到 → 显示页面自己的播放状态（"播放中 · 稳定缓冲"），级别固定为 `info`。
+
+保留时长按级别取值（`HOST_STATUS_HOLD_MS`）：`info` 6 s、`warn` 12 s、`error` 20 s。
+选择"宿主消息覆盖 + 超时回落"而不是"谁后到谁显示"的理由：
+宿主的失败/操作类消息是**用户这次操作的直接结果**（"为什么没播起来"），必须读到；
+而播放状态（延迟档位）是长期存在的背景信息，晚几秒显示没有损失。
+反过来若让播放状态覆盖宿主消息，"解析失败"会被紧随其后的"播放中"瞬间冲掉，用户永远看不到原因。
+信息级宿主消息（"已新增预设"）也覆盖显示，但保留时间最短，避免长期占住状态行。
+
+页面不看提示锁（居中 `#hint` 的锁定）就直接显示宿主消息：居中的提示与状态行说的是同一件事时
+读起来一致，且宿主消息更权威。
+
 ---
 
 ## 2. 页面 → 宿主
@@ -163,8 +202,8 @@
 | `candidate-active` | 开始连接某候选 | — |
 | `status` | 状态变化 | `firstFrameMs`、`mode`；暂停/继续时 `message` 为"已暂停播放"/"已继续播放" |
 | `log` | 页面诊断日志（页面不再显示日志面板） | `level`（`info`/`warn`/`error`）；宿主按级别落盘并追加到"最近事件" |
-| `telemetry` | 每 ≥10 s 一次 | `currentTime`、`bufferedAheadMs`、`readyState`、`networkState`、`paused`、`ended`、`playbackRate`、`secondsSinceProgress`、`droppedVideoFrames`、`totalVideoFrames`、`mode`、`extremeTargetMs`、`reconnects` |
-| `warning` | 可恢复问题（切换候选、重连） | `errorName`、`errorMessage`、`reconnectCount` |
+| `telemetry` | 每 ≥10 s 一次 | `currentTime`、`bufferedAheadMs`、`readyState`、`networkState`、`paused`、`pausedByUser`、`elementPaused`、`ended`、`playbackRate`、`secondsSinceProgress`、`droppedVideoFrames`、`totalVideoFrames`、`mode`、`extremeTargetMs`、`runawayChaseAttempts`、`reconnects` |
+| `warning` | 可恢复问题（切换候选、重连、缓冲失控追帧） | `errorName`、`errorMessage`、`reconnectCount`、`bufferedAheadMs`、`secondsSinceProgress`、`runawayChaseAttempts`、`chased` |
 | `error` | 终止性问题（含 HEVC 不受支持） | `errorMessage` |
 | `reconnecting` | 断流后重连 | `reconnectCount` |
 | `refresh-needed` | 所有候选不可用，请宿主重新解析 | — |
@@ -172,6 +211,12 @@
 | `target` | 用户在播放页底部改了追帧档位 | `extremeTargetMs`（150/200/250）；宿主只记住该值供下次播放沿用 |
 | `request-play` | 用户点了播放页底部的「开始播放」 | — ；宿主执行与「解析房间」相同的解析与下发流程 |
 | `toggle-pause` | 用户点了播放页底部的「暂停播放 / 继续播放」 | — ；宿主切换暂停状态并回下发 `pause` |
+| `request-stop` | 用户点了播放页底部的「停止播放」（销毁播放器、关闭画面） | — ；宿主调用 `IPlaybackCoordinator.StopActive()` 释放新旧两轮中继并把状态置为"未播放" |
+
+> `paused`（媒体元素自身状态）与 `pausedByUser`（页面记录的用户意图）必须分开看：
+> 真机实测"缓冲涨到 100 秒、`reconnects` 恒为 0"的坏状态里两者不一致
+> （元素停了、用户没点暂停）；`runawayChaseAttempts` 表示本次缓冲失控已自行处置（恢复播放 / 追帧）的次数，
+> 用于确认缓冲失控保护确实介入。详见 `docs/architecture/playback-strategy.md` 第 5.2 节。
 
 宿主对 `sessionId` 做**过期校验**：`sessionId` 与当前活动会话不一致时忽略该消息并记 Debug 日志
 （`Ignored message from stale playback session`）。
@@ -183,9 +228,12 @@
 页面与纯逻辑模块共用 `Web/player-core.js` 中的常量，禁止在页面里写字符串字面量：
 
 ```js
-core.INBOUND_MESSAGE_TYPES  // play / chase（页面内部追帧按钮使用）/ stop / target / pause / mpv
-core.OUTBOUND_MESSAGE_TYPES // ready / checking / probe-result / probe-rejected / ... / log / quality / request-play / toggle-pause
-core.LOG_LEVELS             // info / warn / error（`log` 消息的 level 字段）
+core.INBOUND_MESSAGE_TYPES  // play / chase（页面内部追帧按钮使用）/ stop / target / pause / mpv / host-status
+core.OUTBOUND_MESSAGE_TYPES // ready / checking / probe-result / probe-rejected / ... / log / quality / request-play / toggle-pause / request-stop
+core.LOG_LEVELS             // info / warn / error（`log` 与 `host-status` 的 level 字段共用同一套级别）
+core.STATUS_IDLE_TEXT       // 未连接（页面初始化与停止播放后的状态行文案）
+core.HOST_STATUS_HOLD_MS    // host-status 按级别在状态行上的保留时长（info 6s / warn 12s / error 20s）
+core.resolveStatusLine      // 状态行显示判定（宿主消息优先，超时回落播放状态）
 ```
 
 宿主侧的对应常量集中在 `ShellViewModel` 的私有 `const string` 字段中。
@@ -195,6 +243,10 @@ core.LOG_LEVELS             // info / warn / error（`log` 消息的 level 字�
 ## 4. 兼容性与演进
 
 - 新增字段必须**向后兼容**：页面忽略未知字段，宿主忽略未知 `type`（记 Warn 日志）。
+- `host-status`（1.9 节）是纯新增：旧版播放页把它当未知 `type` 记 Warn 日志并忽略，
+  旧版宿主不下发它时页面继续显示自己的播放状态（回落路径），两端都不会出错。
+- 页面上的 `status` 是状态行的**回落内容**：宿主不把它回推成 `host-status`（见 1.9 节），
+  避免同一句话在状态行里显示两遍。
 - 删除或改名 `type` 属于破坏性变更，必须同时更新本文件、`player.html`、`ShellViewModel` 与前端测试。
 - 宿主**不再下发** `chase`（追帧入口只在播放页底部，页面自己触发）；`INBOUND_MESSAGE_TYPES.CHASE`
   由页面内部的「追帧」按钮使用，因此常量必须保留。

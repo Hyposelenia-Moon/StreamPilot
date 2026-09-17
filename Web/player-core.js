@@ -76,6 +76,42 @@ const EXTREME_STALL_THRESHOLD_STARVED_MS = 4000;
 /** 极限档的硬卡顿阈值（毫秒）。 */
 const EXTREME_STALL_THRESHOLD_IDLE_MS = 6500;
 
+/*
+ * 缓冲失控保护（"数据一直到达、缓冲一直增长、画面一直不前进"）。
+ *
+ * 阈值依据（真机遥测，B站 814）：健康会话里追帧器把延迟压在 0.2–0.5 s
+ * （bufferedAheadMs 实测 179–473），而失控会话里 bufferedAheadMs 从 81.9 s 涨到 111.9 s。
+ * 取 **8 s** 作为"异常"下限的理由：
+ *  - 它是极限档目标延迟（0.25 s）的 32 倍，也是稳定档追帧上限（`STABLE_LATENCY_MAX_SECONDS = 1.25 s`）的 6 倍以上，
+ *    正常播放（哪怕是网络剧烈抖动）不可能停在 8 s 上不动；
+ *  - 8 s 的缓冲全部丢弃的代价只是几百毫秒的重复画面，比"画面停住 80 秒"小得多；
+ *  - 阈值低于它时就该走原有的分模式卡顿阈值（4 s / 6.5 s / 6 s / 9 s），不要提前打扰正常追帧。
+ */
+
+/** 缓冲失控：本地缓冲剩余超过该秒数即视为异常。 */
+const BUFFER_RUNAWAY_AHEAD_SECONDS = 8;
+
+/** 缓冲失控：画面停滞达到该毫秒数才判定（健康会话的停滞以毫秒计）。 */
+const BUFFER_RUNAWAY_SILENCE_MS = 2000;
+
+/** 缓冲失控时自行处置（恢复播放 / 追帧）后的等待时长（毫秒）：seek 生效需要时间，期间不重复处置也不升级。 */
+const BUFFER_RUNAWAY_CHASE_GRACE_MS = 4000;
+
+/** 缓冲失控时自行追帧的次数上限；用尽后交给既有重连 / 切候选。 */
+const BUFFER_RUNAWAY_MAX_CHASE_ATTEMPTS = 2;
+
+/** 缓冲失控的处置动作。 */
+const RUNAWAY_ACTIONS = Object.freeze({
+  /** 未失控，无需处置。 */
+  NONE: 'none',
+  /** 媒体元素被"非用户原因"暂停：先恢复播放。 */
+  RESUME: 'resume',
+  /** 缓冲可用：先追帧到缓冲末端。 */
+  CHASE: 'chase',
+  /** 自行处置用尽：交给既有重连 / 切候选。 */
+  RECONNECT: 'reconnect',
+});
+
 /** 手动追帧保留的缓冲下限（秒）。 */
 const CHASE_KEEP_MIN_SECONDS = 0.02;
 
@@ -157,14 +193,42 @@ const EMPTY_HINT_ACTION = '点下方「开始播放」即可观看';
 /** 自动播放被浏览器策略拦截时的提示（需要用户先与页面交互一次）。 */
 const AUTOPLAY_BLOCKED_HINT = '浏览器暂时拦住了自动播放，点一下画面即可开始播放。';
 
-/** 模式提示：没有活动会话。 */
-const MODE_HINT_IDLE = '等待直播源';
-
-/** 模式提示：已选中候选但首帧还没出来。 */
-const MODE_HINT_CONNECTING = '连接中';
-
-/** 模式提示：画面已经在播。 */
+/** 播放状态文案：画面已经在播（底部状态行与 `status` 上报共用）。 */
 const MODE_HINT_PLAYING = '播放中';
+
+/** 未连接时的状态行文案（页面初始化与停止播放后使用）。 */
+const STATUS_IDLE_TEXT = '未连接';
+
+/*
+ * 宿主状态消息（`host-status`）在画面下方状态行上的保留时长。
+ *
+ * 为什么需要"保留"：状态行同时要显示页面自己的播放状态（"播放中 · 稳定缓冲"），
+ * 而宿主的失败原因（"解析失败：主播未开播"）更需要用户读到。规则是
+ * "宿主消息覆盖显示，超时后回落播放状态"；级别越高保留越久——错误原因需要阅读时间，
+ * 而操作反馈（"已新增预设"）看到即可。
+ */
+
+/** 宿主信息类状态（操作反馈）的保留时长（毫秒）。 */
+const HOST_STATUS_HOLD_INFO_MS = 6000;
+
+/** 宿主警告类状态的保留时长（毫秒）。 */
+const HOST_STATUS_HOLD_WARN_MS = 12000;
+
+/** 宿主错误类状态的保留时长（毫秒）。 */
+const HOST_STATUS_HOLD_ERROR_MS = 20000;
+
+/** 级别 → 状态行保留时长（毫秒）；未列出的级别按信息类处理。 */
+const HOST_STATUS_HOLD_MS = Object.freeze({
+  info: HOST_STATUS_HOLD_INFO_MS,
+  warn: HOST_STATUS_HOLD_WARN_MS,
+  error: HOST_STATUS_HOLD_ERROR_MS,
+});
+
+/** 状态行内容的来源：宿主状态消息或页面自己的播放状态。 */
+const STATUS_LINE_SOURCES = Object.freeze({
+  HOST: 'host',
+  PLAYBACK: 'playback',
+});
 
 /** 页面消息类型：宿主 → 页面。 */
 const INBOUND_MESSAGE_TYPES = Object.freeze({
@@ -173,6 +237,8 @@ const INBOUND_MESSAGE_TYPES = Object.freeze({
   TARGET: 'target',
   PAUSE: 'pause',
   MPV: 'mpv',
+  /** 宿主状态文案：左栏「当前直播」卡片删除后，宿主的状态文字只在画面下方状态行显示。 */
+  HOST_STATUS: 'host-status',
   /** 兼容保留：旧宿主仍可能下发 stop（语义等同"结束会话"）。 */
   STOP: 'stop',
 });
@@ -196,6 +262,8 @@ const OUTBOUND_MESSAGE_TYPES = Object.freeze({
   QUALITY: 'quality',
   REQUEST_PLAY: 'request-play',
   TOGGLE_PAUSE: 'toggle-pause',
+  /** 页面请求停止播放：销毁播放器、释放会话与地址，宿主据此回收中继。 */
+  REQUEST_STOP: 'request-stop',
   /** 页面日志：页面本身不再显示日志面板，所有诊断文本只进宿主日志。 */
   LOG: 'log',
 });
@@ -354,17 +422,22 @@ function getStallThresholdMs(looksStarved, extreme) {
 
 /**
  * 判断当前是否应当按"画面停滞"触发重连。
- * @param {{paused?:boolean}} video 视频元素状态快照。
+ *
+ * **不要**用媒体元素自身的 `paused` 当"用户暂停"的门闩：元素被非用户原因暂停
+ * （播放器重建时 `destroyPlayer` 会先 `pause()`、内核也可能暂停元素）时，
+ * 用它做门闩会让恢复分支永久失效——真机实测正是"缓冲涨到 100 秒、`reconnects` 恒为 0"。
+ * 只有页面自己记录的"用户点了暂停"才是权威的用户意图。
  * @param {number} silenceMs 画面进度停止前进的时长（毫秒）。
  * @param {boolean} starved 是否处于缓冲饥饿。
  * @param {number} resumedAt 最近一次手动恢复播放的时间戳（毫秒，0 表示没有）。
  * @param {number} now 当前时间戳（毫秒）。
  * @param {boolean} extreme 是否极限追帧模式。
+ * @param {boolean} pausedByUser 用户是否主动暂停。
  * @returns {boolean} 应当重连返回 true。
  */
-function isPlaybackStalled(video, silenceMs, starved, resumedAt, now, extreme) {
+function isPlaybackStalled(silenceMs, starved, resumedAt, now, extreme, pausedByUser) {
   // 用户手动暂停时画面本来就不前进，这不是卡顿。
-  if (video && video.paused) {
+  if (pausedByUser) {
     return false;
   }
 
@@ -374,6 +447,59 @@ function isPlaybackStalled(video, silenceMs, starved, resumedAt, now, extreme) {
   }
 
   return Number(silenceMs) >= getStallThresholdMs(starved, extreme);
+}
+
+/**
+ * 判断本地缓冲是否"失控"：缓冲远大于目标延迟，而画面已经不再前进。
+ * @param {number|null} bufferedAheadSeconds 本地缓冲剩余秒数（见 {@link getLocalBufferSeconds}）。
+ * @param {number} silenceMs 画面停滞时长（毫秒）。
+ * @param {boolean} pausedByUser 用户是否主动暂停（暂停时缓冲增长属于预期，不处置）。
+ * @returns {boolean} 失控返回 true。
+ */
+function isBufferRunaway(bufferedAheadSeconds, silenceMs, pausedByUser) {
+  if (pausedByUser) {
+    return false;
+  }
+
+  const ahead = Number(bufferedAheadSeconds);
+  if (bufferedAheadSeconds === null || !Number.isFinite(ahead)) {
+    return false;
+  }
+
+  return ahead > BUFFER_RUNAWAY_AHEAD_SECONDS && Number(silenceMs) >= BUFFER_RUNAWAY_SILENCE_MS;
+}
+
+/**
+ * 决定缓冲失控时先做哪一步。
+ *
+ * 顺序：元素被"非用户原因"暂停 → 先恢复播放（否则任何追帧都不会被消费）；
+ * 否则 → 追帧到缓冲末端；自行处置用尽或刚处置完还在生效期内 → 交给既有重连 / 切候选。
+ * @param {number|null} bufferedAheadSeconds 本地缓冲剩余秒数。
+ * @param {number} silenceMs 画面停滞时长（毫秒）。
+ * @param {boolean} pausedByUser 用户是否主动暂停。
+ * @param {boolean} elementPaused 媒体元素自身的 `paused`（只用于判断"是否需要恢复播放"，不当作暂停意图）。
+ * @param {number} chaseAttempts 本次失控已经自行处置的次数。
+ * @param {number} sinceHandledMs 距上一次自行处置的毫秒数（未处置过传 `Number.POSITIVE_INFINITY`）。
+ * @returns {string} {@link RUNAWAY_ACTIONS} 之一。
+ */
+function decideBufferRunawayAction(bufferedAheadSeconds, silenceMs, pausedByUser, elementPaused, chaseAttempts, sinceHandledMs) {
+  if (!isBufferRunaway(bufferedAheadSeconds, silenceMs, pausedByUser)) {
+    return RUNAWAY_ACTIONS.NONE;
+  }
+
+  const attempts = Number(chaseAttempts);
+  const waited = Number(sinceHandledMs);
+
+  // 刚追过帧：等它生效（seek 在大缓冲上需要数百毫秒到数秒），期间不重复处置也不升级。
+  if (Number.isFinite(waited) && waited < BUFFER_RUNAWAY_CHASE_GRACE_MS) {
+    return RUNAWAY_ACTIONS.NONE;
+  }
+
+  if (!Number.isFinite(attempts) || attempts >= BUFFER_RUNAWAY_MAX_CHASE_ATTEMPTS) {
+    return RUNAWAY_ACTIONS.RECONNECT;
+  }
+
+  return elementPaused ? RUNAWAY_ACTIONS.RESUME : RUNAWAY_ACTIONS.CHASE;
 }
 
 /**
@@ -500,28 +626,79 @@ function isAutoplayBlocked(error) {
 }
 
 /**
- * 顶部模式提示文案：只包含档位与播放状态。
- *
- * 候选主机名（CDN 节点）不在这里出现：它对观看没有意义，
- * 用户会把它读成"页面在报一个地址"。
- * @param {{mode?:string,extremeTargetMs?:number,playbackStarted?:boolean,currentCandidate?:object}} run 运行对象。
- * @returns {string} 中文提示。
- */
-function formatModeHint(run) {
-  if (!run || !run.currentCandidate) {
-    return MODE_HINT_IDLE;
-  }
-
-  return modeLabel(run) + ' · ' + (run.playbackStarted ? MODE_HINT_PLAYING : MODE_HINT_CONNECTING);
-}
-
-/**
- * 底部状态行在播放开始后的文案（同样不含候选主机名）。
+ * 底部状态行在播放开始后的文案（不显示候选主机名与 CDN 节点）。
  * @param {{mode?:string,extremeTargetMs?:number}} run 运行对象。
  * @returns {string} 中文状态。
  */
 function formatPlaybackStatusText(run) {
   return MODE_HINT_PLAYING + ' · ' + modeLabel(run);
+}
+
+/**
+ * 归一化宿主状态消息的级别。
+ * @param {*} level 宿主下发的 level 字段。
+ * @returns {string} `info` / `warn` / `error`；未知或缺失一律回落 `info`。
+ */
+function normalizeStatusLevel(level) {
+  const text = String(level || '').toLowerCase();
+  return Object.prototype.hasOwnProperty.call(HOST_STATUS_HOLD_MS, text) ? text : LOG_LEVELS.INFO;
+}
+
+/**
+ * 读取宿主状态消息按级别对应的状态行保留时长。
+ * @param {*} level 状态级别。
+ * @returns {number} 保留毫秒数。
+ */
+function getHostStatusHoldMs(level) {
+  return HOST_STATUS_HOLD_MS[normalizeStatusLevel(level)];
+}
+
+/**
+ * 计算宿主状态消息在状态行上还剩多少显示时间。
+ * @param {{message?:string,level?:string,receivedAt?:number}|null} hostStatus 最近的宿主状态消息。
+ * @param {number} now 当前时间戳（毫秒）。
+ * @returns {number} 剩余毫秒数；没有有效消息或已过期返回 0。
+ */
+function getHostStatusRemainingMs(hostStatus, now) {
+  if (!hostStatus || typeof hostStatus.message !== 'string' || hostStatus.message.trim().length === 0) {
+    return 0;
+  }
+
+  const receivedAt = Number(hostStatus.receivedAt);
+  if (!Number.isFinite(receivedAt)) {
+    return 0;
+  }
+
+  return Math.max(0, receivedAt + getHostStatusHoldMs(hostStatus.level) - Number(now));
+}
+
+/**
+ * 计算状态行当前应显示的内容。
+ *
+ * 优先级规则（状态行唯一的显示判定入口，便于测试）：
+ *  1. 宿主消息仍在保留期内 → 显示宿主消息，级别用宿主给的（warn/error 换成警示色）；
+ *  2. 宿主消息已过期或从未收到 → 显示页面自己的播放状态，级别固定为 `info`（蓝色）。
+ * 这样"解析失败：主播未开播"不会被随后的"播放中 · 稳定缓冲"盖掉（失败原因更重要），
+ * 也不会永久占住状态行（用户回到画面时仍能看到直播延迟档位）。
+ * @param {{message?:string,level?:string,receivedAt?:number}|null} hostStatus 最近的宿主状态消息。
+ * @param {string} playbackText 页面自己的播放状态文案。
+ * @param {number} now 当前时间戳（毫秒）。
+ * @returns {{text:string,level:string,source:string}} 显示文本、级别与来源（{@link STATUS_LINE_SOURCES}）。
+ */
+function resolveStatusLine(hostStatus, playbackText, now) {
+  if (getHostStatusRemainingMs(hostStatus, now) > 0) {
+    return {
+      text: hostStatus.message,
+      level: normalizeStatusLevel(hostStatus.level),
+      source: STATUS_LINE_SOURCES.HOST,
+    };
+  }
+
+  return {
+    text: String(playbackText || ''),
+    level: LOG_LEVELS.INFO,
+    source: STATUS_LINE_SOURCES.PLAYBACK,
+  };
 }
 
 /**
@@ -746,6 +923,11 @@ const StreamPilotPlayerCore = {
   CHASE_KEEP_DEFAULT_SECONDS,
   PLAY_RESTORE_TOLERANCE_SECONDS,
   RESUME_GRACE_MS,
+  BUFFER_RUNAWAY_AHEAD_SECONDS,
+  BUFFER_RUNAWAY_SILENCE_MS,
+  BUFFER_RUNAWAY_CHASE_GRACE_MS,
+  BUFFER_RUNAWAY_MAX_CHASE_ATTEMPTS,
+  RUNAWAY_ACTIONS,
   VOLUME_PERCENT_SCALE,
   MIN_VOLUME_PERCENT,
   MAX_VOLUME_PERCENT,
@@ -753,9 +935,13 @@ const StreamPilotPlayerCore = {
   EMPTY_HINT_TITLE,
   EMPTY_HINT_ACTION,
   AUTOPLAY_BLOCKED_HINT,
-  MODE_HINT_IDLE,
-  MODE_HINT_CONNECTING,
   MODE_HINT_PLAYING,
+  STATUS_IDLE_TEXT,
+  HOST_STATUS_HOLD_INFO_MS,
+  HOST_STATUS_HOLD_WARN_MS,
+  HOST_STATUS_HOLD_ERROR_MS,
+  HOST_STATUS_HOLD_MS,
+  STATUS_LINE_SOURCES,
   INBOUND_MESSAGE_TYPES,
   OUTBOUND_MESSAGE_TYPES,
   normalizeExtremeTargetSeconds,
@@ -766,6 +952,8 @@ const StreamPilotPlayerCore = {
   getReconnectDelayMs,
   getStallThresholdMs,
   isPlaybackStalled,
+  isBufferRunaway,
+  decideBufferRunawayAction,
   computeChaseTargetSeconds,
   hasProgressed,
   getLocalBufferSeconds,
@@ -777,8 +965,11 @@ const StreamPilotPlayerCore = {
   volumePercentToGain,
   shouldMuteAtVolume,
   isAutoplayBlocked,
-  formatModeHint,
   formatPlaybackStatusText,
+  normalizeStatusLevel,
+  getHostStatusHoldMs,
+  getHostStatusRemainingMs,
+  resolveStatusLine,
   shouldHideHint,
   buildPlaybackPlan,
   normalizeQualities,

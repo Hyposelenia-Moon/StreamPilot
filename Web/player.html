@@ -63,7 +63,6 @@
     @media (forced-colors: active) {
       html,
       body,
-      header,
       footer,
       #stage,
       #controls,
@@ -89,25 +88,6 @@
       display: flex;
       flex-direction: column;
       height: 100vh;
-    }
-
-    header {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 10px;
-      background: #ffffff;
-      border-bottom: 1px solid #e2e5ea;
-      flex: 0 0 auto;
-    }
-
-    #modeHint {
-      flex: 1 1 auto;
-      min-width: 0;
-      color: #5b6472;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
     }
 
     button,
@@ -209,11 +189,21 @@
       border-color: #1b4fd8;
     }
 
+    /*
+      播放控制三键比其余控件小一号：它们是高频点击项，但画面下方的横向空间有限，
+      缩小后（并排的）开始 / 暂停 / 停止 不会把这一行挤成两排。
+    */
     #playBtn,
-    #pauseBtn {
-      padding: 10px 18px;
-      font-size: 15px;
-      border-radius: 8px;
+    #pauseBtn,
+    #stopBtn {
+      padding: 6px 12px;
+      font-size: 13px;
+      border-radius: 6px;
+    }
+
+    #stopBtn {
+      /* 停止会关闭画面，用危险色与"暂停"区分开 */
+      color: #c0392b;
     }
 
     #fsBtn {
@@ -344,12 +334,22 @@
       color: #6b7280;
     }
 
+    /* 状态行用主题强调色（WPF 侧 AccentBrush = #2f6feb），不再是灰字：状态要一眼能看见 */
     #statusLine {
       padding: 0 10px 6px;
-      color: #6b7280;
+      color: #2f6feb;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+
+    /* 宿主状态按级别换色：警告 / 错误要与"一切正常"的蓝色区分开（与 #hint 用同一组颜色） */
+    #statusLine[data-level="warn"] {
+      color: #b45309;
+    }
+
+    #statusLine[data-level="error"] {
+      color: #c0392b;
     }
 
     #volumeLabel {
@@ -363,12 +363,11 @@
 <body>
   <div id="root">
     <!--
-      播放页集中承载观看与播放控制：开始播放、追帧、追帧档位、暂停/继续、画质、全屏、音量。
+      播放页集中承载观看与播放控制：开始播放、暂停/继续、停止播放、追帧、追帧档位、画质、全屏、音量。
+      页面顶部不再有状态行：状态只在画面下方的 #statusLine 里说一次，避免同一句话出现两处。
+      #statusLine 同时是宿主状态文字的显示位（host-status 消息）：
+      宿主消息优先、按级别换色并保留若干秒，之后回落显示页面自己的播放状态。
     -->
-    <header>
-      <span id="modeHint" class="hintText">等待直播源</span>
-    </header>
-
     <div id="stage">
       <!--
         与参考播放页一致默认静音：首帧到达前 video 仍会输出已缓冲的音频，
@@ -391,8 +390,9 @@
           <span class="qualityLabel">追帧档位</span>
           <select id="targetSelect"></select>
         </label>
-        <button type="button" id="pauseBtn">暂停播放</button>
         <button type="button" id="playBtn" title="播放左侧已解析的直播间">开始播放</button>
+        <button type="button" id="pauseBtn">暂停播放</button>
+        <button type="button" id="stopBtn" title="结束播放会话并关闭画面（与「暂停」不同）">停止播放</button>
         <label id="qualityBox" for="qualitySelect">
           <span class="qualityLabel">画质</span>
           <select id="qualitySelect"></select>
@@ -414,6 +414,9 @@
       /** HTTP 错误状态码区间：4xx/5xx 视为"线路明确拒绝"，直接丢弃不再尝试。 */
       const HTTP_ERROR_STATUS_MIN = 400;
       const HTTP_ERROR_STATUS_MAX = 600;
+
+      /** 宿主状态消息到期后回落刷新的定时余量（毫秒）：略晚于到期点，避免边界上重复刷新。 */
+      const STATUS_FALLBACK_MARGIN_MS = 50;
 
       /** 宿主消息通道：WebView2 的 chrome.webview。外部浏览器打开时为空。 */
       const hostChannel = (function createHostChannel() {
@@ -440,7 +443,6 @@
         volume: document.getElementById('volume'),
         volumeLabel: document.getElementById('volumeLabel'),
         volDisplay: document.getElementById('volDisplay'),
-        modeHint: document.getElementById('modeHint'),
         fsBtn: document.getElementById('fsBtn'),
         qualityBox: document.getElementById('qualityBox'),
         qualitySelect: document.getElementById('qualitySelect'),
@@ -448,6 +450,7 @@
         targetSelect: document.getElementById('targetSelect'),
         playBtn: document.getElementById('playBtn'),
         pauseBtn: document.getElementById('pauseBtn'),
+        stopBtn: document.getElementById('stopBtn'),
         chaseBtn: document.getElementById('chaseBtn'),
         stage: document.getElementById('stage'),
       };
@@ -466,6 +469,12 @@
         autoplayBlocked: false,
         autoplayStartedAt: 0,
         hintLockUntil: 0,
+        /** 最近的宿主状态消息（{message, level, receivedAt}）；画面下方状态行的最高优先级来源。 */
+        hostStatus: null,
+        /** 页面自己的播放状态文案：宿主消息过期后回落到它。 */
+        playbackText: core.STATUS_IDLE_TEXT,
+        /** "宿主状态消息到期 → 回落播放状态"的定时器句柄。 */
+        statusFallbackTimer: null,
         eventSequence: 0,
         telemetryTimer: null,
         refreshRequested: false,
@@ -569,18 +578,74 @@
         state.hintLockUntil = Date.now() + (lockMs || 0);
       }
 
-      /** 设置状态行（受提示锁保护）。 */
+      /**
+       * 刷新画面下方的状态行：宿主消息优先，过期后回落显示页面自己的播放状态。
+       *
+       * 显示判定全部交给纯函数 `core.resolveStatusLine`（被前端用例覆盖），
+       * 这里只负责写 DOM 与安排回落定时器。
+       */
+      function renderStatusLine() {
+        const resolved = core.resolveStatusLine(state.hostStatus, state.playbackText, Date.now());
+        elements.status.textContent = resolved.text;
+        elements.status.dataset.level = resolved.level;
+        scheduleStatusFallback();
+      }
+
+      /** 安排一次"宿主状态消息到期 → 回落播放状态"的刷新。 */
+      function scheduleStatusFallback() {
+        if (state.statusFallbackTimer !== null) {
+          window.clearTimeout(state.statusFallbackTimer);
+          state.statusFallbackTimer = null;
+        }
+
+        const remaining = core.getHostStatusRemainingMs(state.hostStatus, Date.now());
+        if (remaining <= 0) {
+          return;
+        }
+
+        state.statusFallbackTimer = window.setTimeout(function onStatusFallback() {
+          state.statusFallbackTimer = null;
+          renderStatusLine();
+        }, remaining + STATUS_FALLBACK_MARGIN_MS);
+      }
+
+      /**
+       * 记录页面自己的播放状态文案（受提示锁保护）。
+       *
+       * 宿主消息仍在保留期内时它不会立刻显示——由 `renderStatusLine` 按优先级决定，
+       * 这样宿主的失败原因不会被随后的"播放中"盖掉。
+       * @param {string} message 状态文案。
+       */
       function setStatus(message) {
         if (Date.now() < state.hintLockUntil) {
           return;
         }
 
-        elements.status.textContent = message;
+        state.playbackText = message;
+        renderStatusLine();
       }
 
-      /** 更新顶部模式提示（档位 + 播放状态；候选主机名不上界面）。 */
-      function updateModeHint() {
-        elements.modeHint.textContent = core.formatModeHint(state.run);
+      /**
+       * 显示宿主下发的状态文案。
+       *
+       * 左栏「当前直播」卡片删除后，宿主的状态文字（解析失败原因、操作反馈…）在窗口里
+       * 已经没有显示位置，画面下方就是它唯一的显示位。
+       * 这里刻意**不看提示锁**：宿主的失败/操作类消息比页面自己的状态更需要被看到，
+       * 且与居中的提示说的是同一件事时读起来一致。
+       * @param {object} payload `host-status` 消息（message 必填，level 可选）。
+       */
+      function applyHostStatus(payload) {
+        const message = typeof payload.message === 'string' ? payload.message.trim() : '';
+        if (message.length === 0) {
+          return;
+        }
+
+        state.hostStatus = {
+          message: message,
+          level: core.normalizeStatusLevel(payload.level),
+          receivedAt: Date.now(),
+        };
+        renderStatusLine();
       }
 
       /** 销毁当前播放器并释放资源。 */
@@ -877,7 +942,6 @@
         state.currentStreamUrl = candidate.url;
         state.currentReferer = candidate.referer || '';
         state.pausedByUser = false;
-        updateModeHint();
         updatePauseButton();
         report(outbound.CANDIDATE_ACTIVE, '正在连接 ' + candidate.host, run, candidate);
 
@@ -1005,9 +1069,11 @@
         run.lastPlaybackPosition = elements.video.currentTime;
         run.lastPlaybackProgressAt = Date.now();
         run.currentCandidateStartedAt = Date.now();
+        // 新播放器刚起播：上一次会话的缓冲失控处置计数不能带过来。
+        run.runawayChaseAttempts = 0;
+        run.runawayHandledAt = 0;
         const firstFrameMs = Math.round(performance.now() - startedAt);
         elements.hint.classList.add('hidden');
-        updateModeHint();
         updatePauseButton();
         setStatus(core.formatPlaybackStatusText(run));
         logToHost(core.LOG_LEVELS.INFO, '首帧 ' + firstFrameMs + ' ms（' + candidate.host + '）');
@@ -1088,8 +1154,10 @@
               此时重连等于固定间隔地重建连接，画面必然一顿一顿。
               只有画面确实不再前进或缓冲已空时才按断流处理；
               用户按了暂停时画面本来就不前进，这种"下载结束"属于预期，直接忽略。
+              这里必须读页面的 pausedByUser：run 上没有这个字段（曾经读 run.pausedByUser，
+              于是这道"用户暂停"的保护从未生效过）。
             */
-            if (run.pausedByUser) {
+            if (state.pausedByUser) {
               logToHost(core.LOG_LEVELS.INFO, '用户暂停期间的 LOADING_COMPLETE 不按断流处理');
               return;
             }
@@ -1140,7 +1208,6 @@
         stopRun(run);
         destroyPlayer();
         state.currentStreamUrl = '';
-        updateModeHint();
         setHintLocked(message, 'error', 20000);
       }
 
@@ -1158,6 +1225,11 @@
 
         run.queue.shift();
         if (run.queue.length === 0) {
+          /*
+            这里必须先解除"正在切换"：`requestFreshSources` 之后没有起播路径会再复位它，
+            留着 true 会让 `switching` 永久锁住（此后任何恢复分支都被它挡住）。
+          */
+          run.switching = false;
           requestFreshSources(run, '所有候选线路均不可用');
           return;
         }
@@ -1169,7 +1241,11 @@
 
       /** 断流后的重连（每个候选最多两次）。 */
       function recoverAfterInterruption(run, candidate, reason) {
-        if (!isActive(run) || run.recovering || run.switching) {
+        /*
+          重入保护只看真正会被设置的标志位：`switching`（正在切候选）与 `reconnecting`（已排定一次重连）。
+          过去这里还看一个从未被赋值过的 `run.recovering`（恒为 false），它给了"有重入保护"的错觉。
+        */
+        if (!isActive(run) || run.reconnecting || run.switching) {
           return;
         }
 
@@ -1226,9 +1302,74 @@
         run.refreshRequested = true;
         destroyPlayer();
         state.currentStreamUrl = '';
-        updateModeHint();
         setHintLocked('播放失败：所有线路都连不上（可能未开播、地区受限或网络问题）。\n正在请主程序重新解析…\n' + reason, 'error', 10000);
         report(outbound.REFRESH_NEEDED, reason, run, run.currentCandidate);
+      }
+
+      /**
+       * 缓冲失控自救：数据一直在到达、缓冲一直在增长、画面却不再前进。
+       *
+       * 为什么要单独做这件事（真机实测 B站 814：bufferedAheadMs 81.9→111.9 秒、画面 82→112 秒没前进、
+       * reconnects 恒为 0）：画面停住时若没有人 seek，缓冲会按网络速率无上限增长，而两条既有追帧路径都进不去——
+       * mpegts.js 的延迟追帧器只在元素**未暂停**时生效（`liveBufferLatencyChasingOnPaused` 默认关闭），
+       * 且直播流（`isLive: true`）在 mpegts.js 里**不做下载节流**，所以数据会一直堆；
+       * 页面的手动追帧又只在用户点按钮 / 换档位 / 继续播放时触发。
+       * 处置顺序由 `core.decideBufferRunawayAction` 决定：先恢复播放、再追帧，自行处置用尽后交给既有重连 / 切候选。
+       * @param {object} run 运行对象。
+       * @param {HTMLVideoElement} video 视频元素。
+       * @param {number|null} localBuffer 本地缓冲剩余秒数。
+       * @param {number} silenceMs 画面停滞时长（毫秒）。
+       */
+      function handleBufferRunaway(run, video, localBuffer, silenceMs) {
+        const aheadMs = Math.round((Number(localBuffer) || 0) * 1000);
+        const aheadSeconds = Math.round(aheadMs / 1000);
+        const stalledSeconds = Math.round(silenceMs / 1000);
+        const now = Date.now();
+        const sinceHandledMs = run.runawayHandledAt > 0 ? now - run.runawayHandledAt : Number.POSITIVE_INFINITY;
+        const action = core.decideBufferRunawayAction(
+          localBuffer,
+          silenceMs,
+          state.pausedByUser,
+          video.paused,
+          run.runawayChaseAttempts,
+          sinceHandledMs);
+
+        if (action === core.RUNAWAY_ACTIONS.RECONNECT) {
+          logToHost(core.LOG_LEVELS.WARN, '缓冲失控：' + aheadSeconds + ' 秒缓冲未被消耗且追帧无效，按断流处理');
+          report(outbound.WARNING, '缓冲失控且追帧无效，改为重连', run, run.currentCandidate, {
+            bufferedAheadMs: aheadMs,
+            secondsSinceProgress: stalledSeconds,
+            runawayChaseAttempts: run.runawayChaseAttempts,
+          });
+          run.runawayChaseAttempts = 0;
+          run.runawayHandledAt = 0;
+          recoverAfterInterruption(run, run.currentCandidate, '缓冲失控（' + aheadSeconds + ' 秒缓冲未被消耗）');
+          return;
+        }
+
+        run.runawayChaseAttempts += 1;
+        run.runawayHandledAt = now;
+        if (action === core.RUNAWAY_ACTIONS.RESUME) {
+          /*
+            元素被"非用户原因"暂停（用户没点暂停）：先把播放意图恢复回来，
+            否则任何追帧都不会被消费（mpegts.js 的追帧器也会因 paused 而完全跳过）。
+          */
+          logToHost(core.LOG_LEVELS.WARN, '画面被暂停但用户没有点过暂停，已恢复播放');
+          video.play().catch(function onResumeFailed(error) {
+            logToHost(core.LOG_LEVELS.WARN, '恢复播放失败：' + (error && error.message ? error.message : error));
+          });
+        }
+
+        const chased = chaseToLiveEdge(core.CHASE_KEEP_DEFAULT_SECONDS);
+        logToHost(core.LOG_LEVELS.WARN, '缓冲失控：' + aheadSeconds + ' 秒缓冲未被消耗（画面停滞 '
+          + stalledSeconds + ' 秒），已追帧到直播边缘（第 ' + run.runawayChaseAttempts + ' 次，追帧'
+          + (chased ? '成功' : '失败') + '）');
+        report(outbound.WARNING, '缓冲失控追帧', run, run.currentCandidate, {
+          bufferedAheadMs: aheadMs,
+          secondsSinceProgress: stalledSeconds,
+          runawayChaseAttempts: run.runawayChaseAttempts,
+          chased: chased,
+        });
       }
 
       /** 启动遥测与卡顿检测。 */
@@ -1246,6 +1387,9 @@
           if (core.hasProgressed(video.currentTime, run.lastPlaybackPosition)) {
             run.lastPlaybackPosition = video.currentTime;
             run.lastPlaybackProgressAt = Date.now();
+            // 画面重新前进：这一次的缓冲失控已经结束，处置计数归零。
+            run.runawayChaseAttempts = 0;
+            run.runawayHandledAt = 0;
           }
 
           const silenceMs = Date.now() - run.lastPlaybackProgressAt;
@@ -1258,10 +1402,17 @@
             抖动时该做的是按本模式的阈值尽快重连（见 core.isPlaybackStalled），
             而不是替用户改设置——参考播放页同样只做重连、不改档位。
           */
-          if (run.playbackStarted && !run.switching && !run.reconnecting
-            && core.isPlaybackStalled(video, silenceMs, starved, state.resumedAt, Date.now(), run.extreme)) {
-            recoverAfterInterruption(run, run.currentCandidate, '画面进度超过 ' + Math.round(silenceMs / 1000) + ' 秒未前进');
-            return;
+          if (run.playbackStarted && !run.switching && !run.reconnecting) {
+            // 缓冲远大于目标延迟却不再前进：先自救（恢复播放 / 追帧），无效才走重连。
+            if (core.isBufferRunaway(localBuffer, silenceMs, state.pausedByUser)) {
+              handleBufferRunaway(run, video, localBuffer, silenceMs);
+              return;
+            }
+
+            if (core.isPlaybackStalled(silenceMs, starved, state.resumedAt, Date.now(), run.extreme, state.pausedByUser)) {
+              recoverAfterInterruption(run, run.currentCandidate, '画面进度超过 ' + Math.round(silenceMs / 1000) + ' 秒未前进');
+              return;
+            }
           }
 
           const now = Date.now();
@@ -1278,6 +1429,13 @@
               readyState: video.readyState,
               networkState: video.networkState,
               paused: video.paused,
+              /*
+                paused 是"元素"的状态，pausedByUser 才是"用户意图"。
+                实测坏状态里两者不一致（元素停了、用户没点暂停），故障排查必须能区分，
+                因此把它俩与缓冲失控处置次数一起上报。
+              */
+              pausedByUser: state.pausedByUser,
+              elementPaused: video.paused,
               ended: video.ended,
               playbackRate: video.playbackRate,
               secondsSinceProgress: Math.round(silenceMs / 1000),
@@ -1285,13 +1443,18 @@
               totalVideoFrames: quality ? quality.totalVideoFrames : null,
               mode: run.mode,
               extremeTargetMs: run.extremeTargetMs,
+              runawayChaseAttempts: run.runawayChaseAttempts,
               reconnects: run.reconnectsBySource.get(run.currentCandidate ? run.currentCandidate.sourceIndex : -1) || 0,
             });
           }
         }, core.TELEMETRY_INTERVAL_MS);
       }
 
-      /** 立刻跳到直播最新位置。 */
+      /**
+       * 立刻跳到直播最新位置（缓冲末端前 keepSeconds 秒）。
+       * @param {number} keepSeconds 保留的缓冲秒数。
+       * @returns {boolean} 缓冲可用并已跳到目标位置（或已在目标位置）返回 true。
+       */
       function chaseToLiveEdge(keepSeconds) {
         const video = elements.video;
         const ranges = video.buffered;
@@ -1301,8 +1464,16 @@
 
         const last = ranges.length - 1;
         const target = core.computeChaseTargetSeconds(ranges.start(last), ranges.end(last), keepSeconds);
-        if (Number.isFinite(target) && Math.abs(video.currentTime - target) > 0.01) {
+        if (!Number.isFinite(target) || Math.abs(video.currentTime - target) <= 0.01) {
+          return true;
+        }
+
+        try {
           video.currentTime = target;
+        } catch (error) {
+          // 缓冲异常大时 seek 目标可能落在 seekable 之外：这里只记录失败，由调用方决定是否升级为重连。
+          logToHost(core.LOG_LEVELS.WARN, '追帧失败：' + (error && error.message ? error.message : error));
+          return false;
         }
 
         return true;
@@ -1375,7 +1546,6 @@
           controllers: new Set(),
           stopped: false,
           switching: false,
-          recovering: false,
           reconnecting: false,
           playbackStarted: false,
           everPlayed: false,
@@ -1388,6 +1558,10 @@
           lastPlaybackPosition: 0,
           lastPlaybackProgressAt: Date.now(),
           lastTelemetryReportedAt: 0,
+          /** 本次缓冲失控里已经自行处置（恢复播放 / 追帧）的次数。 */
+          runawayChaseAttempts: 0,
+          /** 上一次缓冲失控自行处置的时间戳（0 表示还没处置过）。 */
+          runawayHandledAt: 0,
         };
 
         state.roomTitle = typeof payload.title === 'string' ? payload.title : '';
@@ -1443,7 +1617,6 @@
         const paused = state.pausedByUser;
         elements.pauseBtn.textContent = paused ? '继续播放' : '暂停播放';
         elements.pauseBtn.title = paused ? '从当前位置继续播放' : '暂停但不结束会话（地址与缓冲保留）';
-        updateModeHint();
       }
 
       /**
@@ -1484,6 +1657,8 @@
         if (run) {
           run.lastPlaybackProgressAt = state.resumedAt;
           run.lastPlaybackPosition = elements.video.currentTime;
+          run.runawayChaseAttempts = 0;
+          run.runawayHandledAt = 0;
         }
 
         const buffered = core.getLocalBufferSeconds(elements.video.buffered, elements.video.currentTime);
@@ -1543,6 +1718,26 @@
         }
       }
 
+      /**
+       * 用户点了「停止播放」：结束会话、销毁播放器、把画面关掉，并请宿主回收中继。
+       *
+       * 与「暂停播放」的区别：暂停只 `video.pause()`（保留播放器、地址与缓冲，可原地继续），
+       * 停止则释放整套会话——画面回到空态，宿主释放中继，下次观看要点「开始播放」重新解析下发。
+       * 必须上报宿主：中继地址由宿主注册，不通知它就会一直挂着没人回收。
+       */
+      function requestStopFromHost() {
+        const run = state.run;
+        if (!run && !state.pausedByUser) {
+          logToHost(core.LOG_LEVELS.WARN, '当前没有正在播放的会话，停止请求已忽略');
+          return;
+        }
+
+        report(outbound.REQUEST_STOP, '用户点了「停止播放」', run, run ? run.currentCandidate : null);
+        handleStop();
+        setStatus('已停止播放（画面已关闭）');
+        logToHost(core.LOG_LEVELS.INFO, '已停止播放并销毁播放器，画面已关闭');
+      }
+
       /** 处理宿主下发的 chase 消息。 */
       function handleChase(payload) {
         const keep = payload && payload.keepSeconds;
@@ -1568,9 +1763,8 @@
         state.pausedByUser = false;
         state.resumedAt = 0;
         updatePauseButton();
-        updateModeHint();
         showEmptyState();
-        setStatus('未连接');
+        setStatus(core.STATUS_IDLE_TEXT);
       }
 
       /** 更新音量：界面与视频元素用同一份夹取后的百分比；有声音时同时记住它供"点画面切换静音"使用。 */
@@ -1662,7 +1856,6 @@
 
         document.addEventListener('fullscreenchange', function onFullscreenChange() {
           const fullscreen = Boolean(document.fullscreenElement);
-          updateModeHint();
           /*
             提示的可见性只由"是否已经在播"决定：过去这里在退出全屏时无条件取消隐藏，
             于是被藏起来的空态文案（等待直播源）又盖回画面，看起来像直播源丢了。
@@ -1714,7 +1907,6 @@
           }
 
           applyPlayerTargetConfig(run);
-          updateModeHint();
           if (chaseToLiveEdge(core.CHASE_KEEP_DEFAULT_SECONDS)) {
             report(outbound.STATUS, '追帧档位已切换为 ' + run.extremeTargetMs + ' ms', run, run.currentCandidate);
           }
@@ -1731,6 +1923,10 @@
 
         elements.playBtn.addEventListener('click', function onPlayClick() {
           requestPlayFromHost(false);
+        });
+
+        elements.stopBtn.addEventListener('click', function onStopClick() {
+          requestStopFromHost();
         });
       }
 
@@ -1782,7 +1978,6 @@
 
         applyPlayerTargetConfig(run);
         syncTargetSelect();
-        updateModeHint();
         if (chaseToLiveEdge(core.CHASE_KEEP_DEFAULT_SECONDS)) {
           report(outbound.STATUS, '追帧档位已切换为 ' + run.extremeTargetMs + ' ms', run, run.currentCandidate);
         }
@@ -1811,6 +2006,9 @@
           case core.INBOUND_MESSAGE_TYPES.PAUSE:
             togglePausePlayback(typeof payload.paused === 'boolean' ? payload.paused : undefined);
             break;
+          case core.INBOUND_MESSAGE_TYPES.HOST_STATUS:
+            applyHostStatus(payload);
+            break;
           default:
             if (payload.type === 'volume') {
               applyVolume(payload.value);
@@ -1830,7 +2028,7 @@
       applyVolume(core.INITIAL_VOLUME_PERCENT);
       updatePauseButton();
       showEmptyState();
-      updateModeHint();
+      renderStatusLine();
 
       if (hostChannel) {
         hostChannel.onMessage(handleHostMessage);

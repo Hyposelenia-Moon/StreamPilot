@@ -43,7 +43,7 @@
           </Grid>
         </Border>
 
-        <!-- 单页控制面板：预设 → 直播源 → 状态 → 录制（播放控制入口只在画面下方） -->
+        <!-- 单页控制面板：预设 → 直播源 → 录制（播放状态与遥测只在画面下方的状态行显示，左栏不再重复） -->
         <ScrollViewer Grid.Row="1" x:Name="ControlTabs" VerticalScrollBarVisibility="Auto" Padding="14,12,14,18">
           <StackPanel>
             <!-- ===== 预设 ===== -->
@@ -175,26 +175,6 @@
                           ToolTip="支持房间号或直播间链接；粘贴链接时按域名自动识别平台" />
                   <Button Content="mpv 播放" Command="{Binding MpvCommand}" Margin="0" />
                 </StackPanel>
-              </StackPanel>
-            </Border>
-
-            <!-- ===== 状态 ===== -->
-            <TextBlock Text="当前直播" Style="{StaticResource SectionTitle}" Margin="0,14,0,4" />
-            <Border Style="{StaticResource CardPanel}">
-              <StackPanel>
-                <StackPanel Orientation="Horizontal">
-                  <TextBlock Text="直播状态：" />
-                  <TextBlock Text="{Binding LiveStatus}" FontWeight="SemiBold" />
-                </StackPanel>
-                <TextBlock Text="{Binding RoomAnchor, StringFormat=主播：{0}}" TextWrapping="Wrap" Margin="0,2,0,0" />
-                <TextBlock Text="{Binding RoomTitle, StringFormat=标题：{0}}" TextWrapping="Wrap" Margin="0,2,0,0" />
-                <TextBlock Text="{Binding RoomCategory, StringFormat=分区：{0}}" TextWrapping="Wrap" Margin="0,2,0,0" />
-                <TextBlock Text="{Binding StatusMessage, StringFormat=状态：{0}}" TextWrapping="Wrap" Margin="0,2,0,0"
-                           Foreground="{StaticResource AccentBrush}" />
-                <TextBlock Text="{Binding PlayerTelemetry}" Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,2,0,0" />
-                <TextBlock Text="{Binding BridgeStatus}" Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,2,0,0" />
-                <!-- 线路只报数量，不暴露任何 CDN 主机名与完整地址 -->
-                <TextBlock Text="{Binding CandidateLineSummary}" Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,6,0,0" />
               </StackPanel>
             </Border>
 

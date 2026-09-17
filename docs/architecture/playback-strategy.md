@@ -57,6 +57,12 @@
 - **延迟追帧器**：在 MSE `updateend` 时，若 `bufferEnd - currentTime > liveBufferLatencyMaxLatency`，硬跳到 `bufferEnd - liveBufferLatencyMinRemain`；
 - **延迟同步器**：在 `timeupdate` 时，若延迟 > `liveSyncMaxLatency`，把 `playbackRate` 提升到 `min(2, max(1, liveSyncPlaybackRate))`；延迟降到 ≤ `liveSyncTargetLatency` 时恢复为 `1`（中间频段不干预）。
 
+> **库内追帧器的两个前提**（决定了"缓冲涨到 80 秒也不追"）：
+> ① `_chaseLiveLatency` 带 `liveBufferLatencyChasingOnPaused || !paused` 判断且该配置默认关闭，
+> 元素被暂停时它完全不工作；
+> ② 库内的下载节流（`notifyBufferedPositionChanged`）只对 `!isLive` 生效，直播流不会被节流，
+> 因此"元素不消费"会让缓冲按网络速率一直涨。两者都由播放页的缓冲失控保护兜底（见 5.2）。
+
 同时设置 `video.muted = true` 与 `preservesPitch = true`（保持音调，避免倍速追帧变声）。
 
 ## 3. hls.js 配置（HLS 兜底链路）
@@ -120,8 +126,9 @@
 | 卡顿判定 | 播放进度（`currentTime` 前进 > 15 ms）停止 |
 | 卡顿阈值（极限档，饥饿 / 硬卡） | `4000 ms` / `6500 ms` |
 | 卡顿阈值（稳定档，饥饿 / 硬卡） | `6000 ms` / `9000 ms` |
-| 手动暂停期间 | 不判卡顿（`isPlaybackStalled` 先看 `video.paused`） |
+| 手动暂停期间 | 不判卡顿（`isPlaybackStalled` 只看页面记录的 `pausedByUser`，**不**看 `video.paused`） |
 | 刚点「继续播放」后 | `RESUME_GRACE_MS = 4000 ms` 内不判卡顿（播放器正在重建缓冲） |
+| 缓冲失控（缓冲 > 8 s 且画面停滞 ≥ 2 s） | 先恢复播放 / 追帧，自行处置 2 次无效才重连（见 5.2） |
 | 遥测上报间隔 | ≥ `10000 ms` |
 | 遥测/卡顿轮询间隔 | `500 ms` |
 
@@ -144,7 +151,53 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
 播放页底部的「暂停播放」只是 `video.pause()`：**不销毁播放器、不释放中继、不清空地址**，
 因此继续播放时不需要重新解析或重新探测。`paused: false` 时若本地缓冲已超过
 `PLAY_RESTORE_TOLERANCE_SECONDS = 3` 秒，先追帧到缓冲末端再 `play()`，避免落后越积越多。
-暂停/继续的入口只有播放页底部一处（宿主只通过 `pause` 消息同步状态）。
+暂停/继续/停止的入口只有播放页底部一处（宿主只通过 `pause` 消息同步状态）。
+
+「停止播放」是另一回事：销毁播放器、清空地址、画面回到空态，并回 `request-stop` 让宿主
+调用 `IPlaybackCoordinator.StopActive()` 释放新旧两轮中继（中继由宿主注册，页面无权释放）。
+
+## 5.2 缓冲失控保护（画面停住 + 缓冲一直涨）
+
+**真机证据**（B站 814，发布版连续播放）：正常样本 `bufferedAheadMs` 179–473 ms、`secondsSinceProgress = 0`；
+坏状态连续 4 条遥测为 `81896 → 91859 → 101992 → 111891` ms，`secondsSinceProgress` 同步为 `82 → 92 → 102 → 112`，
+`droppedVideoFrames` 冻结在 1198，`reconnects` **恒为 0**。
+注意 `bufferedAheadMs / 1000 ≈ secondsSinceProgress`：数据一直按实时速率到达（每秒约 1 秒媒体），
+而播放位置一动不动。
+
+**根因**：不是 mpegts.js 停止消费，也不只是探测量取错，而是"元素自己没有前进"，
+并且**两道保险都以元素自身的 `paused` 为门闩**：
+
+1. 旧 `isPlaybackStalled` 第一条就是 `if (video.paused) return false`：元素被非用户原因暂停
+   （播放器重建时 `destroyPlayer` 先 `pause()`、内核暂停元素）后，卡顿重连分支永久失效——
+   遥测仍在跑，所以 `reconnects` 一直是 0，看起来"什么都没触发"；
+2. mpegts.js 的延迟追帧器 `_chaseLiveLatency` 只在 `_onMSEUpdateEnd` 触发，
+   且条件里带 `liveBufferLatencyChasingOnPaused || !paused`；该配置默认为 `false`，
+   本项目也未开启，因此元素暂停时它**完全不追帧**；
+3. mpegts.js 的下载节流（`notifyBufferedPositionChanged`）对直播流不生效
+   （实现里是 `!this._config.isLive && ...`），于是"元素不消费 + 不追帧"下缓冲按网络速率无上限增长；
+4. 页面自己的追帧只在用户点按钮 / 换档位 / 继续播放时触发，**没有任何按缓冲大小自动触发的路径**——
+   这就是"缓冲到 80 秒反而不再追"的原因。
+
+**处置**（`core.isBufferRunaway` / `core.decideBufferRunawayAction`，纯函数、被单测覆盖）：
+
+| 常量 | 取值 | 理由 |
+|------|------|------|
+| `BUFFER_RUNAWAY_AHEAD_SECONDS` | `8` s | 极限档目标 0.25 s 的 32 倍、稳定档追帧上限 1.25 s 的 6 倍以上，正常播放不可能停在这里；整段丢弃的代价只有几百毫秒重复画面 |
+| `BUFFER_RUNAWAY_SILENCE_MS` | `2000` ms | 健康会话的停滞以毫秒计 |
+| `BUFFER_RUNAWAY_CHASE_GRACE_MS` | `4000` ms | seek 在大缓冲上需要时间生效，宽限期内不重复处置也不升级 |
+| `BUFFER_RUNAWAY_MAX_CHASE_ATTEMPTS` | `2` | 追帧两次仍无效说明不是"落后"而是坏流，交给重连 / 切候选 |
+
+动作顺序：`NONE`（未失控 / 用户暂停）→ `RESUME`（元素被非用户原因暂停：先 `play()`）→
+`CHASE`（seek 到缓冲末端前 `CHASE_KEEP_DEFAULT_SECONDS = 0.08` 秒）→ `RECONNECT`（既有重连退避，用尽后切候选）。
+
+**真机可验证判据**：
+
+1. 坏状态复现时，新日志里应出现 `缓冲失控：N 秒缓冲未被消耗（画面停滞 M 秒），已追帧到直播边缘（第 1 次，追帧成功）`；
+2. 追帧有效：下一条 `播放遥测` 的 `bufferedAheadMs` 回到 1 s 以内且 `secondsSinceProgress` 归零；
+3. 追帧无效：8–12 秒内出现 `缓冲失控：N 秒缓冲未被消耗且追帧无效，按断流处理`
+   与 `warning` 消息 `缓冲失控且追帧无效，改为重连`，且随后 `播放遥测` 的 `reconnects` 开始增长（不再是 0）；
+4. 遥测新增 `pausedByUser` / `elementPaused`：若坏状态下 `paused = true` 而 `pausedByUser = false`，
+   即确认"元素被非用户原因暂停"这一根因；`runawayChaseAttempts` 用于确认保护确实介入过。
 
 ## 6. 相对参考实现修正的缺陷
 
@@ -161,14 +214,18 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
    （原因见文首与第 4 节），队列顺序仍以宿主为准。
 5. **`LOADING_COMPLETE` 无条件重连**：参考实现把它当断流；本项目只在画面真的停住或缓冲为空时重连。
 6. **单候选也探测**：参考实现早期版本对单候选同样探测；本项目跳过（其自身修复版亦如此）。
+7. **"元素暂停"吃掉恢复分支**：旧的 `isPlaybackStalled` 用 `video.paused` 当"用户暂停"的门闩，
+   元素被非用户原因暂停后卡顿重连永久失效（真机表现为"缓冲 82→112 秒、`reconnects` 恒为 0"）；
+   现在只认页面记录的 `pausedByUser`，并新增缓冲失控保护（见 5.2）。
 
 ## 7. 测试覆盖
 
 `node --test tests/web/player-core.test.js` 覆盖：
 档位归一化、HLS 候选识别、候选规范化与去重、三档 mpegts 参数、hls.js 参数、重连退避序列、
-分模式卡顿阈值（含"用户暂停不判卡顿"与恢复宽限期）、探测开关、`LOADING_COMPLETE` 重连条件、
-手动追帧夹取、进度判定与缓冲计算、播放计划过滤、错误归类、首帧超时选择、
-画质下拉规范化（档位键回落与码率标签）、消息契约（含 `log` 与页面侧请求消息）。
+分模式卡顿阈值（含"用户暂停不判卡顿"与恢复宽限期）、缓冲失控阈值与处置顺序（含宽限期与用尽后交回重连）、
+探测开关、`LOADING_COMPLETE` 重连条件、手动追帧夹取、进度判定与缓冲计算、播放计划过滤、错误归类、首帧超时选择、
+画质下拉规范化（档位键回落与码率标签）、消息契约（含 `log`、页面侧请求消息与 `request-stop`）、
+播放页静态结构（顶部提示已彻底移除、播放控制三键顺序为 开始 → 暂停/继续 → 停止）。
 
 ## 8. 画质档位切换
 
@@ -190,8 +247,9 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
   同时页面自己热改播放器配置并立即追帧（`configure(buildMpegtsConfig(...))`）；
 - 宿主也可下发同名 `target` 消息要求页面切换（`docs/architecture/player-message-contract.md` 第 1.2.1 节）；
 - 没有活动会话时只保存档位，下次 `play` 时生效；
-- 页面顶部提示必须显示**实际档位**：`modeLabel` 同时接受 `extremeTargetMs` 与
-  `extremeTargetSeconds`，避免字段缺失时静默回落成默认值（曾表现为"选了 250 仍显示 200"）。
+- 状态文案只在画面下方的状态行显示（页面顶部不再有提示行）：`modeLabel` 同时接受
+  `extremeTargetMs` 与 `extremeTargetSeconds`，避免字段缺失时静默回落成默认值
+  （曾表现为"选了 250 仍显示 200"）。
 
 ## 10. 桥接中继的稳定性约束
 
