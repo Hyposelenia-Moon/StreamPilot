@@ -1,0 +1,1254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>StreamPilot 播放器</title>
+  <!--
+    StreamPilot 自研播放页。
+    第三方库（Apache-2.0，随包分发，见 THIRD-PARTY-NOTICES.md）：
+      mpegts.js 1.8.2  HTTP-FLV / MSE 低延迟播放
+      hls.js 1.6.16    HLS 播放
+    纯逻辑实现位于 player-core.js（同一份代码也被 node --test 覆盖）。
+  -->
+  <script src="./mpegts.js"></script>
+  <script src="./hls.js"></script>
+  <style>
+    :root {
+      --bg: #101216;
+      --panel: #16191f;
+      --border: #262b33;
+      --text: #e6e9ee;
+      --muted: #98a2b3;
+      --accent: #4c8dff;
+      --warn: #f0b429;
+      --error: #ef5350;
+      --ok: #3ddc84;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font: 13px/1.5 "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+      overflow: hidden;
+    }
+
+    #root {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      flex: 0 0 auto;
+    }
+
+    #presetBar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+
+    select,
+    button,
+    input[type="range"] {
+      font: inherit;
+      color: var(--text);
+      background: #1e232b;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 8px;
+    }
+
+    select {
+      max-width: 260px;
+      min-width: 0;
+    }
+
+    button {
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    button:hover:not(:disabled) {
+      border-color: var(--accent);
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+    }
+
+    button.active {
+      border-color: var(--accent);
+      background: #1b2836;
+    }
+
+    #modeGroup {
+      display: flex;
+      gap: 4px;
+      flex: 0 0 auto;
+    }
+
+    #modeGroup button {
+      padding: 4px 10px;
+    }
+
+    .spacer {
+      flex: 1 1 auto;
+    }
+
+    #stage {
+      position: relative;
+      flex: 1 1 auto;
+      background: #000;
+      min-height: 0;
+    }
+
+    video {
+      width: 100%;
+      height: 100%;
+      background: #000;
+      object-fit: contain;
+      position: relative;
+      z-index: 1;
+    }
+
+    #hint {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 2;
+      max-width: 82%;
+      padding: 14px 18px;
+      border-radius: 10px;
+      background: rgba(12, 14, 18, 0.82);
+      border: 1px solid var(--border);
+      text-align: center;
+      white-space: pre-wrap;
+      pointer-events: none;
+      color: var(--text);
+    }
+
+    #hint.empty {
+      font-size: 15px;
+      padding: 26px 34px;
+    }
+
+    #hint[data-level="warn"] {
+      border-color: var(--warn);
+    }
+
+    #hint[data-level="error"] {
+      border-color: var(--error);
+    }
+
+    #hint.hidden,
+    #volDisplay.hidden,
+    footer.hidden {
+      display: none;
+    }
+
+    #volDisplay {
+      position: absolute;
+      right: 16px;
+      top: 16px;
+      z-index: 2;
+      padding: 4px 10px;
+      border-radius: 6px;
+      background: rgba(12, 14, 18, 0.78);
+      border: 1px solid var(--border);
+    }
+
+    footer {
+      flex: 0 0 auto;
+      display: flex;
+      flex-direction: column;
+      border-top: 1px solid var(--border);
+      background: var(--panel);
+    }
+
+    #controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      flex-wrap: wrap;
+    }
+
+    #statusLine {
+      padding: 0 10px 6px;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    #logPanel {
+      max-height: 132px;
+      overflow-y: auto;
+      border-top: 1px solid var(--border);
+      padding: 6px 10px;
+      font-family: Consolas, "Cascadia Mono", monospace;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    #logPanel div {
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    #logPanel div[data-level="warn"] {
+      color: var(--warn);
+    }
+
+    #logPanel div[data-level="error"] {
+      color: var(--error);
+    }
+
+    #logPanel div[data-level="ok"] {
+      color: var(--ok);
+    }
+
+    #volumeLabel {
+      color: var(--muted);
+      min-width: 46px;
+      text-align: right;
+    }
+
+    #toggleLog {
+      margin-left: auto;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="root">
+    <header>
+      <div id="presetBar">
+        <span style="color: var(--muted)">预设</span>
+        <select id="presetSelect" title="从主界面保存的预设中快速加载直播间"></select>
+      </div>
+      <div id="modeGroup" title="极限追帧档位，数值越小延迟越低但越容易卡顿">
+        <button type="button" data-target="150">150 ms</button>
+        <button type="button" data-target="200">200 ms</button>
+        <button type="button" data-target="250">250 ms</button>
+      </div>
+      <span class="spacer"></span>
+      <button type="button" id="chaseBtn" title="立刻跳到直播最新位置">追帧</button>
+      <button type="button" id="mpvBtn" title="用本地 mpv 播放（支持超分 / HDR）">mpv 播放</button>
+      <button type="button" id="fsBtn" title="全屏">全屏</button>
+    </header>
+
+    <div id="stage">
+      <video id="video" playsinline muted></video>
+      <div id="hint" class="empty" data-level="info">等待直播源</div>
+      <div id="volDisplay" class="hidden">音量：0%</div>
+    </div>
+
+    <footer>
+      <div id="controls">
+        <span style="color: var(--muted)">音量</span>
+        <input id="volume" type="range" min="0" max="100" step="1" value="70" style="width: 140px" />
+        <span id="volumeLabel">70%</span>
+        <span class="spacer"></span>
+        <button type="button" id="toggleLog">隐藏日志</button>
+      </div>
+      <div id="statusLine">未连接</div>
+      <div id="logPanel"></div>
+    </footer>
+  </div>
+
+  <script src="./player-core.js"></script>
+  <script>
+    'use strict';
+
+    (function main() {
+      const core = window.StreamPilotPlayerCore;
+      const outbound = core.OUTBOUND_MESSAGE_TYPES;
+
+      /** 宿主消息通道：WebView2 的 chrome.webview。外部浏览器打开时为空。 */
+      const hostChannel = (function createHostChannel() {
+        if (window.chrome && window.chrome.webview) {
+          return {
+            post: function post(payload) {
+              window.chrome.webview.postMessage(payload);
+            },
+            onMessage: function onMessage(handler) {
+              window.chrome.webview.addEventListener('message', function onWebMessage(event) {
+                handler(event.data);
+              });
+            },
+          };
+        }
+
+        return null;
+      }());
+
+      const elements = {
+        video: document.getElementById('video'),
+        hint: document.getElementById('hint'),
+        status: document.getElementById('statusLine'),
+        log: document.getElementById('logPanel'),
+        volume: document.getElementById('volume'),
+        volumeLabel: document.getElementById('volumeLabel'),
+        volDisplay: document.getElementById('volDisplay'),
+        presetSelect: document.getElementById('presetSelect'),
+        mpvBtn: document.getElementById('mpvBtn'),
+        chaseBtn: document.getElementById('chaseBtn'),
+        fsBtn: document.getElementById('fsBtn'),
+        toggleLog: document.getElementById('toggleLog'),
+        modeButtons: Array.prototype.slice.call(document.querySelectorAll('#modeGroup button')),
+        stage: document.getElementById('stage'),
+      };
+
+      /** 页面状态。 */
+      const state = {
+        run: null,
+        ownedPlayer: null,
+        currentStreamUrl: '',
+        currentReferer: '',
+        bridgeBaseAddress: '',
+        roomTitle: '',
+        lastVolume: 70,
+        muteToggleVolume: 70,
+        hintLockUntil: 0,
+        eventSequence: 0,
+        probeControllers: [],
+        telemetryTimer: null,
+        refreshRequested: false,
+        overrideTargetMs: 0,
+        capabilities: { hevc: false, avc: false },
+      };
+
+      const hevcMseSupported = Boolean(window.MediaSource)
+        && (MediaSource.isTypeSupported('video/mp4; codecs="hvc1.1.6.L120.90"')
+          || MediaSource.isTypeSupported('video/mp4; codecs="hev1.1.6.L120.90"'));
+      const avcMseSupported = Boolean(window.MediaSource)
+        && MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E"')
+        && MediaSource.isTypeSupported('audio/mp4; codecs="mp4a.40.2"');
+      state.capabilities.hevc = hevcMseSupported;
+      state.capabilities.avc = avcMseSupported;
+
+      /** 判断候选能否在本页播放。 */
+      function canPlayFlv() {
+        return Boolean(window.mpegts && window.mpegts.isSupported());
+      }
+
+      function canPlayHls() {
+        return Boolean(window.Hls && window.Hls.isSupported());
+      }
+
+      /** 向宿主上报事件。 */
+      function report(type, message, run, candidate, extras) {
+        state.eventSequence += 1;
+        const payload = {
+          type: type,
+          message: String(message || ''),
+          eventSequence: state.eventSequence,
+          pageElapsedMs: Math.round(performance.now()),
+        };
+
+        if (run && Number.isSafeInteger(run.sessionId)) {
+          payload.sessionId = run.sessionId;
+        }
+
+        if (candidate && Number.isInteger(candidate.sourceIndex)) {
+          payload.sourceIndex = candidate.sourceIndex;
+        }
+
+        if (candidate && typeof candidate.urlFingerprint === 'string') {
+          payload.urlFingerprint = candidate.urlFingerprint;
+        }
+
+        if (extras) {
+          Object.assign(payload, extras);
+        }
+
+        if (hostChannel) {
+          hostChannel.post(payload);
+        }
+      }
+
+      /** 写日志面板。 */
+      function appendLog(level, text) {
+        const row = document.createElement('div');
+        row.dataset.level = level;
+        row.textContent = '[' + new Date().toLocaleTimeString('zh-CN', { hour12: false }) + '] ' + text;
+        elements.log.appendChild(row);
+        while (elements.log.childElementCount > 200) {
+          elements.log.removeChild(elements.log.firstChild);
+        }
+
+        elements.log.scrollTop = elements.log.scrollHeight;
+      }
+
+      /** 设置居中提示。 */
+      function setHint(message, level) {
+        elements.hint.textContent = message;
+        elements.hint.dataset.level = level || 'info';
+        elements.hint.classList.remove('empty');
+        elements.hint.classList.remove('hidden');
+      }
+
+      /** 设置提示并锁定指定时长（毫秒）。 */
+      function setHintLocked(message, level, lockMs) {
+        setHint(message, level);
+        state.hintLockUntil = Date.now() + (lockMs || 0);
+      }
+
+      /** 设置状态行（受提示锁保护）。 */
+      function setStatus(message) {
+        if (Date.now() < state.hintLockUntil) {
+          return;
+        }
+
+        elements.status.textContent = message;
+      }
+
+      /** 更新 mpv 按钮可用状态。 */
+      function updateMpvButton() {
+        const ready = state.currentStreamUrl.length > 0;
+        elements.mpvBtn.disabled = !ready;
+        elements.mpvBtn.classList.toggle('active', ready);
+      }
+
+      /** 销毁当前播放器并释放资源。 */
+      function destroyPlayer() {
+        if (state.telemetryTimer !== null) {
+          window.clearInterval(state.telemetryTimer);
+          state.telemetryTimer = null;
+        }
+
+        abortProbes();
+
+        const player = state.ownedPlayer;
+        state.ownedPlayer = null;
+        if (!player) {
+          return;
+        }
+
+        try {
+          player.pause();
+        } catch (error) {
+          appendLog('warn', '暂停播放器失败：' + error.message);
+        }
+
+        try {
+          if (typeof player.unload === 'function') {
+            player.unload();
+          }
+
+          if (typeof player.detachMediaElement === 'function') {
+            player.detachMediaElement();
+          }
+
+          if (typeof player.destroy === 'function') {
+            player.destroy();
+          }
+        } catch (error) {
+          appendLog('warn', '释放播放器失败：' + error.message);
+        }
+
+        try {
+          elements.video.pause();
+          elements.video.removeAttribute('src');
+          elements.video.load();
+        } catch (error) {
+          appendLog('warn', '重置视频元素失败：' + error.message);
+        }
+
+        elements.video.playbackRate = 1;
+      }
+
+      /** 取消所有进行中的候选探测。 */
+      function abortProbes() {
+        for (const controller of state.probeControllers) {
+          try {
+            controller.abort();
+          } catch (error) {
+            appendLog('warn', '取消探测失败：' + error.message);
+          }
+        }
+
+        state.probeControllers = [];
+      }
+
+      /** 带超时的 Promise 包装。 */
+      function awaitWithTimeout(promise, timeoutMs, timeoutMessage, onTimeout) {
+        let timer = null;
+        const timeout = new Promise(function rejectAfterTimeout(resolve, reject) {
+          timer = window.setTimeout(function onTimeoutElapsed() {
+            const error = new Error(timeoutMessage);
+            error.name = 'TimeoutError';
+            if (typeof onTimeout === 'function') {
+              onTimeout();
+            }
+
+            reject(error);
+          }, timeoutMs);
+        });
+
+        return Promise.race([promise, timeout]).finally(function clearTimer() {
+          if (timer !== null) {
+            window.clearTimeout(timer);
+          }
+        });
+      }
+
+      /** 判断 run 是否仍然有效（防止过期会话污染当前状态）。 */
+      function isActive(run) {
+        return Boolean(run) && state.run === run && !run.stopped;
+      }
+
+      /** 并行探测所有候选，按"已知可用优先、延迟升序"重排队列。 */
+      async function buildCandidateQueue(run) {
+        report(outbound.CHECKING, '正在探测 ' + run.candidates.length + ' 个候选线路…', run);
+        const good = [];
+        const inconclusive = [];
+
+        await Promise.all(run.candidates.map(async function probe(candidate) {
+          const controller = new AbortController();
+          state.probeControllers.push(controller);
+          const startedAt = performance.now();
+          try {
+            const response = await awaitWithTimeout(
+              fetch(candidate.url, {
+                method: 'GET',
+                mode: 'cors',
+                cache: 'no-store',
+                credentials: 'omit',
+                referrerPolicy: 'no-referrer-when-downgrade',
+                signal: controller.signal,
+              }),
+              core.PROBE_TIMEOUT_MS,
+              '候选探测超时',
+              function abortOnTimeout() {
+                controller.abort();
+              });
+            const elapsedMs = Math.round(performance.now() - startedAt);
+            if (!isActive(run)) {
+              return;
+            }
+
+            if (response.status >= 200 && response.status < 300) {
+              good.push({ candidate: candidate, elapsedMs: elapsedMs });
+              report(outbound.PROBE_RESULT, candidate.host + ' 可用', run, candidate, {
+                outcome: 'good',
+                elapsedMs: elapsedMs,
+                statusCode: response.status,
+              });
+            } else if (response.status >= 400) {
+              report(outbound.PROBE_REJECTED, candidate.host + ' 拒绝（HTTP ' + response.status + '）', run, candidate, {
+                outcome: 'rejected',
+                elapsedMs: elapsedMs,
+                statusCode: response.status,
+              });
+            } else {
+              inconclusive.push(candidate);
+              report(outbound.PROBE_RESULT, candidate.host + ' 结果不确定（HTTP ' + response.status + '）', run, candidate, {
+                outcome: 'inconclusive',
+                elapsedMs: elapsedMs,
+                statusCode: response.status,
+              });
+            }
+          } catch (error) {
+            if (!isActive(run)) {
+              return;
+            }
+
+            if (error && error.name === 'TimeoutError') {
+              inconclusive.push(candidate);
+              report(outbound.PROBE_RESULT, candidate.host + ' 探测超时', run, candidate, { outcome: 'inconclusive' });
+            } else {
+              inconclusive.push(candidate);
+              report(outbound.PROBE_RESULT, candidate.host + ' 探测失败：' + (error && error.message), run, candidate, {
+                outcome: 'inconclusive',
+                errorName: error && error.name,
+                errorMessage: error && error.message,
+              });
+            }
+          }
+        }));
+
+        good.sort(function byLatency(left, right) {
+          return left.elapsedMs - right.elapsedMs;
+        });
+
+        const queue = good.map(function pick(entry) {
+          return entry.candidate;
+        }).concat(inconclusive);
+
+        report(outbound.CANDIDATE_QUEUE, '可用线路 ' + good.length + ' 个，待尝试 ' + queue.length + ' 个', run, null, {
+          sourceIndexes: queue.map(function index(item) {
+            return item.sourceIndex;
+          }),
+          knownGoodCount: good.length,
+          inconclusiveCount: inconclusive.length,
+        });
+
+        return queue;
+      }
+
+      /** 启动某个候选的播放。 */
+      async function startCandidate(run, candidate) {
+        if (!isActive(run)) {
+          return;
+        }
+
+        run.currentCandidate = candidate;
+        state.currentStreamUrl = candidate.url;
+        state.currentReferer = candidate.referer || '';
+        updateMpvButton();
+        report(outbound.CANDIDATE_ACTIVE, '正在连接 ' + candidate.host, run, candidate);
+
+        destroyPlayer();
+        if (!isActive(run)) {
+          return;
+        }
+
+        elements.video.muted = true;
+        if ('preservesPitch' in elements.video) {
+          elements.video.preservesPitch = true;
+        }
+
+        const isHls = core.isHlsCandidate(candidate);
+        if (!isHls) {
+          if (!canPlayFlv()) {
+            switchToNextCandidate(run, candidate, '当前环境不支持 HTTP-FLV 播放');
+            return;
+          }
+
+          state.ownedPlayer = window.mpegts.createPlayer(
+            { type: 'flv', isLive: true, url: candidate.url, hasAudio: true, hasVideo: true },
+            core.buildMpegtsConfig(run.extreme, run.extremeTargetSeconds));
+          attachPlayerEvents(run, candidate, state.ownedPlayer, true);
+          state.ownedPlayer.attachMediaElement(elements.video);
+          state.ownedPlayer.load();
+        } else {
+          if (!canPlayHls()) {
+            switchToNextCandidate(run, candidate, '当前环境不支持 HLS 播放');
+            return;
+          }
+
+          state.ownedPlayer = new window.Hls(core.buildHlsConfig(run.extreme));
+          attachPlayerEvents(run, candidate, state.ownedPlayer, false);
+          state.ownedPlayer.loadSource(candidate.url);
+          state.ownedPlayer.attachMedia(elements.video);
+        }
+
+        const startedAt = performance.now();
+        try {
+          await awaitWithTimeout(
+            elements.video.play(),
+            core.getStartupTimeoutMs(run),
+            '等待首帧超时');
+          if (!isActive(run)) {
+            return;
+          }
+
+          run.playbackStarted = true;
+          run.lastPlaybackPosition = elements.video.currentTime;
+          run.lastPlaybackProgressAt = Date.now();
+          run.currentCandidateStartedAt = Date.now();
+          const firstFrameMs = Math.round(performance.now() - startedAt);
+          elements.hint.classList.add('hidden');
+          setStatus('播放中 · ' + core.modeLabel(run) + ' · ' + candidate.host);
+          appendLog('ok', '首帧 ' + firstFrameMs + ' ms（' + candidate.host + '）');
+          report(outbound.STATUS, '播放已开始', run, candidate, { firstFrameMs: firstFrameMs, mode: run.mode });
+          startTelemetry(run);
+        } catch (error) {
+          if (!isActive(run)) {
+            return;
+          }
+
+          report(outbound.WARNING, '首帧等待失败：' + (error && error.message), run, candidate, {
+            errorName: error && error.name,
+            errorMessage: error && error.message,
+          });
+
+          if (!run.playbackStarted) {
+            switchToNextCandidate(run, candidate, '首帧超时或失败');
+          } else {
+            recoverAfterInterruption(run, candidate, '播放启动异常');
+          }
+        }
+      }
+
+      /** 绑定播放器事件。 */
+      function attachPlayerEvents(run, candidate, player, isFlv) {
+        if (isFlv) {
+          player.on(window.mpegts.Events.ERROR, function onMpegtsError(errorType, errorDetail, errorInfo) {
+            if (!isActive(run)) {
+              return;
+            }
+
+            const description = (errorInfo && (errorInfo.msg || errorInfo.reason || errorInfo.description)) || '';
+            if (core.isHttpStatusInvalid(errorType, errorDetail, window.mpegts)) {
+              switchToNextCandidate(run, candidate, '返回 HTTP 状态错误');
+              return;
+            }
+
+            if (core.isMseError(errorDetail, window.mpegts) && core.isHevcUnsupportedDescription(description)) {
+              handleHevcUnsupported(run, candidate, description);
+              return;
+            }
+
+            if (run.playbackStarted) {
+              recoverAfterInterruption(run, candidate, '播放器错误：' + description);
+            } else {
+              switchToNextCandidate(run, candidate, '播放器错误：' + description);
+            }
+          });
+
+          player.on(window.mpegts.Events.LOADING_COMPLETE, function onLoadingComplete() {
+            if (!isActive(run)) {
+              return;
+            }
+
+            recoverAfterInterruption(run, candidate, '直播连接已结束');
+          });
+          return;
+        }
+
+        if (window.Hls && !isFlv) {
+          player.on(window.Hls.Events.ERROR, function onHlsError(eventName, data) {
+            if (!isActive(run) || !data) {
+              return;
+            }
+
+            if (!data.fatal) {
+              return;
+            }
+
+            const detail = String(data.details || data.type || 'HLS 错误');
+            if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+              handleHevcUnsupported(run, candidate, detail);
+              return;
+            }
+
+            if (run.playbackStarted) {
+              recoverAfterInterruption(run, candidate, 'HLS 错误：' + detail);
+            } else {
+              switchToNextCandidate(run, candidate, 'HLS 错误：' + detail);
+            }
+          });
+        }
+      }
+
+      /** HEVC 无法解码时的终止处理：明确提示并建议使用 mpv。 */
+      function handleHevcUnsupported(run, candidate, description) {
+        const message = hevcMseSupported
+          ? '该直播流实际为 HEVC 编码，但系统拒绝了对应的 MSE 解码器；请点击「mpv 播放」。'
+          : '该直播流实际为 HEVC（H.265）编码，当前系统不支持 HEVC 解码，请点击「mpv 播放」。';
+        report(outbound.ERROR, message, run, candidate, { errorMessage: description });
+        stopRun(run);
+        destroyPlayer();
+        state.currentStreamUrl = '';
+        updateMpvButton();
+        setHintLocked(message, 'error', 20000);
+      }
+
+      /** 切换到下一个候选。 */
+      function switchToNextCandidate(run, candidate, reason) {
+        if (!isActive(run) || run.switching) {
+          return;
+        }
+
+        run.switching = true;
+        run.playbackStarted = false;
+        report(outbound.WARNING, '切换线路：' + reason, run, candidate);
+        appendLog('warn', '切换线路：' + reason);
+        destroyPlayer();
+
+        run.queue.shift();
+        if (run.queue.length === 0) {
+          requestFreshSources(run, '所有候选线路均不可用');
+          return;
+        }
+
+        const next = run.queue[0];
+        run.switching = false;
+        void startCandidate(run, next);
+      }
+
+      /** 断流后的重连（每个候选最多两次）。 */
+      function recoverAfterInterruption(run, candidate, reason) {
+        if (!isActive(run) || run.recovering || run.switching) {
+          return;
+        }
+
+        const now = Date.now();
+        if (run.currentCandidateStartedAt > 0 && now - run.currentCandidateStartedAt >= core.RECONNECT_COUNTER_RESET_MS) {
+          run.reconnectsBySource.set(candidate.sourceIndex, 0);
+        }
+
+        const reconnectCount = run.reconnectsBySource.get(candidate.sourceIndex) || 0;
+        const delay = core.getReconnectDelayMs(reconnectCount);
+        if (delay < 0) {
+          run.switching = true;
+          report(outbound.WARNING, '当前线路重连未恢复，切换线路', run, candidate, { reconnectCount: reconnectCount });
+          appendLog('warn', '当前线路重连 ' + reconnectCount + ' 次未恢复，切换线路');
+          run.switching = false;
+          switchToNextCandidate(run, candidate, reason);
+          return;
+        }
+
+        run.reconnecting = true;
+        run.reconnectsBySource.set(candidate.sourceIndex, reconnectCount + 1);
+        report(outbound.RECONNECTING, '重连中（第 ' + (reconnectCount + 1) + ' 次）：' + reason, run, candidate, {
+          reconnectCount: reconnectCount + 1,
+        });
+        setStatus('重连中（第 ' + (reconnectCount + 1) + ' 次）…');
+
+        if (run.recoveryTimer !== null) {
+          window.clearTimeout(run.recoveryTimer);
+        }
+
+        run.recoveryTimer = window.setTimeout(function reconnectNow() {
+          run.recoveryTimer = null;
+          if (!isActive(run)) {
+            return;
+          }
+
+          run.reconnecting = false;
+          run.switching = false;
+          run.playbackStarted = false;
+          run.lastPlaybackPosition = 0;
+          run.lastPlaybackProgressAt = Date.now();
+          void startCandidate(run, candidate);
+        }, delay);
+      }
+
+      /** 请求宿主重新解析（每个会话只请求一次）。 */
+      function requestFreshSources(run, reason) {
+        if (!isActive(run) || run.refreshRequested) {
+          return;
+        }
+
+        run.refreshRequested = true;
+        destroyPlayer();
+        state.currentStreamUrl = '';
+        updateMpvButton();
+        setHintLocked('所有候选线路均不可用，正在请主程序重新解析…\n' + reason, 'error', 10000);
+        report(outbound.REFRESH_NEEDED, reason, run, run.currentCandidate);
+      }
+
+      /** 启动遥测与卡顿检测。 */
+      function startTelemetry(run) {
+        if (state.telemetryTimer !== null) {
+          window.clearInterval(state.telemetryTimer);
+        }
+
+        state.telemetryTimer = window.setInterval(function onTick() {
+          if (!isActive(run)) {
+            return;
+          }
+
+          const video = elements.video;
+          if (core.hasProgressed(video.currentTime, run.lastPlaybackPosition)) {
+            run.lastPlaybackPosition = video.currentTime;
+            run.lastPlaybackProgressAt = Date.now();
+          }
+
+          const silenceMs = Date.now() - run.lastPlaybackProgressAt;
+          const localBuffer = core.getLocalBufferSeconds(video.buffered, video.currentTime);
+          const starved = core.looksStarved(video, localBuffer);
+          const threshold = core.getStallThresholdMs(run.extreme, starved);
+
+          if (run.playbackStarted && !run.switching && !run.reconnecting && silenceMs >= threshold) {
+            recoverAfterInterruption(run, run.currentCandidate, '画面进度超过 ' + Math.round(silenceMs / 1000) + ' 秒未前进');
+            return;
+          }
+
+          const now = Date.now();
+          if (now - run.lastTelemetryReportedAt >= core.TELEMETRY_REPORT_INTERVAL_MS) {
+            run.lastTelemetryReportedAt = now;
+            let quality = null;
+            if (typeof video.getVideoPlaybackQuality === 'function') {
+              quality = video.getVideoPlaybackQuality();
+            }
+
+            report(outbound.TELEMETRY, '遥测', run, run.currentCandidate, {
+              currentTime: video.currentTime,
+              bufferedAheadMs: localBuffer === null ? null : Math.round(localBuffer * 1000),
+              readyState: video.readyState,
+              networkState: video.networkState,
+              paused: video.paused,
+              ended: video.ended,
+              playbackRate: video.playbackRate,
+              secondsSinceProgress: Math.round(silenceMs / 1000),
+              droppedVideoFrames: quality ? quality.droppedVideoFrames : null,
+              totalVideoFrames: quality ? quality.totalVideoFrames : null,
+              mode: run.mode,
+            });
+          }
+        }, core.TELEMETRY_INTERVAL_MS);
+      }
+
+      /** 立刻跳到直播最新位置。 */
+      function chaseToLiveEdge(keepSeconds) {
+        const video = elements.video;
+        const ranges = video.buffered;
+        if (!ranges || ranges.length === 0) {
+          return false;
+        }
+
+        const last = ranges.length - 1;
+        const target = core.computeChaseTargetSeconds(ranges.start(last), ranges.end(last), keepSeconds);
+        if (Number.isFinite(target) && Math.abs(video.currentTime - target) > 0.01) {
+          video.currentTime = target;
+        }
+
+        return true;
+      }
+
+      /** 停止一个播放会话。 */
+      function stopRun(run) {
+        if (!run) {
+          return;
+        }
+
+        run.stopped = true;
+        if (run.recoveryTimer !== null) {
+          window.clearTimeout(run.recoveryTimer);
+          run.recoveryTimer = null;
+        }
+
+        destroyPlayer();
+      }
+
+      /** 处理宿主下发的 play 消息。 */
+      async function handlePlay(payload) {
+        if (state.run) {
+          stopRun(state.run);
+          state.run = null;
+        }
+
+        state.refreshRequested = false;
+        const targetMs = state.overrideTargetMs > 0 ? state.overrideTargetMs : payload.extremeTargetMs;
+        const normalized = core.buildPlaybackPlan(
+          Object.assign({}, payload, { extremeTargetMs: targetMs }),
+          canPlayFlv(),
+          canPlayHls(),
+          hevcMseSupported);
+
+        const plan = normalized.plan;
+        if (!plan || plan.candidates.length === 0) {
+          const message = normalized.unsupportedCount > 0
+            ? '候选线路均无法在本页播放（编码或格式不受支持），请点击「mpv 播放」。'
+            : '没有可用的候选线路。';
+          setHintLocked(message, 'error', 20000);
+          report(outbound.ERROR, message, null, null, { unsupportedCount: normalized.unsupportedCount });
+          return;
+        }
+
+        const run = {
+          sessionId: plan.sessionId,
+          mode: plan.mode,
+          extreme: plan.extreme,
+          extremeTargetSeconds: plan.extremeTargetSeconds,
+          candidates: plan.candidates,
+          queue: [],
+          attempted: new Set(),
+          stopped: false,
+          switching: false,
+          recovering: false,
+          reconnecting: false,
+          playbackStarted: false,
+          refreshRequested: false,
+          currentCandidate: null,
+          currentCandidateStartedAt: 0,
+          reconnectCount: 0,
+          reconnectsBySource: new Map(),
+          recoveryTimer: null,
+          lastPlaybackPosition: 0,
+          lastPlaybackProgressAt: Date.now(),
+          lastTelemetryReportedAt: 0,
+        };
+
+        state.roomTitle = typeof payload.title === 'string' ? payload.title : '';
+
+        state.run = run;
+        syncModeButtons(run.extremeTargetSeconds);
+        setStatus('正在探测候选线路…');
+        appendLog('info', '开始播放会话 #' + run.sessionId + '（' + core.modeLabel(run) + '）');
+
+        const queue = await buildCandidateQueue(run);
+        if (!isActive(run)) {
+          return;
+        }
+
+        run.queue = queue;
+        if (queue.length === 0) {
+          const message = normalized.unsupportedCount > 0
+            ? '所有候选线路都不被本页支持，请点击「mpv 播放」。'
+            : '所有候选线路都拒绝了内置播放器的请求，请点击「mpv 播放」或稍后重试。';
+          setHintLocked(message, 'error', 10000);
+          report(outbound.ERROR, message, run, null, { mode: run.mode });
+          return;
+        }
+
+        await startCandidate(run, queue[0]);
+      }
+
+      /** 处理宿主下发的 chase 消息。 */
+      function handleChase(payload) {
+        const keep = payload && payload.keepSeconds;
+        if (chaseToLiveEdge(keep)) {
+          appendLog('info', '已追帧到直播最新位置');
+        } else {
+          appendLog('warn', '追帧失败：缓冲区为空');
+        }
+      }
+
+      /** 处理宿主下发的 stop 消息。 */
+      function handleStop() {
+        if (state.run) {
+          report(outbound.STATUS, '播放已停止', state.run, state.run.currentCandidate);
+          stopRun(state.run);
+          state.run = null;
+        }
+
+        destroyPlayer();
+        state.currentStreamUrl = '';
+        updateMpvButton();
+        setHint('等待直播源');
+        elements.hint.classList.add('empty');
+        setStatus('未连接');
+      }
+
+      /** 同步追帧档位按钮的选中状态。 */
+      function syncModeButtons(targetSeconds) {
+        const targetMs = Math.round(targetSeconds * 1000);
+        for (const button of elements.modeButtons) {
+          button.classList.toggle('active', Number(button.dataset.target) === targetMs);
+        }
+      }
+
+      /** 向桥接服务请求用 mpv 播放当前地址。 */
+      async function requestMpvPlayback() {
+        if (state.currentStreamUrl.length === 0) {
+          setHintLocked('请先在主界面解析直播源。', 'warn', 6000);
+          return;
+        }
+
+        if (state.bridgeBaseAddress.length === 0) {
+          setHintLocked('桥接服务未启动，无法调用 mpv。请在主界面设置中开启 mpv 桥接。', 'warn', 8000);
+          return;
+        }
+
+        const url = state.bridgeBaseAddress
+          + '/play?url=' + encodeURIComponent(state.currentStreamUrl)
+          + '&title=' + encodeURIComponent(state.roomTitle || '')
+          + '&referer=' + encodeURIComponent(state.currentReferer || '');
+        try {
+          const response = await fetch(url, { method: 'GET', cache: 'no-store' });
+          if (response.ok) {
+            setHintLocked('已请求 mpv 播放当前地址。', 'info', 5000);
+            appendLog('ok', '已请求 mpv 播放');
+            report(outbound.STATUS, '已请求 mpv 播放', state.run, state.run ? state.run.currentCandidate : null);
+          } else {
+            setHintLocked('mpv 启动失败：HTTP ' + response.status + '。请检查主界面的 mpv 路径设置。', 'error', 10000);
+            appendLog('error', 'mpv 启动失败：HTTP ' + response.status);
+          }
+        } catch (error) {
+          setHintLocked('调用桥接服务失败：' + error.message, 'error', 10000);
+          appendLog('error', '调用桥接服务失败：' + error.message);
+        }
+      }
+
+      /** 请求宿主更新预设列表。 */
+      function requestPresets() {
+        report(outbound.STATUS, '请求预设列表');
+      }
+
+      /** 更新音量显示。 */
+      function applyVolume(value, remember) {
+        const percent = Math.max(0, Math.min(100, Number(value) || 0));
+        elements.video.volume = percent / 100;
+        elements.video.muted = percent === 0;
+        elements.volume.value = String(percent);
+        elements.volumeLabel.textContent = percent + '%';
+        elements.volDisplay.textContent = '音量：' + percent + '%';
+        elements.volDisplay.classList.remove('hidden');
+        window.setTimeout(function hideVolume() {
+          elements.volDisplay.classList.add('hidden');
+        }, 1500);
+        if (remember && percent > 0) {
+          state.lastVolume = percent;
+        }
+
+        if (percent > 0) {
+          state.muteToggleVolume = percent;
+        }
+      }
+
+      /** 绑定控件事件。 */
+      function bindControls() {
+        for (const button of elements.modeButtons) {
+          button.addEventListener('click', function onModeClick() {
+            const targetMs = Number(button.dataset.target);
+            state.overrideTargetMs = targetMs;
+            syncModeButtons(targetMs / 1000);
+            report(outbound.STATUS, '切换追帧档位', state.run, state.run ? state.run.currentCandidate : null, {
+              extremeTargetMs: targetMs,
+            });
+            appendLog('info', '追帧档位切换为 ' + targetMs + ' ms（下次播放生效）');
+          });
+        }
+
+        elements.volume.addEventListener('input', function onVolumeInput() {
+          applyVolume(elements.volume.value, true);
+        });
+
+        elements.video.addEventListener('wheel', function onWheel(event) {
+          event.preventDefault();
+          applyVolume(elements.video.volume * 100 + (event.deltaY < 0 ? 10 : -10), true);
+        }, { passive: false });
+
+        elements.video.addEventListener('click', function onVideoClick() {
+          const next = elements.video.muted ? state.lastVolume : 0;
+          applyVolume(next, false);
+        });
+
+        elements.chaseBtn.addEventListener('click', function onChaseClick() {
+          handleChase({ keepSeconds: 0.08 });
+        });
+
+        elements.mpvBtn.addEventListener('click', function onMpvClick() {
+          void requestMpvPlayback();
+        });
+
+        elements.fsBtn.addEventListener('click', function onFullscreenClick() {
+          if (document.fullscreenElement) {
+            void document.exitFullscreen();
+          } else {
+            void elements.stage.requestFullscreen();
+          }
+        });
+
+        elements.video.addEventListener('dblclick', function onDoubleClick() {
+          if (document.fullscreenElement) {
+            void document.exitFullscreen();
+          } else {
+            void elements.stage.requestFullscreen();
+          }
+        });
+
+        document.addEventListener('fullscreenchange', function onFullscreenChange() {
+          const fullscreen = Boolean(document.fullscreenElement);
+          elements.hint.classList.toggle('hidden', fullscreen && state.run && state.run.playbackStarted);
+          elements.volDisplay.classList.add('hidden');
+          document.body.style.cursor = fullscreen ? 'none' : 'default';
+        });
+
+        elements.toggleLog.addEventListener('click', function onToggleLog() {
+          const hidden = elements.log.style.display === 'none';
+          elements.log.style.display = hidden ? 'block' : 'none';
+          elements.toggleLog.textContent = hidden ? '隐藏日志' : '显示日志';
+        });
+
+        elements.presetSelect.addEventListener('change', function onPresetChange() {
+          const value = elements.presetSelect.value;
+          if (value.length === 0) {
+            return;
+          }
+
+          report(outbound.STATUS, '请求加载预设：' + value, null, null, { presetUrl: value });
+          appendLog('info', '已请求主程序解析预设：' + value);
+          elements.presetSelect.value = '';
+        });
+      }
+
+      /** 处理来自宿主的消息。 */
+      function handleHostMessage(payload) {
+        if (!payload || typeof payload !== 'object') {
+          return;
+        }
+
+        switch (payload.type) {
+          case core.INBOUND_MESSAGE_TYPES.PLAY:
+            void handlePlay(payload);
+            break;
+          case core.INBOUND_MESSAGE_TYPES.CHASE:
+            handleChase(payload);
+            break;
+          case core.INBOUND_MESSAGE_TYPES.STOP:
+            handleStop();
+            break;
+          default:
+            if (payload.type === 'presets' && Array.isArray(payload.items)) {
+              fillPresets(payload.items);
+            } else if (payload.type === 'volume') {
+              applyVolume(payload.value, true);
+            } else if (payload.type === 'bridge-info') {
+              state.bridgeBaseAddress = typeof payload.baseAddress === 'string' ? payload.baseAddress : '';
+              appendLog('info', '桥接服务地址：' + (state.bridgeBaseAddress || '未启动'));
+            } else {
+              appendLog('warn', '收到未知消息类型：' + payload.type);
+            }
+
+            break;
+        }
+      }
+
+      /** 渲染预设下拉。 */
+      function fillPresets(items) {
+        elements.presetSelect.innerHTML = '';
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = items.length === 0 ? '（无预设，可在主界面添加）' : '选择预设…';
+        elements.presetSelect.appendChild(placeholder);
+
+        for (const item of items) {
+          if (!item || typeof item.url !== 'string' || item.url.length === 0) {
+            continue;
+          }
+
+          const option = document.createElement('option');
+          option.value = item.url;
+          option.textContent = (item.name || item.url) + '（' + (item.platform || '未知') + '）';
+          elements.presetSelect.appendChild(option);
+        }
+      }
+
+      bindControls();
+      applyVolume(70, true);
+      updateMpvButton();
+
+      if (hostChannel) {
+        hostChannel.onMessage(handleHostMessage);
+      } else {
+        setHint('当前不在 StreamPilot 主程序内运行：可直接用 mpv 播放解析出的地址。', 'warn');
+        appendLog('warn', '未检测到 WebView2 宿主通道，控件仍可用于本地调试。');
+      }
+
+      report(outbound.READY, 'StreamPilot 播放器已加载。', null, null, {
+        hevc: hevcMseSupported,
+        avc: avcMseSupported,
+      });
+      requestPresets();
+    }());
+  </script>
+</body>
+
+</html>

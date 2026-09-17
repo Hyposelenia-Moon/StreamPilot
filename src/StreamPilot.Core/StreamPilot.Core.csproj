@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    领域与契约层（Core）。
+    依赖规则：本工程不得引用任何其他 StreamPilot.* 工程，也不得引用 WPF/WinForms/WinUI。
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>StreamPilot.Core</RootNamespace>
+    <AssemblyName>StreamPilot.Core</AssemblyName>
+    <Description>StreamPilot 领域模型、契约接口、结构化日志、HTTP 客户端与配置存取。</Description>
+  </PropertyGroup>
+
+</Project>

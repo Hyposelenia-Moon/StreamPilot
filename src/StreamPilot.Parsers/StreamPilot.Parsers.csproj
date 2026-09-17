@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    平台解析适配层（Parsers）。
+    依赖规则：只允许引用 StreamPilot.Core；禁止引用 App / Bridge / Recording。
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>StreamPilot.Parsers</RootNamespace>
+    <AssemblyName>StreamPilot.Parsers</AssemblyName>
+    <Description>B站、抖音、虎牙、斗鱼、YY、Bigo 平台解析器实现。</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\StreamPilot.Core\StreamPilot.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      解析器实现类型保持 internal（只通过 Core 的 IPlatformParser 暴露），
+      仅对组合根（App，程序集名 StreamPilot）与测试工程开放，
+      避免 UI 层直接依赖具体解析器类型。
+    -->
+    <InternalsVisibleTo Include="StreamPilot" />
+    <InternalsVisibleTo Include="StreamPilot.Tests" />
+  </ItemGroup>
+
+</Project>

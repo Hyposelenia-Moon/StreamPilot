@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    表现层与组合根（App）。
+    依赖规则：允许引用全部 StreamPilot 工程（组合根）；UI 层不得直接使用解析层实现类型，
+    必须通过 StreamPilot.Core.Services 中的接口调用。
+  -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>StreamPilot.App</RootNamespace>
+    <AssemblyName>StreamPilot</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Description>StreamPilot 桌面应用：多平台低延迟播放、原始流录制与 mpv 外挂桥接。</Description>
+    <Version>0.1.0</Version>
+    <Product>StreamPilot</Product>
+    <Company>StreamPilot</Company>
+    <Copyright>Copyright (c) StreamPilot contributors</Copyright>
+  </PropertyGroup>
+
+  <!-- 单文件自包含发布（详见 docs/adr/0005-桥接服务与打包发布.md） -->
+  <PropertyGroup>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <SatelliteResourceLanguages>zh-Hans;en</SatelliteResourceLanguages>
+    <PublishTrimmed>false</PublishTrimmed>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\StreamPilot.Core\StreamPilot.Core.csproj" />
+    <ProjectReference Include="..\StreamPilot.Parsers\StreamPilot.Parsers.csproj" />
+    <ProjectReference Include="..\StreamPilot.Recording\StreamPilot.Recording.csproj" />
+    <ProjectReference Include="..\StreamPilot.Bridge\StreamPilot.Bridge.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- WebView2 SDK：唯一的运行时第三方依赖（见 THIRD-PARTY-NOTICES.md） -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 播放页与第三方 JS 库：作为内容随包分发，虚拟主机映射需要真实目录 -->
+    <Content Include="..\..\Web\**\*">
+      <Link>Web\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>

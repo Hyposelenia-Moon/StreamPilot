@@ -1,0 +1,49 @@
+# ============================================================================
+# StreamPilot .gitignore
+# 约束：仓库中禁止出现官方二进制、隐私文件与编译产物（CLAUDE.md 红线 1/2）
+# ============================================================================
+
+# --- 编译产物 ---
+bin/
+obj/
+publish/
+*.user
+*.suo
+*.userprefs
+*.dbmdl
+*.pdb
+*.dll
+*.exe
+*.so
+*.dylib
+*.nupkg
+*.snupkg
+
+# --- 用户隐私文件（Cookie / 配置 / 签名缓存）---
+huya-cookie.txt
+mpv-config.txt
+douyu-cookie.txt
+bilibili-cookie.txt
+.env
+*.cookie
+cookies*.json
+config.local.json
+
+# --- 外部工具（用户自备，不提交）---
+tools/*
+!tools/README.md
+
+# --- 运行时数据（用户数据与程序目录分离，见安全规则）---
+data/
+logs/
+*.log
+recordings/
+
+# --- 其他 ---
+.vs/
+.idea/
+.vscode/
+*.swp
+
+# --- 例外：测试与文档中允许保留的文本资产 ---
+!docs/**/*.md

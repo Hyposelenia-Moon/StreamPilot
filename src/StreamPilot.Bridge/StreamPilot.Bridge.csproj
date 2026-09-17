@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    桥接服务适配层（Bridge）。
+    依赖规则：只允许引用 StreamPilot.Core；禁止监听非 127.0.0.1 地址。
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>StreamPilot.Bridge</RootNamespace>
+    <AssemblyName>StreamPilot.Bridge</AssemblyName>
+    <Description>仅监听 127.0.0.1 的内嵌 HTTP 桥接服务：mpv 外挂播放、候选流中继、健康检查。</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\StreamPilot.Core\StreamPilot.Core.csproj" />
+  </ItemGroup>
+
+</Project>

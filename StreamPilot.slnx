@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Solution>
+  <Project Path="src/StreamPilot.Core/StreamPilot.Core.csproj" />
+  <Project Path="src/StreamPilot.Parsers/StreamPilot.Parsers.csproj" />
+  <Project Path="src/StreamPilot.Recording/StreamPilot.Recording.csproj" />
+  <Project Path="src/StreamPilot.Bridge/StreamPilot.Bridge.csproj" />
+  <Project Path="src/StreamPilot.App/StreamPilot.App.csproj" />
+  <Project Path="tests/StreamPilot.Tests/StreamPilot.Tests.csproj" />
+</Solution>

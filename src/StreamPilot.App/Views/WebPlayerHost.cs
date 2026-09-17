@@ -1,0 +1,201 @@
+namespace StreamPilot.App.Views;
+
+using System.Windows;
+using System.Windows.Controls;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.Wpf;
+using StreamPilot.Core.Configuration;
+using StreamPilot.Core.Logging;
+
+/// <summary>
+/// WebView2 播放宿主：把 <c>Web\</c> 目录映射为虚拟主机并承载播放页。
+/// </summary>
+/// <remarks>
+/// 要点（docs/adr/0005-桥接服务与打包发布.md）：
+/// <list type="bullet">
+///   <item>必须使用 <c>https://appassets.local/</c> 这类虚拟主机而不是 <c>file://</c>，
+///         否则候选探测的 <c>mode:'cors'</c> 与 Private Network Access 都会失败；</item>
+///   <item>页面不暴露任何可被宿主直接调用的 <c>window</c> 方法，控制一律走消息；</item>
+///   <item>消息处理不阻塞 UI：收到消息只做轻量解析并转发给 ViewModel。</item>
+/// </list>
+/// </remarks>
+public sealed class WebPlayerHost : UserControl, IAsyncDisposable
+{
+    /// <summary>虚拟主机名。</summary>
+    public const string VirtualHostName = "appassets.local";
+
+    /// <summary>虚拟主机基地址。</summary>
+    public const string VirtualHostBase = "https://" + VirtualHostName + "/";
+
+    /// <summary>播放页相对路径。</summary>
+    public const string PlayerPage = "player.html";
+
+    private readonly IStructuredLogger _logger;
+    private readonly string _moduleName = "App.WebPlayer";
+    private readonly WebView2 _webView = new();
+    private bool _initialized;
+    private bool _disposed;
+
+    /// <summary>初始化宿主控件。</summary>
+    /// <param name="logger">结构化日志。</param>
+    public WebPlayerHost(IStructuredLogger logger)
+    {
+        ArgumentNullException.ThrowIfNull(logger);
+        _logger = logger;
+        Content = _webView;
+    }
+
+    /// <summary>页面 → 宿主消息到达事件（参数为 JSON 文本）。</summary>
+    public event EventHandler<string>? MessageReceived;
+
+    /// <summary>内核初始化失败时触发（参数为面向用户的错误说明）。</summary>
+    public event EventHandler<string>? InitializationFailed;
+
+    /// <summary>页面是否已完成加载。</summary>
+    public bool IsPageLoaded { get; private set; }
+
+    /// <summary>
+    /// 初始化 WebView2 并导航到播放页。
+    /// </summary>
+    /// <returns>异步任务。</returns>
+    /// <exception cref="InvalidOperationException">WebView2 运行时缺失或播放页目录不存在时抛出。</exception>
+    public async Task InitializeAsync()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_initialized)
+        {
+            return;
+        }
+
+        string webRoot = AppPaths.WebDirectory;
+        if (!Directory.Exists(webRoot))
+        {
+            string message = "播放页目录不存在：" + webRoot + "。请确认发布包中包含 Web 目录。";
+            InitializationFailed?.Invoke(this, message);
+            throw new InvalidOperationException(message);
+        }
+
+        string userDataFolder = Path.Combine(AppPaths.UserDataDirectory, "WebView2");
+        Directory.CreateDirectory(userDataFolder);
+
+        CoreWebView2Environment environment = await CoreWebView2Environment
+            .CreateAsync(browserExecutableFolder: null, userDataFolder: userDataFolder)
+            .ConfigureAwait(true);
+
+        await _webView.EnsureCoreWebView2Async(environment).ConfigureAwait(true);
+        CoreWebView2 core = _webView.CoreWebView2;
+
+        core.Settings.AreDefaultContextMenusEnabled = false;
+        core.Settings.IsStatusBarEnabled = false;
+        core.Settings.AreDevToolsEnabled = false;
+        core.Settings.IsZoomControlEnabled = false;
+        core.Settings.IsPasswordAutosaveEnabled = false;
+        core.Settings.IsGeneralAutofillEnabled = false;
+
+        core.SetVirtualHostNameToFolderMapping(
+            VirtualHostName,
+            webRoot,
+            CoreWebView2HostResourceAccessKind.DenyCors);
+
+        core.WebMessageReceived += OnWebMessageReceived;
+        core.NavigationCompleted += OnNavigationCompleted;
+        _webView.NavigationStarting += OnNavigationStarting;
+
+        _initialized = true;
+        core.Navigate(VirtualHostBase + PlayerPage);
+        _logger.Info(_moduleName, "播放宿主已初始化。", new Dictionary<string, object?>
+        {
+            ["url"] = VirtualHostBase + PlayerPage,
+            ["webRoot"] = webRoot,
+        });
+    }
+
+    /// <summary>
+    /// 向播放页发送 JSON 消息。
+    /// </summary>
+    /// <param name="json">JSON 文本。</param>
+    /// <returns>发送成功返回 <see langword="true"/>。</returns>
+    public bool SendMessage(string json)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(json);
+        if (!_initialized || _webView.CoreWebView2 is null)
+        {
+            _logger.Warn(_moduleName, "播放宿主尚未初始化，消息被丢弃。");
+            return false;
+        }
+
+        _webView.CoreWebView2.PostWebMessageAsJson(json);
+        return true;
+    }
+
+    /// <inheritdoc />
+    public async ValueTask DisposeAsync()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        try
+        {
+            if (_webView.CoreWebView2 is not null)
+            {
+                _webView.CoreWebView2.WebMessageReceived -= OnWebMessageReceived;
+                _webView.CoreWebView2.NavigationCompleted -= OnNavigationCompleted;
+            }
+
+            _webView.NavigationStarting -= OnNavigationStarting;
+            _webView.Dispose();
+        }
+        catch (InvalidOperationException exception)
+        {
+            _logger.LogError(LogLevel.Debug, _moduleName, "释放 WebView2 时发生异常。", exception);
+        }
+
+        await Task.CompletedTask.ConfigureAwait(false);
+    }
+
+    private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
+    {
+        try
+        {
+            string json = e.WebMessageAsJson;
+            MessageReceived?.Invoke(this, json);
+        }
+        catch (InvalidOperationException exception)
+        {
+            _logger.LogError(LogLevel.Warn, _moduleName, "读取播放页消息失败。", exception);
+        }
+    }
+
+    private void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
+    {
+        IsPageLoaded = e.IsSuccess;
+        if (e.IsSuccess)
+        {
+            _logger.Info(_moduleName, "播放页加载完成。");
+            return;
+        }
+
+        string message = "播放页加载失败：" + e.WebErrorStatus + "。";
+        _logger.Error(_moduleName, message);
+        InitializationFailed?.Invoke(this, message);
+    }
+
+    private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
+    {
+        string target = e.Uri ?? string.Empty;
+        if (target.StartsWith(VirtualHostBase, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        // 禁止离开本地播放页（例如页面内的误点击外链）。
+        e.Cancel = true;
+        _logger.Warn(_moduleName, "已阻止播放页导航到非本地地址。", new Dictionary<string, object?>
+        {
+            ["host"] = Uri.TryCreate(target, UriKind.Absolute, out Uri? uri) ? uri.Host : "invalid",
+        });
+    }
+}
