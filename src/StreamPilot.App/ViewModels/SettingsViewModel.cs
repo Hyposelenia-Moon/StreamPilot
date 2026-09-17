@@ -57,7 +57,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     /// <param name="presetStore">预设存储。</param>
     /// <param name="resolveMpvPath">mpv 路径解析函数（返回解析后的绝对路径，未找到返回 <see langword="null"/>）。</param>
     /// <param name="logger">结构化日志。</param>
-    public SettingsViewModel(PresetStore presetStore, Func<string?, string?> resolveMpvPath, IStructuredLogger logger)
+    /// <param name="logLines">与主界面共享的"最近事件"滚动列表，可为 <see langword="null"/>。</param>
+    public SettingsViewModel(PresetStore presetStore, Func<string?, string?> resolveMpvPath, IStructuredLogger logger, ObservableCollection<string>? logLines = null)
     {
         ArgumentNullException.ThrowIfNull(presetStore);
         ArgumentNullException.ThrowIfNull(resolveMpvPath);
@@ -68,11 +69,12 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
         Platforms = SettingsPlatforms.CreateOptions();
         Presets = [];
+        LogLines = logLines ?? [];
 
         BrowseMpvCommand = new RelayCommand(_ => BrowseMpv());
         DetectMpvCommand = new RelayCommand(_ => DetectMpv());
         ClearMpvCommand = new RelayCommand(_ => ClearMpv());
-        SetTargetCommand = new RelayCommand(parameter => SetTarget(parameter), parameter => parameter is not null);
+        ClearLogLinesCommand = new RelayCommand(_ => LogLines.Clear(), _ => LogLines.Count > 0);
         AddPresetCommand = new RelayCommand(_ => AddPreset());
         RemovePresetCommand = new RelayCommand(_ => RemovePreset(), _ => SelectedPreset is not null);
         BrowseRecordingDirectoryCommand = new RelayCommand(_ => BrowseRecordingDirectory());
@@ -90,6 +92,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     /// <summary>预设列表（可编辑）。</summary>
     public ObservableCollection<PresetItem> Presets { get; }
 
+    /// <summary>最近事件（与主界面共享同一份滚动列表）。</summary>
+    public ObservableCollection<string> LogLines { get; }
+
     /// <summary>浏览 mpv 可执行文件。</summary>
     public RelayCommand BrowseMpvCommand { get; }
 
@@ -99,8 +104,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     /// <summary>清空 mpv 路径（回到自动探测）。</summary>
     public RelayCommand ClearMpvCommand { get; }
 
-    /// <summary>设置追帧档位（参数为毫秒字符串）。</summary>
-    public RelayCommand SetTargetCommand { get; }
+    /// <summary>清空最近事件列表。</summary>
+    public RelayCommand ClearLogLinesCommand { get; }
 
     /// <summary>新增空白预设行。</summary>
     public RelayCommand AddPresetCommand { get; }
@@ -119,15 +124,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     /// <summary>打开录制目录。</summary>
     public RelayCommand OpenRecordingFolderCommand { get; }
-
-    /// <summary>是否选中 150 ms 档。</summary>
-    public bool IsTarget150 => ExtremeTargetMs == PlaybackRequest.ExtremeTargetsMs[0];
-
-    /// <summary>是否选中 200 ms 档。</summary>
-    public bool IsTarget200 => ExtremeTargetMs == PlaybackRequest.ExtremeTargetsMs[1];
-
-    /// <summary>是否选中 250 ms 档。</summary>
-    public bool IsTarget250 => ExtremeTargetMs == PlaybackRequest.ExtremeTargetsMs[2];
 
     /// <summary>实际生效的录制目录（留空时为默认目录）。</summary>
     public string EffectiveRecordingDirectory =>
@@ -175,18 +171,14 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     }
 
     /// <summary>默认追帧档位（毫秒）。</summary>
+    /// <remarks>
+    /// 界面上不再提供第二处档位选择（档位入口只在主界面），此值在保存时按原配置透传，
+    /// 避免"设置里忘了改就把用户的档位改回默认值"。
+    /// </remarks>
     public int ExtremeTargetMs
     {
         get => _extremeTargetMs;
-        set
-        {
-            if (SetField(ref _extremeTargetMs, value))
-            {
-                OnPropertyChanged(nameof(IsTarget150));
-                OnPropertyChanged(nameof(IsTarget200));
-                OnPropertyChanged(nameof(IsTarget250));
-            }
-        }
+        set => SetField(ref _extremeTargetMs, value);
     }
 
     /// <summary>默认音量。</summary>
@@ -479,14 +471,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         MpvPath = string.Empty;
         StatusMessage = "已清空 mpv 路径，播放时按默认顺序自动探测。";
-    }
-
-    private void SetTarget(object? parameter)
-    {
-        if (parameter is not null && int.TryParse(parameter.ToString(), out int target))
-        {
-            ExtremeTargetMs = NormalizeTarget(target);
-        }
     }
 
     private static void OpenFolder(string path)

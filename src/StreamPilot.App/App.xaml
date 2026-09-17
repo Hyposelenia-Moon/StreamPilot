@@ -5,24 +5,26 @@
   <Application.Resources>
     <ResourceDictionary>
       <!--
-        深色主题色板。
-        约定：WPF 默认主题会给多数控件使用深色前景（尤其 ComboBox 选中项、TabItem 页签、
-        ListBoxItem、RadioButton/CheckBox 文字），因此这里对每个用到的控件都显式指定
-        前景/背景/边框，不依赖主题默认值，避免出现"深色底 + 深色字"。
+        浅色主题色板。
+        命名保留语义，方便整体换肤：WindowBackground=窗口底，PanelBackground=面板/工具栏，
+        ControlBackground=输入控件，BorderSoft/Strong=分隔线与描边，Text/Muted=主/次文字，
+        Accent=主色，SelectionBackground=选中态。
+        约定：每个用到的控件都显式指定前景/背景/边框，不依赖系统主题默认值，
+        避免出现"浅色底 + 浅色字"这类不可读组合。
       -->
-      <SolidColorBrush x:Key="WindowBackgroundBrush" Color="#101216" />
-      <SolidColorBrush x:Key="PanelBackgroundBrush" Color="#16191F" />
-      <SolidColorBrush x:Key="BorderBrushSoft" Color="#262B33" />
-      <SolidColorBrush x:Key="BorderBrushStrong" Color="#38404D" />
-      <SolidColorBrush x:Key="ControlBackgroundBrush" Color="#1E232B" />
-      <SolidColorBrush x:Key="ControlHoverBrush" Color="#252B35" />
-      <SolidColorBrush x:Key="SelectionBackgroundBrush" Color="#1B2836" />
-      <SolidColorBrush x:Key="TextBrush" Color="#E6E9EE" />
-      <SolidColorBrush x:Key="MutedTextBrush" Color="#AEB8C7" />
-      <SolidColorBrush x:Key="AccentBrush" Color="#4C8DFF" />
-      <SolidColorBrush x:Key="WarnBrush" Color="#F0B429" />
-      <SolidColorBrush x:Key="ErrorBrush" Color="#EF5350" />
-      <SolidColorBrush x:Key="OkBrush" Color="#3DDC84" />
+      <SolidColorBrush x:Key="WindowBackgroundBrush" Color="#F5F6F8" />
+      <SolidColorBrush x:Key="PanelBackgroundBrush" Color="#FFFFFF" />
+      <SolidColorBrush x:Key="BorderBrushSoft" Color="#E2E5EA" />
+      <SolidColorBrush x:Key="BorderBrushStrong" Color="#C7CDD6" />
+      <SolidColorBrush x:Key="ControlBackgroundBrush" Color="#FFFFFF" />
+      <SolidColorBrush x:Key="ControlHoverBrush" Color="#F1F4F9" />
+      <SolidColorBrush x:Key="SelectionBackgroundBrush" Color="#E8F1FF" />
+      <SolidColorBrush x:Key="TextBrush" Color="#1F2329" />
+      <SolidColorBrush x:Key="MutedTextBrush" Color="#6B7280" />
+      <SolidColorBrush x:Key="AccentBrush" Color="#2F6FEB" />
+      <SolidColorBrush x:Key="WarnBrush" Color="#B45309" />
+      <SolidColorBrush x:Key="ErrorBrush" Color="#C0392B" />
+      <SolidColorBrush x:Key="OkBrush" Color="#1F8A4C" />
 
       <!-- 无主题键样式：作为默认样式应用于对应控件类型 -->
       <Style TargetType="TextBlock">
@@ -45,7 +47,7 @@
       </Style>
 
       <Style x:Key="CardPanel" TargetType="Border">
-        <Setter Property="Background" Value="#141A22" />
+        <Setter Property="Background" Value="#F7F8FA" />
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
         <Setter Property="BorderThickness" Value="1" />
         <Setter Property="CornerRadius" Value="6" />
@@ -268,7 +270,7 @@
 
       <!-- 列表：容器样式必须显式给浅色前景，否则列表项文字是深色 -->
       <Style TargetType="ListBox">
-        <Setter Property="Background" Value="#141A22" />
+        <Setter Property="Background" Value="#F7F8FA" />
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
       </Style>
@@ -318,14 +320,14 @@
         <Setter Property="Template">
           <Setter.Value>
             <ControlTemplate TargetType="RepeatButton">
-              <Border Background="#1B2028" />
+              <Border Background="#EDEFF3" />
             </ControlTemplate>
           </Setter.Value>
         </Setter>
       </Style>
 
       <Style TargetType="ScrollBar">
-        <Setter Property="Background" Value="#1B2028" />
+        <Setter Property="Background" Value="#EDEFF3" />
         <Setter Property="Width" Value="12" />
         <Setter Property="Template">
           <Setter.Value>
@@ -350,11 +352,11 @@
 
       <!-- 表格：表头与单元格默认是系统浅色主题，必须显式覆盖 -->
       <Style TargetType="DataGrid">
-        <Setter Property="Background" Value="#141A22" />
+        <Setter Property="Background" Value="#F7F8FA" />
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
-        <Setter Property="RowBackground" Value="#141A22" />
-        <Setter Property="AlternatingRowBackground" Value="#171D25" />
+        <Setter Property="RowBackground" Value="#F7F8FA" />
+        <Setter Property="AlternatingRowBackground" Value="#FBFCFD" />
         <Setter Property="HorizontalGridLinesBrush" Value="{StaticResource BorderBrushSoft}" />
         <Setter Property="VerticalGridLinesBrush" Value="{StaticResource BorderBrushSoft}" />
         <Setter Property="RowHeaderWidth" Value="0" />
@@ -383,7 +385,7 @@
       </Style>
 
       <Style TargetType="DataGridRow">
-        <Setter Property="Background" Value="#141A22" />
+        <Setter Property="Background" Value="#F7F8FA" />
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
       </Style>
 

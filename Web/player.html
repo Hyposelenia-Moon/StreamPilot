@@ -17,31 +17,31 @@
   <style>
     /*
       配色策略（修复"白底白字"）：
-      1. html 上先给出无条件的深色兜底（不依赖 CSS 变量），避免 :root 变量未生效时出现白底；
-      2. color-scheme: dark 让下拉框、滚动条、range 等"原生控件"也走深色，不受系统浅色主题影响；
-      3. 每个元素都显式声明 color/background/border，不依赖从 body 继承，杜绝"白底白字"组合；
-      4. 强制配色模式（Windows 高对比度）下本页面依旧保持深色，避免系统强制色把文字变白。
+      1. html 上先给出无条件的浅色兜底（不依赖 CSS 变量），避免 :root 变量未生效时出现底色异常；
+      2. color-scheme: light 让滚动条、range 等"原生控件"也走浅色，不受系统深色主题影响；
+      3. 每个元素都显式声明 color/background/border，不依赖从 body 继承，杜绝"底色与文字同色"的不可读组合；
+      4. 强制配色模式（Windows 高对比度）下本页面依旧保持浅色，避免系统强制色造成不可读。
     */
     html {
-      background: #101216;
-      color: #e6e9ee;
-      color-scheme: dark;
+      background: #f5f6f8;
+      color: #1f2329;
+      color-scheme: light;
     }
 
     :root {
-      --bg: #101216;
-      --panel: #16191f;
-      --border: #262b33;
-      --border-strong: #38404d;
-      --text: #e6e9ee;
+      --bg: #f5f6f8;
+      --panel: #ffffff;
+      --border: #e2e5ea;
+      --border-strong: #c7cdd6;
+      --text: #1f2329;
       --text-strong: #ffffff;
-      --muted: #98a2b3;
-      --control: #1e232b;
-      --control-active: #1b2836;
-      --accent: #4c8dff;
-      --warn: #f0b429;
-      --error: #ef5350;
-      --ok: #3ddc84;
+      --muted: #6b7280;
+      --control: #ffffff;
+      --control-active: #e8f1ff;
+      --accent: #2f6feb;
+      --warn: #b45309;
+      --error: #c0392b;
+      --ok: #1f8a4c;
     }
 
     * {
@@ -52,8 +52,8 @@
     body {
       margin: 0;
       height: 100%;
-      background: #101216;
-      color: #e6e9ee;
+      background: #f5f6f8;
+      color: #1f2329;
       font: 13px/1.5 "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
       overflow: hidden;
       -webkit-text-size-adjust: 100%;
@@ -72,17 +72,17 @@
       #hint,
       #volDisplay {
         forced-color-adjust: none;
-        background: #101216;
-        color: #e6e9ee;
+        background: #f5f6f8;
+        color: #1f2329;
       }
 
       button,
       select,
       input[type="range"] {
         forced-color-adjust: none;
-        background: #1e232b;
-        color: #e6e9ee;
-        border: 1px solid #38404d;
+        background: #ffffff;
+        color: #1f2329;
+        border: 1px solid #c7cdd6;
       }
     }
 
@@ -97,13 +97,13 @@
       align-items: center;
       gap: 8px;
       padding: 6px 10px;
-      background: #16191f;
-      border-bottom: 1px solid #262b33;
+      background: #ffffff;
+      border-bottom: 1px solid #e2e5ea;
       flex: 0 0 auto;
     }
 
     #modeHint {
-      color: #aeb8c7;
+      color: #5b6472;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -114,9 +114,9 @@
     button,
     input[type="range"] {
       font: inherit;
-      color: #e6e9ee;
-      background-color: #1e232b;
-      border: 1px solid #262b33;
+      color: #1f2329;
+      background-color: #ffffff;
+      border: 1px solid #e2e5ea;
       border-radius: 6px;
       padding: 4px 8px;
       -webkit-appearance: none;
@@ -130,13 +130,13 @@
       width: 140px;
       background: transparent;
       border: none;
-      accent-color: #4c8dff;
+      accent-color: #2f6feb;
     }
 
     input[type="range"]::-webkit-slider-runnable-track {
       height: 4px;
       border-radius: 2px;
-      background: #38404d;
+      background: #c7cdd6;
     }
 
     input[type="range"]::-webkit-slider-thumb {
@@ -146,8 +146,8 @@
       height: 14px;
       margin-top: -5px;
       border-radius: 50%;
-      background: #4c8dff;
-      border: 1px solid #101216;
+      background: #2f6feb;
+      border: 1px solid #f5f6f8;
     }
 
     button {
@@ -156,7 +156,7 @@
     }
 
     button:hover:not(:disabled) {
-      border-color: #4c8dff;
+      border-color: #2f6feb;
     }
 
     button:disabled {
@@ -165,18 +165,8 @@
     }
 
     button.active {
-      border-color: #4c8dff;
-      background-color: #1b2836;
-    }
-
-    #modeGroup {
-      display: flex;
-      gap: 4px;
-      flex: 0 0 auto;
-    }
-
-    #modeGroup button {
-      padding: 4px 10px;
+      border-color: #2f6feb;
+      background-color: #e8f1ff;
     }
 
     .spacer {
@@ -186,14 +176,15 @@
     #stage {
       position: relative;
       flex: 1 1 auto;
-      background: #000000;
+      /* 空画面用浅色底，避免整块黑板；有画面后由视频内容覆盖 */
+      background: #eef0f4;
       min-height: 0;
     }
 
     video {
       width: 100%;
       height: 100%;
-      background-color: #000000;
+      background-color: transparent;
       object-fit: contain;
       position: relative;
       z-index: 1;
@@ -208,9 +199,9 @@
       max-width: 82%;
       padding: 14px 18px;
       border-radius: 10px;
-      background: rgba(12, 14, 18, 0.92);
-      border: 1px solid #262b33;
-      color: #e6e9ee;
+      background: rgba(255, 255, 255, 0.95);
+      border: 1px solid #e2e5ea;
+      color: #1f2329;
       text-align: center;
       white-space: pre-wrap;
       pointer-events: none;
@@ -222,11 +213,11 @@
     }
 
     #hint[data-level="warn"] {
-      border-color: #f0b429;
+      border-color: #b45309;
     }
 
     #hint[data-level="error"] {
-      border-color: #ef5350;
+      border-color: #c0392b;
     }
 
     #hint.hidden,
@@ -242,17 +233,17 @@
       z-index: 2;
       padding: 4px 10px;
       border-radius: 6px;
-      background: rgba(12, 14, 18, 0.92);
-      border: 1px solid #262b33;
-      color: #e6e9ee;
+      background: rgba(255, 255, 255, 0.95);
+      border: 1px solid #e2e5ea;
+      color: #1f2329;
     }
 
     footer {
       flex: 0 0 auto;
       display: flex;
       flex-direction: column;
-      border-top: 1px solid #262b33;
-      background: #16191f;
+      border-top: 1px solid #e2e5ea;
+      background: #ffffff;
     }
 
     #controls {
@@ -261,12 +252,12 @@
       gap: 8px;
       padding: 6px 10px;
       flex-wrap: wrap;
-      color: #e6e9ee;
+      color: #1f2329;
     }
 
     #statusLine {
       padding: 0 10px 6px;
-      color: #98a2b3;
+      color: #6b7280;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -275,12 +266,12 @@
     #logPanel {
       max-height: 132px;
       overflow-y: auto;
-      border-top: 1px solid #262b33;
+      border-top: 1px solid #e2e5ea;
       padding: 6px 10px;
       font-family: Consolas, "Cascadia Mono", monospace;
       font-size: 12px;
-      color: #98a2b3;
-      scrollbar-color: #38404d #16191f;
+      color: #6b7280;
+      scrollbar-color: #c7cdd6 #ffffff;
     }
 
     #logPanel div {
@@ -289,19 +280,19 @@
     }
 
     #logPanel div[data-level="warn"] {
-      color: #f0b429;
+      color: #b45309;
     }
 
     #logPanel div[data-level="error"] {
-      color: #ef5350;
+      color: #c0392b;
     }
 
     #logPanel div[data-level="ok"] {
-      color: #3ddc84;
+      color: #1f8a4c;
     }
 
     #volumeLabel {
-      color: #98a2b3;
+      color: #6b7280;
       min-width: 46px;
       text-align: right;
     }
@@ -315,18 +306,14 @@
 <body>
   <div id="root">
     <!--
-      播放页只保留"观看相关"的控件（追帧档位、全屏、音量）。
-      播放控制（解析 / 开始播放 / 追帧 / mpv 播放）统一放在主界面左侧面板，
-      避免同一动作在左右两侧各有一份按钮。
+      播放页只保留"观看相关"的控件（模式提示、全屏、音量、可选的日志面板）。
+      追帧档位与播放控制（解析 / 开始播放 / 追帧 / mpv 播放）统一放在主界面左侧面板，
+      避免同一个设置或动作在多处各有一份。
     -->
     <header>
-      <div id="modeGroup" title="极限追帧档位，数值越小延迟越低但越容易卡顿">
-        <button type="button" data-target="150">150 ms</button>
-        <button type="button" data-target="200">200 ms</button>
-        <button type="button" data-target="250">250 ms</button>
-      </div>
+      <span id="modeHint" class="hintText">等待直播源</span>
       <span class="spacer"></span>
-      <span id="modeHint" class="hintText">等待直播源</span>      <button type="button" id="fsBtn" title="全屏">全屏</button>
+      <button type="button" id="fsBtn" title="全屏（双击画面同样可切换）">全屏</button>
     </header>
 
     <div id="stage">
@@ -337,14 +324,14 @@
 
     <footer>
       <div id="controls">
-        <span style="color: #98a2b3">音量</span>
+        <span style="color: #6b7280">音量</span>
         <input id="volume" type="range" min="0" max="100" step="1" value="70" style="width: 140px" />
         <span id="volumeLabel">70%</span>
         <span class="spacer"></span>
-        <button type="button" id="toggleLog">隐藏日志</button>
+        <button type="button" id="toggleLog">显示日志</button>
       </div>
       <div id="statusLine">未连接</div>
-      <div id="logPanel"></div>
+      <div id="logPanel" class="hidden"></div>
     </footer>
   </div>
 
@@ -385,7 +372,6 @@
         modeHint: document.getElementById('modeHint'),
         fsBtn: document.getElementById('fsBtn'),
         toggleLog: document.getElementById('toggleLog'),
-        modeButtons: Array.prototype.slice.call(document.querySelectorAll('#modeGroup button')),
         stage: document.getElementById('stage'),
       };
 
@@ -404,7 +390,6 @@
         probeControllers: [],
         telemetryTimer: null,
         refreshRequested: false,
-        overrideTargetMs: 0,
         capabilities: { hevc: false, avc: false },
       };
 
@@ -1017,9 +1002,8 @@
         }
 
         state.refreshRequested = false;
-        const targetMs = state.overrideTargetMs > 0 ? state.overrideTargetMs : payload.extremeTargetMs;
         const normalized = core.buildPlaybackPlan(
-          Object.assign({}, payload, { extremeTargetMs: targetMs }),
+          payload,
           canPlayFlv(),
           canPlayHls(),
           hevcMseSupported);
@@ -1061,7 +1045,6 @@
         state.roomTitle = typeof payload.title === 'string' ? payload.title : '';
 
         state.run = run;
-        syncModeButtons(run.extremeTargetSeconds);
         setStatus('正在探测候选线路…');
         appendLog('info', '开始播放会话 #' + run.sessionId + '（' + core.modeLabel(run) + '）');
 
@@ -1109,14 +1092,6 @@
         setStatus('未连接');
       }
 
-      /** 同步追帧档位按钮的选中状态。 */
-      function syncModeButtons(targetSeconds) {
-        const targetMs = Math.round(targetSeconds * 1000);
-        for (const button of elements.modeButtons) {
-          button.classList.toggle('active', Number(button.dataset.target) === targetMs);
-        }
-      }
-
       /** 更新音量显示。 */
       function applyVolume(value, remember) {
         const percent = Math.max(0, Math.min(100, Number(value) || 0));
@@ -1140,18 +1115,6 @@
 
       /** 绑定控件事件。 */
       function bindControls() {
-        for (const button of elements.modeButtons) {
-          button.addEventListener('click', function onModeClick() {
-            const targetMs = Number(button.dataset.target);
-            state.overrideTargetMs = targetMs;
-            syncModeButtons(targetMs / 1000);
-            report(outbound.STATUS, '切换追帧档位', state.run, state.run ? state.run.currentCandidate : null, {
-              extremeTargetMs: targetMs,
-            });
-            appendLog('info', '追帧档位切换为 ' + targetMs + ' ms（下次播放生效）');
-          });
-        }
-
         elements.volume.addEventListener('input', function onVolumeInput() {
           applyVolume(elements.volume.value, true);
         });
@@ -1166,33 +1129,66 @@
           applyVolume(next, false);
         });
 
-        elements.fsBtn.addEventListener('click', function onFullscreenClick() {
-          if (document.fullscreenElement) {
-            void document.exitFullscreen();
-          } else {
-            void elements.stage.requestFullscreen();
+        /*
+          全屏：只用 #stage 作为全屏元素（video 填满 stage），并显式处理 Promise 失败，
+          避免"点了没反应"却没有任何反馈。
+        */
+        function requestStageFullscreen() {
+          const target = elements.stage;
+          if (!target || typeof target.requestFullscreen !== 'function') {
+            setHintLocked('当前内核不支持全屏 API，可用主界面的窗口最大化代替。', 'warn', 6000);
+            return;
           }
-        });
 
-        elements.video.addEventListener('dblclick', function onDoubleClick() {
-          if (document.fullscreenElement) {
-            void document.exitFullscreen();
-          } else {
-            void elements.stage.requestFullscreen();
+          const request = target.requestFullscreen();
+          if (request && typeof request.then === 'function') {
+            request.then(function onEntered() {
+              appendLog('info', '已进入全屏');
+            }).catch(function onFailed(error) {
+              appendLog('error', '进入全屏失败：' + (error && error.message ? error.message : error));
+              setHintLocked('进入全屏失败，可尝试双击画面或按 F11。', 'warn', 6000);
+            });
           }
-        });
+        }
+
+        function exitStageFullscreen() {
+          const request = document.exitFullscreen();
+          if (request && typeof request.then === 'function') {
+            request.catch(function onFailed(error) {
+              appendLog('error', '退出全屏失败：' + (error && error.message ? error.message : error));
+            });
+          }
+        }
+
+        function toggleFullscreen() {
+          if (document.fullscreenElement) {
+            exitStageFullscreen();
+          } else {
+            requestStageFullscreen();
+          }
+        }
+
+        elements.fsBtn.addEventListener('click', toggleFullscreen);
+        elements.video.addEventListener('dblclick', toggleFullscreen);
 
         document.addEventListener('fullscreenchange', function onFullscreenChange() {
           const fullscreen = Boolean(document.fullscreenElement);
           elements.hint.classList.toggle('hidden', fullscreen && state.run && state.run.playbackStarted);
           elements.volDisplay.classList.add('hidden');
           document.body.style.cursor = fullscreen ? 'none' : 'default';
+          elements.fsBtn.textContent = fullscreen ? '退出全屏' : '全屏';
+        });
+
+        document.addEventListener('keydown', function onKeyDown(event) {
+          if (event.key === 'F11' || (event.key === 'Enter' && event.altKey)) {
+            event.preventDefault();
+            toggleFullscreen();
+          }
         });
 
         elements.toggleLog.addEventListener('click', function onToggleLog() {
-          const hidden = elements.log.style.display === 'none';
-          elements.log.style.display = hidden ? 'block' : 'none';
-          elements.toggleLog.textContent = hidden ? '隐藏日志' : '显示日志';
+          const hidden = elements.log.classList.toggle('hidden');
+          elements.toggleLog.textContent = hidden ? '显示日志' : '隐藏日志';
         });
       }
 

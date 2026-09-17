@@ -86,13 +86,12 @@ public sealed class WebPlayerHost : UserControl, IAsyncDisposable
         await _webView.EnsureCoreWebView2Async(environment).ConfigureAwait(true);
         CoreWebView2 core = _webView.CoreWebView2;
 
-        // 播放页是固定深色主题，必须显式声明，否则在系统浅色主题下
-        // 原生控件（下拉框/滚动条/表单）会被渲染成浅色，出现"白底白字"。
-        core.Profile.PreferredColorScheme = CoreWebView2PreferredColorScheme.Dark;
+        // 播放页采用浅色主题，显式声明以免原生控件（滚动条/表单）跟随系统深色主题。
+        core.Profile.PreferredColorScheme = CoreWebView2PreferredColorScheme.Light;
 
-        // 页面首帧渲染前的默认底色，避免加载瞬间闪出白底。
+        // 页面首帧渲染前的默认底色，避免加载瞬间闪色（与播放页浅色背景一致）。
         // 注意：WPF 版 WebView2 的 DefaultBackgroundColor 使用 System.Drawing.Color。
-        _webView.DefaultBackgroundColor = System.Drawing.Color.FromArgb(0x10, 0x12, 0x16);
+        _webView.DefaultBackgroundColor = System.Drawing.Color.FromArgb(0xF5, 0xF6, 0xF8);
 
         core.Settings.AreDefaultContextMenusEnabled = false;
         core.Settings.IsStatusBarEnabled = false;

@@ -68,115 +68,88 @@
           </Grid>
         </Border>
 
-        <TabControl Grid.Row="1" x:Name="ControlTabs" Background="Transparent" BorderThickness="0">
-        <!-- ================= 直播 ================= -->
-        <TabItem Header="直播">
-          <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="12">
-            <StackPanel>
-              <TextBlock Text="平台" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-              <ComboBox ItemsSource="{Binding Platforms}"
-                        SelectedItem="{Binding SelectedPlatformOption, Mode=TwoWay}"
-                        AutomationProperties.AutomationId="PlatformCombo">
-                <ComboBox.ItemTemplate>
-                  <DataTemplate>
-                    <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource TextBrush}" />
-                  </DataTemplate>
-                </ComboBox.ItemTemplate>
-              </ComboBox>
+        <!-- 单页控制面板：房间与播放 + 录制（不再分页签，减少点击层级） -->
+        <ScrollViewer Grid.Row="1" x:Name="ControlTabs" VerticalScrollBarVisibility="Auto" Padding="14,12,14,16">
+          <StackPanel>
+            <!-- ===== 房间 ===== -->
+            <TextBlock Text="平台" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
+            <ComboBox ItemsSource="{Binding Platforms}"
+                      SelectedItem="{Binding SelectedPlatformOption, Mode=TwoWay}"
+                      AutomationProperties.AutomationId="PlatformCombo">
+              <ComboBox.ItemTemplate>
+                <DataTemplate>
+                  <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource TextBrush}" />
+                </DataTemplate>
+              </ComboBox.ItemTemplate>
+            </ComboBox>
 
-              <TextBlock Text="房间号 / 直播间链接" Style="{StaticResource MutedText}" Margin="0,12,0,4" />
-              <TextBox Text="{Binding RoomInput, UpdateSourceTrigger=PropertyChanged}" />
-              <TextBlock Text="{Binding RoomUrlHint}" Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,0" />
+            <TextBlock Text="房间号 / 直播间链接" Style="{StaticResource MutedText}" Margin="0,10,0,4" />
+            <TextBox Text="{Binding RoomInput, UpdateSourceTrigger=PropertyChanged}" />
+            <TextBlock Text="{Binding RoomUrlHint}" Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,0" />
 
-              <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-                <Button Content="解析房间" Command="{Binding ResolveCommand}" />
-                <Button Content="开始播放" Command="{Binding PlayCommand}" />
-                <Button Content="mpv 播放" Command="{Binding MpvCommand}" />
-              </StackPanel>
-
-              <TextBlock Text="极限追帧档位" Style="{StaticResource MutedText}" Margin="0,12,0,4" />
-              <StackPanel Orientation="Horizontal">
-                <RadioButton Content="150 ms" GroupName="ExtremeTarget" IsChecked="{Binding IsTarget150, Mode=OneWay}"
-                             Command="{Binding SetTargetCommand}" CommandParameter="150" Foreground="{StaticResource TextBrush}" Margin="0,0,12,0" />
-                <RadioButton Content="200 ms" GroupName="ExtremeTarget" IsChecked="{Binding IsTarget200, Mode=OneWay}"
-                             Command="{Binding SetTargetCommand}" CommandParameter="200" Foreground="{StaticResource TextBrush}" Margin="0,0,12,0" />
-                <RadioButton Content="250 ms" GroupName="ExtremeTarget" IsChecked="{Binding IsTarget250, Mode=OneWay}"
-                             Command="{Binding SetTargetCommand}" CommandParameter="250" Foreground="{StaticResource TextBrush}" />
-              </StackPanel>
-              <TextBlock Text="数值越小延迟越低，网络抖动时更容易卡顿。" Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,0" />
-
-              <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-                <Button Content="追帧" Command="{Binding ChaseCommand}" />
-                <Button Content="停止播放" Command="{Binding StopCommand}" />
-              </StackPanel>
-
-              <Border Background="#141A22" BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1"
-                      CornerRadius="6" Padding="10" Margin="0,12,0,0">
-                <StackPanel>
-                  <TextBlock Text="{Binding RoomAnchor, StringFormat=主播：{0}}" TextWrapping="Wrap" />
-                  <TextBlock Text="{Binding RoomTitle, StringFormat=标题：{0}}" TextWrapping="Wrap" />
-                  <TextBlock Text="{Binding RoomCategory, StringFormat=分区：{0}}" TextWrapping="Wrap" />
-                  <TextBlock Text="{Binding StatusMessage, StringFormat=状态：{0}}" TextWrapping="Wrap" Foreground="{StaticResource AccentBrush}" />
-                  <TextBlock Text="{Binding PlayerTelemetry}" Style="{StaticResource MutedText}" TextWrapping="Wrap" />
-                  <TextBlock Text="{Binding BridgeStatus}" Style="{StaticResource MutedText}" TextWrapping="Wrap" />
-                </StackPanel>
-              </Border>
-
-              <TextBlock Text="候选线路" Style="{StaticResource MutedText}" Margin="0,12,0,4" />
-              <ListBox ItemsSource="{Binding CandidateSummaries}" Height="120" Background="#141A22"
-                       Foreground="{StaticResource TextBrush}" BorderBrush="{StaticResource BorderBrushSoft}" />
+            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+              <Button Content="解析房间" Command="{Binding ResolveCommand}" />
+              <Button Content="开始播放" Command="{Binding PlayCommand}" />
+              <Button Content="mpv 播放" Command="{Binding MpvCommand}" />
             </StackPanel>
-          </ScrollViewer>
-        </TabItem>
 
-        <!-- ================= 录制 ================= -->
-        <TabItem Header="录制">
-          <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="12">
-            <StackPanel>
-              <TextBlock Text="原始流录制（不转码、不重新编码）" FontWeight="SemiBold" />
-              <TextBlock Text="按大小或时长自动分片；断流后自动重连；同时写入主播名、房间号、标题、开播时间与录制时长。"
-                         Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,6,0,0" />
-
-              <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-                <Button Content="开始录制" Command="{Binding StartRecordingCommand}" />
-                <Button Content="停止录制" Command="{Binding StopRecordingCommand}" />
-                <Button Content="打开输出目录" Command="{Binding OpenRecordingFolderCommand}" />
-              </StackPanel>
-
-              <Border Background="#141A22" BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1"
-                      CornerRadius="6" Padding="10" Margin="0,12,0,0">
-                <StackPanel>
-                  <TextBlock Text="{Binding RecordingSummary}" TextWrapping="Wrap" />
-                  <TextBlock Text="{Binding RecordingDirectory, StringFormat=输出目录：{0}}" Style="{StaticResource MutedText}" TextWrapping="Wrap" />
-                </StackPanel>
-              </Border>
+            <!-- ===== 播放 ===== -->
+            <TextBlock Text="低延迟追帧" Style="{StaticResource SectionTitle}" Margin="0,14,0,4" />
+            <StackPanel Orientation="Horizontal">
+              <RadioButton Content="150 ms" GroupName="ExtremeTarget" IsChecked="{Binding IsTarget150, Mode=OneWay}"
+                           Command="{Binding SetTargetCommand}" CommandParameter="150" />
+              <RadioButton Content="200 ms" GroupName="ExtremeTarget" IsChecked="{Binding IsTarget200, Mode=OneWay}"
+                           Command="{Binding SetTargetCommand}" CommandParameter="200" />
+              <RadioButton Content="250 ms" GroupName="ExtremeTarget" IsChecked="{Binding IsTarget250, Mode=OneWay}"
+                           Command="{Binding SetTargetCommand}" CommandParameter="250" Margin="0" />
             </StackPanel>
-          </ScrollViewer>
-        </TabItem>
+            <TextBlock Text="数值越小延迟越低；网络抖动明显时选 250 ms 更稳。" Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,0" />
 
-        <!-- ================= 日志 ================= -->
-        <TabItem Header="日志">
-          <Grid Margin="12">
-            <Grid.RowDefinitions>
-              <RowDefinition Height="Auto" />
-              <RowDefinition Height="*" />
-              <RowDefinition Height="Auto" />
-            </Grid.RowDefinitions>
-            <TextBlock Grid.Row="0" Text="界面事件（完整日志见「设置 → 高级」中的日志目录）"
-                       Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,0,0,6" />
-            <ListBox Grid.Row="1" ItemsSource="{Binding LogLines}" Background="#141A22"
-                     Foreground="{StaticResource TextBrush}" BorderBrush="{StaticResource BorderBrushSoft}"
-                     FontFamily="Consolas" FontSize="12" />
-            <Button Grid.Row="2" Content="打开日志目录" Command="{Binding OpenLogFolderCommand}"
-                    HorizontalAlignment="Left" Margin="0,8,0,0" />
-          </Grid>
-        </TabItem>
-      </TabControl>
+            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+              <Button Content="追帧" Command="{Binding ChaseCommand}" />
+              <Button Content="停止播放" Command="{Binding StopCommand}" />
+            </StackPanel>
+
+            <!-- ===== 状态 ===== -->
+            <Border Style="{StaticResource CardPanel}" Margin="0,14,0,0">
+              <StackPanel>
+                <TextBlock Text="{Binding RoomAnchor, StringFormat=主播：{0}}" TextWrapping="Wrap" />
+                <TextBlock Text="{Binding RoomTitle, StringFormat=标题：{0}}" TextWrapping="Wrap" />
+                <TextBlock Text="{Binding RoomCategory, StringFormat=分区：{0}}" TextWrapping="Wrap" />
+                <TextBlock Text="{Binding StatusMessage, StringFormat=状态：{0}}" TextWrapping="Wrap" Foreground="{StaticResource AccentBrush}" />
+                <TextBlock Text="{Binding PlayerTelemetry}" Style="{StaticResource MutedText}" TextWrapping="Wrap" />
+                <TextBlock Text="{Binding BridgeStatus}" Style="{StaticResource MutedText}" TextWrapping="Wrap" />
+              </StackPanel>
+            </Border>
+
+            <!-- ===== 候选线路 ===== -->
+            <TextBlock Text="候选线路" Style="{StaticResource MutedText}" Margin="0,12,0,4" />
+            <ListBox ItemsSource="{Binding CandidateSummaries}" Height="86" />
+
+            <!-- ===== 录制 ===== -->
+            <TextBlock Text="原始流录制" Style="{StaticResource SectionTitle}" Margin="0,14,0,4" />
+            <TextBlock Text="不转码直写原始 FLV / TS；按大小或时长自动分片，断流自动重连，并写入元数据。"
+                       Style="{StaticResource MutedText}" TextWrapping="Wrap" />
+
+            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+              <Button Content="开始录制" Command="{Binding StartRecordingCommand}" />
+              <Button Content="停止录制" Command="{Binding StopRecordingCommand}" />
+              <Button Content="打开目录" Command="{Binding OpenRecordingFolderCommand}" />
+            </StackPanel>
+
+            <Border Style="{StaticResource CardPanel}" Margin="0,10,0,0">
+              <StackPanel>
+                <TextBlock Text="{Binding RecordingSummary}" TextWrapping="Wrap" />
+                <TextBlock Text="{Binding RecordingDirectory, StringFormat=输出：{0}}" Style="{StaticResource MutedText}" TextWrapping="Wrap" />
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
       </Grid>
     </Border>
 
     <!-- 右侧：WebView2 播放宿主（在代码后置中挂载，避免 XAML 直接依赖宿主类型） -->
-    <Border Grid.Column="1" Background="Black">
+    <Border Grid.Column="1" Background="{StaticResource WindowBackgroundBrush}">
       <Grid x:Name="PlayerHostContainer" />
     </Border>
   </Grid>

@@ -760,7 +760,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     {
         try
         {
-            SettingsViewModel settings = new(_presetStore, _resolveMpvPath, _logger);
+            SettingsViewModel settings = new(_presetStore, _resolveMpvPath, _logger, LogLines);
             settings.Load(_options);
             AppendLog("打开设置窗口。");
 
