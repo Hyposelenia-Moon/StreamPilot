@@ -12,7 +12,7 @@ using StreamPilot.Core.Parsers;
 /// <remarks>
 /// 调用官方站点内部工作室接口换取 <c>hls_src</c>：Bigo 只暴露一条 HLS 地址，画质固定为未知。
 /// 参考实现解析了 <c>roomStatus</c> 却未使用；此处按"<c>0</c> 或（状态缺失且无地址）视为未开播"判定
-/// （见 docs/adr/0003-解析器实现.md 第 5 节）。
+/// （见 docs/adr/0003-parser-contract.md 第 5 节）。
 /// </remarks>
 internal sealed class BigoParser : PlatformParserBase
 {

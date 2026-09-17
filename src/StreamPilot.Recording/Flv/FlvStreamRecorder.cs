@@ -8,7 +8,7 @@ using StreamPilot.Recording.Streams;
 /// FLV 原始流录制器：按标签搬运字节，按关键帧分片，断流后自动重连。
 /// </summary>
 /// <remarks>
-/// 严格约束（docs/adr/0004-录制实现.md）：
+/// 严格约束（docs/adr/0004-raw-recording.md）：
 /// <list type="bullet">
 ///   <item>不转码、不重新编码，视频/音频载荷逐字节原样写入；</item>
 ///   <item>唯一允许的改写是"分片起始处的 FLV 文件头 + 序列头复制 + 时间戳重定基"；</item>

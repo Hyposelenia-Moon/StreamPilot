@@ -2,7 +2,7 @@
 
 - 状态：已接受
 - 日期：2025-02-14
-- 相关文档：`CLAUDE.md`（架构边界）、`0001-技术栈选型.md`
+- 相关文档：`CLAUDE.md`（架构边界）、`0001-technology-stack.md`
 
 ## 背景
 
@@ -51,7 +51,7 @@
                       StreamPilot.Tests ──▶ 引用 Core / Parsers / Recording / Bridge
 ```
 
-依赖规则（由 `Directory.Build.props` 之外的代码评审与 `docs/architecture/依赖规则.md` 保证）：
+依赖规则（由 `Directory.Build.props` 之外的代码评审与 `docs/architecture/dependency-rules.md` 保证）：
 
 - `Core` 不引用任何其他 `StreamPilot.*` 工程。
 - `Parsers`、`Recording`、`Bridge` 只引用 `Core`。

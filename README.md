@@ -71,10 +71,10 @@ Web 端负责低延迟观看，mpv 端负责超分 / HDR / 高画质，两者互
 
 ## 已知限制
 
-- **斗鱼**：`getH5PlayV1` 常只返回 RTMP 地址。Web 端无法播放 RTMP，程序会明确提示并使用 mpv 外挂；此时也不支持原始流录制（BCL 无 RTMP 客户端，引入第三方库违反依赖约束，见 [ADR 0004](docs/adr/0004-录制实现.md)）。
+- **斗鱼**：`getH5PlayV1` 常只返回 RTMP 地址。Web 端无法播放 RTMP，程序会明确提示并使用 mpv 外挂；此时也不支持原始流录制（BCL 无 RTMP 客户端，引入第三方库违反依赖约束，见 [ADR 0004](docs/adr/0004-raw-recording.md)）。
 - **HLS fMP4 录制**：只支持播放，不支持录制（需要 ISO-BMFF 分片重写能力）。
-- **HEVC**：WebView2 能否播放 HEVC 取决于系统是否安装 HEVC 视频扩展。不支持的候选会被过滤并提示使用 mpv；本程序**不内置** ffmpeg 软解转码（与“不转码录制”的定位冲突，见 [ADR 0005](docs/adr/0005-桥接服务与打包发布.md)）。
-- **抖音签名**：不实现 `a_bogus` / `ms_token` 等风控签名（属绕过平台风控，见 [ADR 0003](docs/adr/0003-解析器实现.md)）。页面无 `roomStore` 时回退 reflow 接口；极端情况下可能解析失败。
+- **HEVC**：WebView2 能否播放 HEVC 取决于系统是否安装 HEVC 视频扩展。不支持的候选会被过滤并提示使用 mpv；本程序**不内置** ffmpeg 软解转码（与“不转码录制”的定位冲突，见 [ADR 0005](docs/adr/0005-bridge-and-packaging.md)）。
+- **抖音签名**：不实现 `a_bogus` / `ms_token` 等风控签名（属绕过平台风控，见 [ADR 0003](docs/adr/0003-parser-contract.md)）。页面无 `roomStore` 时回退 reflow 接口；极端情况下可能解析失败。
 - **虎牙 URL 有效期**：候选未声明过期时间，依赖“探测失败即切换候选”兜底。
 - **绝对单文件**：WebView2 需要 `WebView2Loader.dll`，播放页与 `tools\` 必须是磁盘文件，因此产物形态为 `exe + Web\ + tools\ + 文档`。
 - **Bigo**：对部分地区（如中国大陆 IP）限制访问。
@@ -118,9 +118,9 @@ node build\analyze-csharp.mjs
 ```
 StreamPilot/
 ├── CLAUDE.md                    项目规范（质量红线）
-├── docs/
-│   ├── adr/                     架构决策记录（0001-0005）
-│   ├── architecture/            播放消息契约、依赖规则、播放策略
+├── docs/                        文件名一律 ASCII 英文；正文与注释使用中文
+│   ├── adr/                     架构决策记录（0001-technology-stack ~ 0005-bridge-and-packaging）
+│   ├── architecture/            依赖规则（含文件名规范）、播放策略、播放消息契约
 │   ├── parsers/                 各平台解析器说明
 │   ├── testing/                 测试与覆盖率矩阵
 │   └── runbooks/                故障排查
@@ -140,7 +140,7 @@ StreamPilot/
 
 ### 运行 C# 单元测试
 
-测试工程是普通控制台程序（不依赖任何测试框架包，见 [ADR 0001](docs/adr/0001-技术栈选型.md)）：
+测试工程是普通控制台程序（不依赖任何测试框架包，见 [ADR 0001](docs/adr/0001-technology-stack.md)）：
 
 ```powershell
 dotnet run --project tests/StreamPilot.Tests
@@ -160,15 +160,17 @@ dotnet run --project tests/StreamPilot.Tests -- QueryStringParser   # 按类型�
 
 ## 文档索引
 
-- [ADR 0001 技术栈选型](docs/adr/0001-技术栈选型.md)
-- [ADR 0002 架构分层与模块划分](docs/adr/0002-架构分层.md)
-- [ADR 0003 平台解析器与统一结果结构](docs/adr/0003-解析器实现.md)
-- [ADR 0004 原始流录制、自动分片与断流重连](docs/adr/0004-录制实现.md)
-- [ADR 0005 桥接服务、Web 播放宿主与打包发布](docs/adr/0005-桥接服务与打包发布.md)
-- [播放消息契约](docs/architecture/播放消息契约.md)
-- [依赖规则](docs/architecture/依赖规则.md)
-- [播放策略（追帧 / 探测 / 恢复）](docs/architecture/播放策略.md)
-- [测试与覆盖率矩阵](docs/testing/覆盖率矩阵.md)
+- [ADR 0001 技术栈选型](docs/adr/0001-technology-stack.md)
+- [ADR 0002 架构分层与模块划分](docs/adr/0002-architecture-layering.md)
+- [ADR 0003 平台解析器与统一结果结构](docs/adr/0003-parser-contract.md)
+- [ADR 0004 原始流录制、自动分片与断流重连](docs/adr/0004-raw-recording.md)
+- [ADR 0005 桥接服务、Web 播放宿主与打包发布](docs/adr/0005-bridge-and-packaging.md)
+- [播放消息契约](docs/architecture/player-message-contract.md)
+- [依赖规则（含文件名规范）](docs/architecture/dependency-rules.md)
+- [播放策略（追帧 / 探测 / 恢复）](docs/architecture/playback-strategy.md)
+- [测试与覆盖率矩阵](docs/testing/coverage-matrix.md)
+- [故障排查](docs/runbooks/troubleshooting.md)
+- [平台解析器说明](docs/parsers/README.md)
 - [第三方依赖清单](THIRD-PARTY-NOTICES.md)
 
 ## 参考项目
@@ -177,9 +179,9 @@ StreamPilot 的三个能力方向分别参考了以下开源 / 公开项目。**
 
 | 项目 | 地址 | 参考内容 | 本项目做法 |
 |------|------|----------|------------|
-| **录播姬**（BililiveRecorder） | <https://github.com/BililiveRecorder/BililiveRecorder> | 直播**原始流录制**的行为：FLV 标签级写入、分片触发条件、"断流后新分片总是重发文件头 + onMetaData + 序列头"、时间戳错位/跳变修复思路、侧车元数据 | 参考行为、**独立实现**（`src/StreamPilot.Recording`），见 [ADR 0004](docs/adr/0004-录制实现.md) |
-| **Lsar** | <https://github.com/alley-rs/lsar> | 多平台**解析思路**：统一结果结构、房间状态分类、各平台接口与签名算法（B站 / 抖音 / 虎牙 / 斗鱼 / YY / Bigo） | 参考思路、**用 C# 全部重写**（`src/StreamPilot.Parsers`），并修正其无超时、`unreachable!` panic、错误分类不一致等问题，见 [ADR 0003](docs/adr/0003-解析器实现.md) |
-| **MultiLive** | <https://www.bilibili.com/video/BV1y1tu66ERj/> | **低延迟播放**：WebView2 宿主与页面的消息契约、三档极限追帧参数、CDN 候选并行探测与切换、冻结恢复阈值、WebView2 虚拟主机映射 | 播放逻辑自研重写（`Web/player.html` + `player-core.js`），并复用其随包的 Apache-2.0 前端库 `mpegts.js 1.8.2` / `hls.js 1.6.16`；修正其 PNA 响应头位置错误，见 [ADR 0005](docs/adr/0005-桥接服务与打包发布.md) 与 [播放策略](docs/architecture/播放策略.md) |
+| **录播姬**（BililiveRecorder） | <https://github.com/BililiveRecorder/BililiveRecorder> | 直播**原始流录制**的行为：FLV 标签级写入、分片触发条件、"断流后新分片总是重发文件头 + onMetaData + 序列头"、时间戳错位/跳变修复思路、侧车元数据 | 参考行为、**独立实现**（`src/StreamPilot.Recording`），见 [ADR 0004](docs/adr/0004-raw-recording.md) |
+| **Lsar** | <https://github.com/alley-rs/lsar> | 多平台**解析思路**：统一结果结构、房间状态分类、各平台接口与签名算法（B站 / 抖音 / 虎牙 / 斗鱼 / YY / Bigo） | 参考思路、**用 C# 全部重写**（`src/StreamPilot.Parsers`），并修正其无超时、`unreachable!` panic、错误分类不一致等问题，见 [ADR 0003](docs/adr/0003-parser-contract.md) |
+| **MultiLive** | <https://www.bilibili.com/video/BV1y1tu66ERj/> | **低延迟播放**：WebView2 宿主与页面的消息契约、三档极限追帧参数、CDN 候选并行探测与切换、冻结恢复阈值、WebView2 虚拟主机映射 | 播放逻辑自研重写（`Web/player.html` + `player-core.js`），并复用其随包的 Apache-2.0 前端库 `mpegts.js 1.8.2` / `hls.js 1.6.16`；修正其 PNA 响应头位置错误，见 [ADR 0005](docs/adr/0005-bridge-and-packaging.md) 与 [播放策略](docs/architecture/playback-strategy.md) |
 
 > 上述项目各自适用其自身的开源许可；StreamPilot 的分发物中只包含 `mpegts.js` 与 `hls.js` 两个 Apache-2.0 库（版本与 SHA256 登记于 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)）。
 

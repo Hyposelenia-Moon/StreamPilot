@@ -2,7 +2,7 @@
 
 - 状态：已接受
 - 日期：2025-02-14
-- 相关文档：`0002-架构分层.md`、`docs/parsers/*.md`
+- 相关文档：`0002-architecture-layering.md`、`docs/parsers/*.md`
 
 ## 背景
 

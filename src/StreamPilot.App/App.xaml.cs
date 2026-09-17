@@ -26,7 +26,7 @@ namespace StreamPilot.App;
 /// 应用入口与组合根：在这里完成配置、日志、HTTP、解析、录制、桥接与 UI 的装配。
 /// </summary>
 /// <remarks>
-/// 组合根是唯一允许引用全部工程的位置（见 docs/adr/0002-架构分层.md）。
+/// 组合根是唯一允许引用全部工程的位置（见 docs/adr/0002-architecture-layering.md）。
 /// 所有耗时初始化都在窗口显示后进行，避免在 UI 线程执行阻塞操作。
 /// </remarks>
 public partial class App : Application

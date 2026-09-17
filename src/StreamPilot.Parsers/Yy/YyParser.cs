@@ -16,7 +16,7 @@ using StreamPilot.Core.Utilities;
 /// <remarks>
 /// 先抓取 <c>www.yy.com/{房间号}</c> 页面取主播名、标题与分区，再向 stream-manager 播放接口
 /// 换取全部 CDN 线路地址。YY 不返回明确的直播状态，因此按"有地址即开播、无地址即未开播"判定
-/// （见 docs/adr/0003-解析器实现.md 第 5 节）。
+/// （见 docs/adr/0003-parser-contract.md 第 5 节）。
 /// </remarks>
 internal sealed class YyParser : PlatformParserBase
 {

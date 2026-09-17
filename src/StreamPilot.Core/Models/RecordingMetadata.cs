@@ -4,7 +4,7 @@ namespace StreamPilot.Core.Models;
 /// 录制输出元数据（写入 <c>{anchor}-{roomId}-{startTime}.meta.json</c> 侧车文件）。
 /// </summary>
 /// <remarks>
-/// 严禁写入签名 URL 或 Cookie；流地址只以指纹形式记录（见 docs/adr/0004-录制实现.md）。
+/// 严禁写入签名 URL 或 Cookie；流地址只以指纹形式记录（见 docs/adr/0004-raw-recording.md）。
 /// </remarks>
 public sealed record RecordingMetadata
 {

@@ -12,7 +12,7 @@ using StreamPilot.Core.Utilities;
 /// B站（哔哩哔哩）直播解析器。
 /// </summary>
 /// <remarks>
-/// 解析流程（见 docs/adr/0003-解析器实现.md 第 5 节）：
+/// 解析流程（见 docs/adr/0003-parser-contract.md 第 5 节）：
 /// <list type="number">
 /// <item><description>确定数字房间号：输入本身是数字时直接使用，短号先抓取直播间页面解析；</description></item>
 /// <item><description>调用 getInfoByRoom 取标题、主播名、分区与封面；</description></item>

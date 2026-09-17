@@ -1,7 +1,7 @@
 namespace StreamPilot.Core.Runtime;
 
 /// <summary>
-/// 极简服务注册表：替代 Microsoft.Extensions.DependencyInjection（见 docs/adr/0001-技术栈选型.md）。
+/// 极简服务注册表：替代 Microsoft.Extensions.DependencyInjection（见 docs/adr/0001-technology-stack.md）。
 /// </summary>
 /// <remarks>
 /// 只支持单例注册与按接口解析，够用且不引入任何第三方包。

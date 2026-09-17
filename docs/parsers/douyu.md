@@ -54,5 +54,5 @@ auth    = md5(auth + key + signStr)
 
 - **多数房间仅返回 RTMP**：Web 端（WebView2 + mse）无法播放 RTMP，因此 Web 播放与原始流录制对这类房间不可用。
   这是平台能力限制，不是缺陷；UI 会明确提示改用 mpv（mpv 原生支持 RTMP）。
-  不引入 RTMP 客户端库的原因见 [ADR 0004](../../adr/0004-录制实现.md)。
+  不引入 RTMP 客户端库的原因见 [ADR 0004](../../adr/0004-raw-recording.md)。
 - 参考实现把 `rate=-1`（服务器自选画质）与 `hevc=0`（优先 AVC）作为固定参数，本项目保持一致。

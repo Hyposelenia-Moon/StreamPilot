@@ -27,7 +27,7 @@
     <Copyright>Copyright (c) StreamPilot contributors</Copyright>
   </PropertyGroup>
 
-  <!-- 单文件自包含发布（详见 docs/adr/0005-桥接服务与打包发布.md） -->
+  <!-- 单文件自包含发布（详见 docs/adr/0005-bridge-and-packaging.md） -->
   <PropertyGroup>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>

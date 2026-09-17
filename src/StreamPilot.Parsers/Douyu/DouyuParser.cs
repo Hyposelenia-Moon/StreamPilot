@@ -15,7 +15,7 @@ using StreamPilot.Core.Parsers;
 /// 斗鱼直播解析器。
 /// </summary>
 /// <remarks>
-/// 解析链路（见 docs/adr/0003-解析器实现.md 第 5 节"斗鱼"行）：
+/// 解析链路（见 docs/adr/0003-parser-contract.md 第 5 节"斗鱼"行）：
 /// 房间页元数据 → <c>/betard/{roomId}</c> 轮播探测 → <c>getEncryption</c> 签名参数 → <c>getH5PlayV1</c> 播放信息 → 候选流组装。
 /// 斗鱼主链路是 RTMP，Web 端不可播放；平台同时给出 HTTP-FLV/HLS 时优先产出 Web 可播候选，
 /// 否则产出 <see cref="StreamFormat.Rtmp"/> 候选，由上层提示"该房间仅提供 RTMP，请使用 mpv 外挂播放"。

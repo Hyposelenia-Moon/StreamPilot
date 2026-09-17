@@ -13,7 +13,7 @@ using StreamPilot.Core.Parsers;
 /// <remarks>
 /// 主路径抓取 <c>live.douyin.com/{房间号}</c> 页面并抽取内嵌的 roomStore 状态；
 /// 页面不可用（风控精简页、结构变更）或未给出可用地址时，回退到 webcast reflow 接口。
-/// 不实现 <c>a_bogus</c>/<c>ms_token</c> 等签名与风控绕过（见 docs/adr/0003-解析器实现.md 第 5 节）。
+/// 不实现 <c>a_bogus</c>/<c>ms_token</c> 等签名与风控绕过（见 docs/adr/0003-parser-contract.md 第 5 节）。
 /// </remarks>
 internal sealed class DouyinParser : PlatformParserBase
 {

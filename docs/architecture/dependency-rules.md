@@ -75,7 +75,33 @@ pwsh -File build\verify-tree.ps1
 6. `src/` 下出现 `*.exe`/`*.dll`/`*.pdb` → 失败；
 7. 任何 C# 文件行数超过 300 行的单个方法（粗检）→ 提示。
 
-## 6. 变更流程
+## 6. 文件名规范（仓库内一律 ASCII）
+
+**仓库中所有文件名（含文档）一律使用 ASCII 英文名**，不使用中文或其他非 ASCII 字符作为文件名。文件名承载"这是什么"，中文标题写在文件内部（H1）与索引链接文字里即可。
+
+| 类别 | 命名规则 | 示例 |
+|------|----------|------|
+| C# 源文件 | PascalCase，与类型名一致 | `BilibiliParser.cs`、`HttpTextClient.cs` |
+| C# 工程文件 | 与工程同名 | `StreamPilot.App.csproj` |
+| 前端源文件 | kebab-case | `player-core.js` |
+| 脚本 | kebab-case | `verify-tree.ps1`、`analyze-csharp.mjs` |
+| 文档 | kebab-case；ADR 带四位序号前缀 | `0003-parser-contract.md`、`player-message-contract.md` |
+| 配置/清单 | UPPER 或 kebab-case | `THIRD-PARTY-NOTICES.md`、`Directory.Build.props` |
+
+**文件内容语言不受此约束**：代码注释、文档正文、提交信息仍然使用中文。
+
+**引入原因**：中文文件名在 7z 解压、旧编码工具链、CI 归档、跨平台 clone 与 URL 引用等场景下存在乱码或引用失效风险；改为 ASCII 命名后，所有工具链与链接都稳定可预期。
+
+**重命名已有文件**必须用 `git mv`（保留文件历史），并同步更新所有引用：
+
+- 代码与脚本里的路径引用（C# 的 XML 注释、`.csproj` 注释、构建脚本）；
+- 文档之间的相对链接；
+- `build/verify-tree.ps1` 的"必需文件"清单；
+- `README.md` 的文档索引与目录结构树。
+
+**新增文档的检查点**：文件名是否 ASCII、是否被 `README.md` 文档索引收录、是否被其他文档正确链接。
+
+## 7. 变更流程
 
 - 需要新增跨层调用（例如让 `Recording` 直接使用 `Bridge` 中继）必须**先写 ADR** 说明理由，再改代码。
-- 需要更换技术栈（UI 框架、HTTP 实现、日志实现）必须修订 `docs/adr/0001-技术栈选型.md`。
+- 需要更换技术栈（UI 框架、HTTP 实现、日志实现）必须修订 `docs/adr/0001-technology-stack.md`。

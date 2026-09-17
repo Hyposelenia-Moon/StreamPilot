@@ -4,7 +4,7 @@
 
 | 层 | 位置 | 运行方式 | 依赖 |
 |----|------|----------|------|
-| C# 单元测试 | `tests/StreamPilot.Tests` | `dotnet run --project tests/StreamPilot.Tests` | 无第三方包（自研极简运行器，见 [ADR 0001](../adr/0001-技术栈选型.md) 决策 5） |
+| C# 单元测试 | `tests/StreamPilot.Tests` | `dotnet run --project tests/StreamPilot.Tests` | 无第三方包（自研极简运行器，见 [ADR 0001](../adr/0001-technology-stack.md) 决策 5） |
 | 播放策略回归测试 | `tests/web/player-core.test.js` | `node --test tests/web/player-core.test.js` | Node.js 内置 `node:test` |
 | 静态红线检查 | `build/verify-tree.ps1` | `powershell -File build/verify-tree.ps1` | PowerShell |
 | 离线结构分析 | `build/analyze-csharp.mjs` | `node build/analyze-csharp.mjs` | Node.js（无需 SDK） |
@@ -55,7 +55,7 @@
 | `Recording.Flv.FlvSegmentWriter` | 文件头字节、载荷逐字节一致、时间戳重定基、序列头重放、分片元数据、释放后拒绝写入 | `FlvSegmentWriterTests`（6 个） |
 | `Recording.Hls.HlsPlaylistParser` / `TsStreamRecorder.AlignToPacketBoundary` | media/master 播放列表、ENDLIST、空内容、TS 整包对齐、前导垃圾、不足一包 | `HlsPlaylistTests`（7 个） |
 | `Bridge.LoopbackOnlyGuard` / `RelayRegistry` / `BridgeHost` | 回环前缀校验、通配拒绝、端口越界、注册/解析/释放、未知令牌、容量上限、按地址释放、未启动时注册失败 | `BridgeTests`（7 个） |
-| `Web.player-core`（播放策略） | 见 `docs/architecture/播放策略.md` 第 7 节 | `player-core.test.js`（13 个） |
+| `Web.player-core`（播放策略） | 见 `docs/architecture/playback-strategy.md` 第 7 节 | `player-core.test.js`（13 个） |
 
 **未覆盖（需联网或人工验证，属集成测试范畴）**：
 
@@ -64,7 +64,7 @@
 | 六个平台解析器的实际 HTTP 解析 | 需要真实平台响应，且沙箱无外网 | 增加"响应样本 → 解析结果"的离线用例（把响应体固化为测试资源），待有样本后补充 |
 | `RecordingSession` / `FlvStreamRecorder` 端到端 | 依赖真实流；但字节级写入、分片策略、命名、元数据均已单测覆盖 | 用本地伪造 HTTP 服务（`HttpListener` 回环）做集成测试 |
 | `PlaybackCoordinator` 中继注册 | 依赖桥接服务运行 | 已在 `BridgeTests` 覆盖注册表逻辑；协调器留待集成测试 |
-| `MpvLauncher` | 需要 mpv 可执行文件 | 人工验证清单见 `docs/runbooks/故障排查.md` |
+| `MpvLauncher` | 需要 mpv 可执行文件 | 人工验证清单见 `docs/runbooks/troubleshooting.md` |
 
 ## 4. 用例编写要求
 

@@ -6,7 +6,7 @@ using StreamPilot.Core.Models;
 /// HTTP 重试策略（纯函数，便于单元测试）。
 /// </summary>
 /// <remarks>
-/// 规则（见 docs/adr/0003-解析器实现.md 决策 3）：
+/// 规则（见 docs/adr/0003-parser-contract.md 决策 3）：
 /// 只对"连接失败 / 超时 / 409 / 425 / 429 / 5xx"重试，最多 3 次尝试（含首次），
 /// 退避序列为 300ms、900ms、2000ms，并叠加 ±20% 抖动以打散并发重试。
 /// </remarks>

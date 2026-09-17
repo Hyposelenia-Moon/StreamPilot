@@ -25,7 +25,7 @@ tools\
 
 ## mpv 启动参数
 
-默认使用低延迟参数（见 `docs/architecture/播放策略.md` 与 `src/StreamPilot.Bridge/MpvLauncher.cs`）：
+默认使用低延迟参数（见 `docs/architecture/playback-strategy.md` 与 `src/StreamPilot.Bridge/MpvLauncher.cs`）：
 
 ```
 --cache=no --cache-pause=no --demuxer-readahead-secs=0 --demuxer-max-bytes=512K

@@ -12,7 +12,7 @@ using StreamPilot.Core.Logging;
 /// WebView2 播放宿主：把 <c>Web\</c> 目录映射为虚拟主机并承载播放页。
 /// </summary>
 /// <remarks>
-/// 要点（docs/adr/0005-桥接服务与打包发布.md）：
+/// 要点（docs/adr/0005-bridge-and-packaging.md）：
 /// <list type="bullet">
 ///   <item>必须使用 <c>https://appassets.local/</c> 这类虚拟主机而不是 <c>file://</c>，
 ///         否则候选探测的 <c>mode:'cors'</c> 与 Private Network Access 都会失败；</item>

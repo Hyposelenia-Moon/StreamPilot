@@ -9,7 +9,7 @@ using StreamPilot.Core.Services;
 /// </summary>
 /// <remarks>
 /// 解析器在构造时一次性注册；新增平台只需在此登记，UI 与录制层无需改动
-/// （见 docs/adr/0002-架构分层.md）。
+/// （见 docs/adr/0002-architecture-layering.md）。
 /// </remarks>
 public sealed class PlatformParserFactory : IPlatformParserFactory
 {

@@ -10,7 +10,7 @@
 | `Microsoft.Web.WebView2` | `1.0.2903.40` | BSD-3-Clause（Microsoft） | WPF 内嵌 Edge 内核，承载播放页 | https://www.nuget.org/packages/Microsoft.Web.WebView2 |
 
 说明：
-- 这是**唯一**的运行时第三方包（见 [ADR 0001](../docs/adr/0001-技术栈选型.md)）。
+- 这是**唯一**的运行时第三方包（见 [ADR 0001](../docs/adr/0001-technology-stack.md)）。
 - 该包内含原生库 `WebView2Loader.dll`，随发布产物一并分发；它**不提交到仓库**（`.gitignore` 已排除 `*.dll`）。
 - 测试工程不引入任何测试框架包，使用自研极简运行器。
 
@@ -22,7 +22,7 @@
 | `Web/hls.js` | **1.6.16** | Apache-2.0 | `442F599C34F103C3355B375A23BDFF560592D7117D09A8C847242EA3DE2D40E0` | 上游 hls.js（Dailymotion / video-dev）；库内自报 `version = "1.6.16"`；为 `hls.min.js` 重命名；许可文本随包提供 `Web/HLS-LICENSE.txt` |
 | `Web/HLS-LICENSE.txt` | — | Apache-2.0 文本 | `CA8773CF798C7ED997D4DD7C8E23C348699F8D5B7462636694CC14DE6CDA12DB` | hls.js 许可文本（Dailymotion 2017 + videojs-contrib-hls 说明） |
 | `Web/MPEGTS-LICENSE.txt` | — | Apache-2.0 文本 | `58D1E17FFE5109A7AE296CAAFCADFDBE6A7D176F0BC4AB01E12A689B0499D8BD` | mpegts.js 许可文本 |
-| `Web/player.html`、`Web/player-core.js` | 自研 | MIT | 见 `build/verify-tree.ps1 -VerifyHashes` | 本项目源码；播放策略与宿主消息契约见 `docs/architecture/播放消息契约.md` |
+| `Web/player.html`、`Web/player-core.js` | 自研 | MIT | 见 `build/verify-tree.ps1 -VerifyHashes` | 本项目源码；播放策略与宿主消息契约见 `docs/architecture/player-message-contract.md` |
 | `Web/decode-selftest.mp4` | **未随包** | — | — | 参考项目中的 H.264+AAC 自检片段，本项目**不使用**（参考项目的 MSE 自检逻辑未移植），因此未复制该二进制资产 |
 
 > 校验方式：`powershell -NoProfile -ExecutionPolicy Bypass -File build/verify-tree.ps1 -VerifyHashes`
@@ -44,8 +44,8 @@
 | 项目 | 用途 | 复用情况 |
 |------|------|----------|
 | `MultiLive-Windows-v10.4.16-diag` | 低延迟播放参数、稳定性边界、WebView2 消息契约、桥接经验值 | 复用其**随包的 Apache-2.0 前端库**（见第 2 节）；C# 层为闭源编译产物，**未复用**，已用 C# 重写 |
-| `lsar-0.3.19`（Rust/Tauri） | 六个平台解析思路 | 仅参考思路，**全部用 C# 重写**（见 [ADR 0003](../docs/adr/0003-解析器实现.md)） |
-| `BililiveRecorder-WPF-Portable` | 原始流录制行为（分片、重连、元数据） | 仅参考行为，**独立实现**（见 [ADR 0004](../docs/adr/0004-录制实现.md)） |
+| `lsar-0.3.19`（Rust/Tauri） | 六个平台解析思路 | 仅参考思路，**全部用 C# 重写**（见 [ADR 0003](../docs/adr/0003-parser-contract.md)） |
+| `BililiveRecorder-WPF-Portable` | 原始流录制行为（分片、重连、元数据） | 仅参考行为，**独立实现**（见 [ADR 0004](../docs/adr/0004-raw-recording.md)） |
 
 ## 5. 发布前待办
 

@@ -16,7 +16,7 @@ using StreamPilot.Core.Utilities;
 /// </summary>
 /// <remarks>
 /// 解析链路：房间页取真实数字房间号 → profileRoom 接口取直播状态与线路 → 匿名登录取 uid → anticode 签名 → 产出 FLV/HLS 候选。
-/// 端点与签名算法见 <c>docs/adr/0003-解析器实现.md</c> 第 5 节虎牙行；参考实现的 <c>unreachable!()</c> panic 已改为互斥的失败分类。
+/// 端点与签名算法见 <c>docs/adr/0003-parser-contract.md</c> 第 5 节虎牙行；参考实现的 <c>unreachable!()</c> panic 已改为互斥的失败分类。
 /// 签名后的完整地址与 wsSecret 属于敏感信息，禁止写入日志；日志只使用 <see cref="SensitiveData.Fingerprint"/>。
 /// </remarks>
 internal sealed class HuyaParser : PlatformParserBase

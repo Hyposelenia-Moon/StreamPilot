@@ -4,7 +4,7 @@ namespace StreamPilot.Core.Models;
 /// 交给 Web 播放页的候选（与 <c>player.html</c> 的候选字段一一对应）。
 /// </summary>
 /// <remarks>
-/// 字段名与 Web 播放消息契约保持一致，序列化时使用 camelCase（见 docs/architecture/播放消息契约.md）。
+/// 字段名与 Web 播放消息契约保持一致，序列化时使用 camelCase（见 docs/architecture/player-message-contract.md）。
 /// </remarks>
 public sealed record WebPlayerCandidate
 {

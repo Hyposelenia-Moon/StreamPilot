@@ -131,11 +131,11 @@ $requiredFiles = @(
     'LICENSE',
     'CLAUDE.md',
     'THIRD-PARTY-NOTICES.md',
-    'docs\adr\0001-技术栈选型.md',
-    'docs\adr\0002-架构分层.md',
-    'docs\adr\0003-解析器实现.md',
-    'docs\adr\0004-录制实现.md',
-    'docs\adr\0005-桥接服务与打包发布.md',
+    'docs\adr\0001-technology-stack.md',
+    'docs\adr\0002-architecture-layering.md',
+    'docs\adr\0003-parser-contract.md',
+    'docs\adr\0004-raw-recording.md',
+    'docs\adr\0005-bridge-and-packaging.md',
     'Web\player.html',
     'Web\player-core.js',
     'Web\mpegts.js',
@@ -157,6 +157,17 @@ if ($VerifyHashes) {
             Write-Host ("    Web/{0}  SHA256 = {1}" -f $name, $hash)
         }
     }
+}
+
+Write-Host '== 9. Filenames must be ASCII (see docs/architecture/dependency-rules.md) ==' -ForegroundColor Cyan
+$nonAsciiFiles = Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -notmatch '\\(bin|obj|\.git)\\' -and (Split-Path -Leaf $_.FullName) -match '[^\x00-\x7F]' }
+if ($nonAsciiFiles) {
+    $relative = ($nonAsciiFiles | ForEach-Object { $_.FullName.Substring($root.Length + 1) }) -join ', '
+    $failures.Add("[non-ASCII filename] rename to English ASCII via git mv: $relative")
+}
+else {
+    Write-Host '    all filenames are ASCII' -ForegroundColor DarkGray
 }
 
 Write-Host ''

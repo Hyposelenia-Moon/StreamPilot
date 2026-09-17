@@ -6,7 +6,7 @@ using StreamPilot.Core.Logging;
 /// 平台解析产出的单个可播放/可录制流候选。
 /// </summary>
 /// <remarks>
-/// 该类是解析层与播放/录制层之间的唯一契约（见 docs/adr/0003-解析器实现.md）。
+/// 该类是解析层与播放/录制层之间的唯一契约（见 docs/adr/0003-parser-contract.md）。
 /// <see cref="Url"/> 含平台签名与过期参数，禁止写入日志；日志一律使用 <see cref="UrlFingerprint"/>。
 /// </remarks>
 public sealed record StreamCandidate

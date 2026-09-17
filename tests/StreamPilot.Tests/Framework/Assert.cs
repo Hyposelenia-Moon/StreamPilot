@@ -14,7 +14,7 @@ public sealed class AssertionFailedException : Exception
 }
 
 /// <summary>
-/// 极简断言库（不依赖任何测试框架包，见 docs/adr/0001-技术栈选型.md 决策 5）。
+/// 极简断言库（不依赖任何测试框架包，见 docs/adr/0001-technology-stack.md 决策 5）。
 /// </summary>
 public static class Assert
 {

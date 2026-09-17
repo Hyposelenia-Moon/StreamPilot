@@ -2,7 +2,7 @@
 
   <!--
     测试工程为普通 Exe：当前构建环境无法还原 xunit/NUnit 等测试包，
-    因此使用自研极简测试运行器（见 docs/adr/0001-技术栈选型.md 决策 5）。
+    因此使用自研极简测试运行器（见 docs/adr/0001-technology-stack.md 决策 5）。
     运行方式：dotnet run -p tests/StreamPilot.Tests
    退出码：全部通过为 0，存在失败为 1。
   -->

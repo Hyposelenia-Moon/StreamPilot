@@ -2,7 +2,7 @@
 
 - 状态：已接受
 - 日期：2025-02-14
-- 相关文档：`0001-技术栈选型.md`、`0004-录制实现.md`
+- 相关文档：`0001-technology-stack.md`、`0004-raw-recording.md`
 
 ## 背景
 
@@ -50,11 +50,11 @@
 
 - `WebViewHost`（App 层）：
   - `CoreWebView2.SetVirtualHostNameToFolderMapping("appassets.local", <exe dir>\Web, CoreWebView2HostResourceAccessKind.DenyCors)`，导航到 `https://appassets.local/player.html`。
-  - 页面与宿主通过 `chrome.webview.postMessage` / `postMessageAsJson` 通信，字段契约见 `docs/architecture/播放消息契约.md`。
+  - 页面与宿主通过 `chrome.webview.postMessage` / `postMessageAsJson` 通信，字段契约见 `docs/architecture/player-message-contract.md`。
   - 页面**不暴露** `window` 方法（沿用参考项目的做法，避免宿主与页面耦合）。
 - 宿主 → 页面消息：`play`（`sessionId`、`mode`、`extremeTargetMs`、`candidates[]`）、`chase`（`keepSeconds`）、`stop`。
 - 页面 → 宿主消息：`ready`、`status`、`telemetry`、`error`、`refresh-needed` 等；宿主对 `sessionId` 做**过期校验**（忽略旧会话消息，避免竞态）。
-- 播放页为**自研重写**（`Web/player.html`），复用 Apache-2.0 的 `mpegts.js 1.8.2` 与 `hls.js 1.6.16`（随包分发并登记 SHA256），移植并修正参考项目的追帧参数、探测与恢复策略（见 `docs/adr/0006` 与 `docs/parsers` 无关，见 `docs/architecture/播放策略.md`）。
+- 播放页为**自研重写**（`Web/player.html`），复用 Apache-2.0 的 `mpegts.js 1.8.2` 与 `hls.js 1.6.16`（随包分发并登记 SHA256），移植并修正参考项目的追帧参数、探测与恢复策略（见 `docs/adr/0006` 与 `docs/parsers` 无关，见 `docs/architecture/playback-strategy.md`）。
 - 首版**不内置** ffmpeg 软解中继（见下）；HEVC 不支持时按"候选过滤 + 明确提示 + mpv 外挂"处理。
 
 ### 4. 外部工具（`tools/`）：不内嵌、不捆绑官方二进制
