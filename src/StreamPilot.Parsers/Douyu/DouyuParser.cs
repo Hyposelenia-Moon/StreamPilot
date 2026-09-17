@@ -102,6 +102,29 @@ internal sealed class DouyuParser : PlatformParserBase
     /// <summary>播放接口 <c>rate</c> 参数：原画档位值，同时也是斗鱼的最高档。</summary>
     private const int OriginalRate = 0;
 
+    /// <summary>
+    /// 主请求使用的 <c>cdn</c> 参数值（空字符串 = 由平台自选，与参考实现一致）。
+    /// </summary>
+    private const string AutoCdnName = "";
+
+    /// <summary>响应里声明的 CDN 列表字段名。</summary>
+    private const string CdnsWithNameField = "cdnsWithName";
+
+    /// <summary>CDN 列表项里的 CDN 标识字段名。</summary>
+    private const string CdnNameField = "cdn";
+
+    /// <summary>
+    /// 除主请求之外，最多再向几个平台声明的 CDN 各请求一次播放地址。
+    /// </summary>
+    /// <remarks>
+    /// 实测（房间 1811143）：平台声明两条 CDN（<c>scdncmccgudst</c> / <c>hw-h5</c>），
+    /// 分别对应 <c>stream-shantou-*.edgesrv.com</c> 与 <c>hw1a.douyucdn2.cn</c> 两个不同主机；
+    /// 而 <c>cdn</c> 留空时只返回前者。斗鱼同一签名地址只允许 1 条并发连接
+    /// （第 2 条会在 0.2 到 0.4 秒内被上游切断），因此单候选一旦失效就没有可切换的线路。
+    /// 这里只在主请求拿到**不超过 1 条**候选时才补请求，避免给大多数房间增加延迟。
+    /// </remarks>
+    private const int MaxAdditionalCdnRequests = 2;
+
     /// <summary>档位取值下限（防御性校验，超出视为非法档位键）。</summary>
     private const int MinRate = 0;
 
@@ -291,9 +314,32 @@ internal sealed class DouyuParser : PlatformParserBase
 
         DouyuEncryption encryption = await FetchEncryptionAsync(page.RoomId, cancellationToken).ConfigureAwait(false);
         int requestedRate = ResolveRequestedRate(query.PreferredQualityKey);
-        DouyuPlayInfo playInfo = await FetchPlayInfoAsync(page.RoomId, encryption, requestedRate, cancellationToken)
+        DouyuPlayInfo playInfo = await FetchPlayInfoAsync(page.RoomId, encryption, requestedRate, AutoCdnName, cancellationToken)
             .ConfigureAwait(false);
-        IReadOnlyList<StreamCandidate> candidates = CollectCandidates(page.RoomId, playInfo);
+
+        StreamCandidateBuilder builder = new(Platform, Logger);
+        HashSet<string> usedHosts = new(StringComparer.OrdinalIgnoreCase);
+        int added = CollectCandidates(page.RoomId, playInfo, builder, usedHosts);
+
+        // 只有一条候选时再向平台声明的其它 CDN 各取一次地址：单候选失效后页面无路可切。
+        if (added <= 1)
+        {
+            IReadOnlyList<DouyuPlayInfo> extraPlayInfos = await FetchAdditionalCdnPlayInfosAsync(
+                page.RoomId,
+                requestedRate,
+                playInfo.CdnNames,
+                cancellationToken).ConfigureAwait(false);
+            foreach (DouyuPlayInfo extra in extraPlayInfos)
+            {
+                added += CollectCandidates(page.RoomId, extra, builder, usedHosts);
+            }
+        }
+
+        IReadOnlyList<StreamCandidate> candidates = builder.Build();
+        if (candidates.Count == 0)
+        {
+            throw Fail(ResolveFailure.NotLive, StreamInfoOperation, ResolveMessages.NotLive);
+        }
 
         Logger.Info(ModuleName, "斗鱼解析完成。", new Dictionary<string, object?>
         {
@@ -674,6 +720,7 @@ internal sealed class DouyuParser : PlatformParserBase
     /// <param name="roomId">页面确认后的最终房间号。</param>
     /// <param name="encryption">加密参数与计算出的签名。</param>
     /// <param name="requestedRate">请求的画质档位（rate 数值）；由调用方解析并做越界回退。</param>
+    /// <param name="cdnName">请求的 CDN 标识；空字符串表示由平台自选（主请求）。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>归一化后的播放信息。</returns>
     /// <exception cref="ResolveException">平台拒绝、未开播、错误码未知或响应结构异常时抛出。</exception>
@@ -685,6 +732,7 @@ internal sealed class DouyuParser : PlatformParserBase
         string roomId,
         DouyuEncryption encryption,
         int requestedRate,
+        string cdnName,
         CancellationToken cancellationToken)
     {
         IReadOnlyList<KeyValuePair<string, string>> form =
@@ -693,7 +741,7 @@ internal sealed class DouyuParser : PlatformParserBase
             new KeyValuePair<string, string>("tt", encryption.Timestamp.ToString(CultureInfo.InvariantCulture)),
             new KeyValuePair<string, string>("did", DeviceId),
             new KeyValuePair<string, string>("auth", encryption.Auth),
-            new KeyValuePair<string, string>("cdn", string.Empty),
+            new KeyValuePair<string, string>("cdn", cdnName),
             new KeyValuePair<string, string>("rate", requestedRate.ToString(CultureInfo.InvariantCulture)),
             new KeyValuePair<string, string>("hevc", FlagOff),
             new KeyValuePair<string, string>("fa", FlagOff),
@@ -771,98 +819,170 @@ internal sealed class DouyuParser : PlatformParserBase
             ["selectedRate"] = selectedQualityKey,
         });
 
-        return new DouyuPlayInfo(rtmpUrl, rtmpLive, hlsUrl, flvUrls, hlsUrls, qualities, selectedQualityKey);
+        return new DouyuPlayInfo(
+            rtmpUrl,
+            rtmpLive,
+            hlsUrl,
+            flvUrls,
+            hlsUrls,
+            qualities,
+            selectedQualityKey,
+            ReadDeclaredCdnNames(data));
     }
 
-    /// <summary>按优先级把播放信息组装为候选流：HTTP-FLV → HLS → RTMP 兜底。</summary>
+    /// <summary>读取响应里声明的 CDN 标识列表（按出现顺序去重）。</summary>
+    /// <param name="data">播放信息响应的 <c>data</c> 节点。</param>
+    /// <returns>CDN 标识列表；字段缺失时为空列表。</returns>
+    private static List<string> ReadDeclaredCdnNames(JsonElement data)
+    {
+        List<string> names = [];
+        JsonElement list = GetPropertyOrUndefined(data, CdnsWithNameField);
+        if (list.ValueKind != JsonValueKind.Array)
+        {
+            return names;
+        }
+
+        foreach (JsonElement item in list.EnumerateArray())
+        {
+            string? name = ReadString(item, CdnNameField);
+            if (!string.IsNullOrWhiteSpace(name) && !names.Contains(name))
+            {
+                names.Add(name);
+            }
+        }
+
+        return names;
+    }
+
+    /// <summary>
+    /// 向平台声明的其它 CDN 各请求一次播放地址，用于凑出多条互相独立的候选。
+    /// </summary>
+    /// <param name="roomId">页面确认后的最终房间号。</param>
+    /// <param name="requestedRate">本次使用的画质档位。</param>
+    /// <param name="cdnNames">平台声明的 CDN 标识（最多取 <see cref="MaxAdditionalCdnRequests"/> 个）。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>成功取到的附加播放信息（失败的 CDN 只记 Warn 并跳过）。</returns>
+    /// <remarks>
+    /// 附加 CDN 只是"多一条备选"，任何失败都不能影响主路径，因此逐个 try/catch。
+    /// 每次都用**新**的加密参数：签名与时间戳绑定，复用同一次 <c>auth</c> 的可行性未经实测。
+    /// </remarks>
+    private async Task<IReadOnlyList<DouyuPlayInfo>> FetchAdditionalCdnPlayInfosAsync(
+        string roomId,
+        int requestedRate,
+        IReadOnlyList<string> cdnNames,
+        CancellationToken cancellationToken)
+    {
+        List<DouyuPlayInfo> results = [];
+        int remaining = MaxAdditionalCdnRequests;
+        foreach (string cdnName in cdnNames)
+        {
+            if (remaining == 0)
+            {
+                break;
+            }
+
+            remaining--;
+            try
+            {
+                DouyuEncryption encryption = await FetchEncryptionAsync(roomId, cancellationToken).ConfigureAwait(false);
+                DouyuPlayInfo info = await FetchPlayInfoAsync(roomId, encryption, requestedRate, cdnName, cancellationToken)
+                    .ConfigureAwait(false);
+                results.Add(info);
+            }
+            catch (Exception exception) when (exception is ResolveException or JsonException or InvalidOperationException)
+            {
+                Logger.Warn(ModuleName, "斗鱼附加 CDN 取地址失败，已忽略该 CDN。", new Dictionary<string, object?>
+                {
+                    ["operation"] = PlayInfoOperation,
+                    ["roomId"] = roomId,
+                    ["cdn"] = cdnName,
+                    ["detail"] = exception.Message,
+                });
+            }
+        }
+
+        return results;
+    }
+
+    /// <summary>把一份播放信息组装为候选流并加入构造器（按 CDN 主机去重）。</summary>
     /// <param name="roomId">页面确认后的最终房间号，仅用于日志上下文。</param>
     /// <param name="playInfo">归一化后的播放信息。</param>
-    /// <returns>候选流列表，下标即 <see cref="StreamCandidate.SourceIndex"/>。</returns>
-    /// <exception cref="ResolveException">直播中但没有任何可用流地址时抛出 <see cref="ResolveFailure.NotLive"/>。</exception>
+    /// <param name="builder">候选构造器（同一房间的多个 CDN 共用，保证源索引连续递增）。</param>
+    /// <param name="usedHosts">已经用过的 CDN 主机名；同一主机只保留一条候选。</param>
+    /// <returns>本次实际加入的候选数量。</returns>
     /// <remarks>
     /// <c>http_stream</c> 与 <c>hls_url_map</c> 的每个画质键各自产出一个候选；
     /// <c>hls_url</c> 按参考实现补一个路径分隔符后加入（平台该字段为目录形态）。
-    /// 仅剩 RTMP 时不抛未开播：房间确实在直播，只是 Web 端不可播放。
+    /// 仅剩 RTMP 时不视为未开播：房间确实在直播，只是 Web 端不可播放。
+    /// 是否"完全没有候选"由调用方在汇总所有 CDN 之后统一判定。
     /// </remarks>
-    private IReadOnlyList<StreamCandidate> CollectCandidates(string roomId, DouyuPlayInfo playInfo)
+    private int CollectCandidates(
+        string roomId,
+        DouyuPlayInfo playInfo,
+        StreamCandidateBuilder builder,
+        HashSet<string> usedHosts)
     {
-        StreamCandidateBuilder builder = new(Platform, Logger);
+        List<(string Url, StreamFormat Format, VideoCodec Codec, StreamQuality Quality)> pending = [];
 
         foreach (KeyValuePair<string, string> entry in playInfo.FlvUrls)
         {
-            builder.TryAdd(
-                entry.Value,
-                StreamFormat.FlvHttp,
-                VideoCodec.Avc,
-                MapDouyuQuality(entry.Key),
-                expiresAt: null,
-                referer: DouyuBaseUrl);
+            pending.Add((entry.Value, StreamFormat.FlvHttp, VideoCodec.Avc, MapDouyuQuality(entry.Key)));
         }
 
         string rtmpAddress = BuildRtmpAddress(playInfo);
-        bool hasRtmpAddress = rtmpAddress.Length > 0;
-        bool isHttpAddress = hasRtmpAddress
-            && rtmpAddress.StartsWith(HttpSchemePrefix, StringComparison.OrdinalIgnoreCase);
+        bool isHttpAddress = rtmpAddress.StartsWith(HttpSchemePrefix, StringComparison.OrdinalIgnoreCase);
         if (isHttpAddress)
         {
-            builder.TryAdd(
-                rtmpAddress,
-                StreamFormat.FlvHttp,
-                VideoCodec.Avc,
-                StreamQuality.Unknown,
-                expiresAt: null,
-                referer: DouyuBaseUrl);
+            pending.Add((rtmpAddress, StreamFormat.FlvHttp, VideoCodec.Avc, StreamQuality.Unknown));
         }
 
         if (!string.IsNullOrWhiteSpace(playInfo.HlsUrl))
         {
-            builder.TryAdd(
-                playInfo.HlsUrl + PathSeparator,
-                StreamFormat.HlsTs,
-                VideoCodec.Avc,
-                StreamQuality.Unknown,
-                expiresAt: null,
-                referer: DouyuBaseUrl);
+            pending.Add((playInfo.HlsUrl + PathSeparator, StreamFormat.HlsTs, VideoCodec.Avc, StreamQuality.Unknown));
         }
 
         foreach (KeyValuePair<string, string> entry in playInfo.HlsUrls)
         {
-            builder.TryAdd(
-                entry.Value,
-                StreamFormat.HlsTs,
-                VideoCodec.Avc,
-                MapDouyuQuality(entry.Key),
-                expiresAt: null,
-                referer: DouyuBaseUrl);
+            pending.Add((entry.Value, StreamFormat.HlsTs, VideoCodec.Avc, MapDouyuQuality(entry.Key)));
         }
 
-        if (builder.Count == 0 && hasRtmpAddress && !isHttpAddress)
+        // 只有 RTMP 地址时产出 Rtmp 候选：上层会提示改用 mpv，而不是谎报未开播。
+        if (pending.Count == 0 && rtmpAddress.Length > 0)
         {
-            builder.TryAdd(
-                rtmpAddress,
-                StreamFormat.Rtmp,
-                VideoCodec.Unknown,
-                StreamQuality.Unknown,
-                expiresAt: null,
-                referer: DouyuBaseUrl);
+            pending.Add((rtmpAddress, StreamFormat.Rtmp, VideoCodec.Unknown, StreamQuality.Unknown));
         }
 
-        if (builder.Count == 0)
+        int added = 0;
+        foreach ((string url, StreamFormat format, VideoCodec codec, StreamQuality quality) in pending)
         {
-            throw Fail(ResolveFailure.NotLive, StreamInfoOperation, ResolveMessages.NotLive);
+            string host = ResolveHost(url);
+            if (host.Length > 0 && !usedHosts.Add(host))
+            {
+                continue;
+            }
+
+            if (builder.TryAdd(url, format, codec, quality, expiresAt: null, referer: DouyuBaseUrl))
+            {
+                added++;
+            }
         }
 
-        IReadOnlyList<StreamCandidate> candidates = builder.Build();
-        Logger.Debug(ModuleName, "斗鱼候选流已汇总。", new Dictionary<string, object?>
+        Logger.Debug(ModuleName, "斗鱼候选流已按 CDN 汇总。", new Dictionary<string, object?>
         {
             ["operation"] = StreamInfoOperation,
             ["roomId"] = roomId,
-            ["candidateCount"] = candidates.Count,
-            ["fingerprints"] = string.Join(",", candidates.Select(static candidate => candidate.UrlFingerprint)),
+            ["addedCount"] = added,
+            ["candidateCount"] = builder.Count,
         });
 
-        return candidates;
+        return added;
     }
+
+    /// <summary>取流地址的主机名（用于按 CDN 去重）。</summary>
+    /// <param name="url">流地址。</param>
+    /// <returns>主机名；无法解析时返回空字符串。</returns>
+    private static string ResolveHost(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out Uri? uri) ? uri.Host : string.Empty;
 
     /// <summary>拼接 <c>rtmp_url</c> 与 <c>rtmp_live</c>。</summary>
     /// <param name="playInfo">归一化后的播放信息。</param>
@@ -1020,6 +1140,7 @@ internal sealed class DouyuParser : PlatformParserBase
     /// <param name="HlsUrls">HLS 画质键与地址。</param>
     /// <param name="Qualities">本次可选的画质档位（从高到低）。</param>
     /// <param name="SelectedQualityKey">平台实际生效的档位键（来自响应里的 <c>data.rate</c>）。</param>
+    /// <param name="CdnNames">响应里声明的 CDN 标识（<c>data.cdnsWithName[].cdn</c>）。</param>
     private sealed record DouyuPlayInfo(
         string RtmpUrl,
         string RtmpLive,
@@ -1027,5 +1148,6 @@ internal sealed class DouyuParser : PlatformParserBase
         IReadOnlyList<KeyValuePair<string, string>> FlvUrls,
         IReadOnlyList<KeyValuePair<string, string>> HlsUrls,
         IReadOnlyList<QualityOption> Qualities,
-        string? SelectedQualityKey);
+        string? SelectedQualityKey,
+        IReadOnlyList<string> CdnNames);
 }

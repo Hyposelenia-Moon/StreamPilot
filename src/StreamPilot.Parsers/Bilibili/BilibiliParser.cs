@@ -1,6 +1,7 @@
 namespace StreamPilot.Parsers.Bilibili;
 
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using StreamPilot.Core.Errors;
 using StreamPilot.Core.Http;
@@ -107,6 +108,57 @@ internal sealed class BilibiliParser : PlatformParserBase
 
     /// <summary>有效期的查询参数名（Unix 秒）。</summary>
     private const string ExpiresParameterName = "expires";
+
+    /// <summary>playurl 节点下的官方档位说明数组字段名。</summary>
+    private const string QualityDescriptionsField = "g_qn_desc";
+
+    /// <summary>档位说明里的档位数值字段名。</summary>
+    private const string QualityNumberField = "qn";
+
+    /// <summary>档位说明里的档位简称字段名（例如「原画」「蓝光」）。</summary>
+    private const string QualityDescField = "desc";
+
+    /// <summary>档位说明里的 HDR 文案字段名。</summary>
+    private const string HdrDescField = "hdr_desc";
+
+    /// <summary>档位说明里的附加文案字段名。</summary>
+    private const string AttrDescField = "attr_desc";
+
+    /// <summary>档位说明里的 HDR 类型字段名（0 表示非 HDR）。</summary>
+    private const string HdrTypeField = "hdr_type";
+
+    /// <summary>HDR 类型字段的「不是 HDR」取值。</summary>
+    private const int HdrTypeNone = 0;
+
+    /// <summary>官方档位完整名称的父字段名。</summary>
+    private const string MediaBaseDescField = "media_base_desc";
+
+    /// <summary>官方档位完整名称的详细描述字段名（<c>detail_desc.desc</c> 形如「1080P 原画」）。</summary>
+    private const string DetailDescField = "detail_desc";
+
+    /// <summary>官方档位完整名称的简要描述字段名。</summary>
+    private const string BriefDescField = "brief_desc";
+
+    /// <summary>官方档位完整名称的标记数组字段名（例如 <c>["高帧率"]</c>）。</summary>
+    private const string QualityTagField = "tag";
+
+    /// <summary>官方档位简要描述的角标字段名（例如 <c>原画</c>）。</summary>
+    private const string QualityBadgeField = "badge";
+
+    /// <summary>平台用来标记「高帧率」的文案。</summary>
+    private const string HighFrameRateMarker = "高帧率";
+
+    /// <summary>平台用来标记 HDR 的文案。</summary>
+    private const string HdrMarker = "HDR";
+
+    /// <summary><c>qn=80</c> 对应的「流畅」档位数值。</summary>
+    private const int LowQualityNumber = 80;
+
+    /// <summary>playurl_info 字段名。</summary>
+    private const string PlayUrlInfoField = "playurl_info";
+
+    /// <summary>playurl 字段名。</summary>
+    private const string PlayUrlField = "playurl";
 
     /// <summary>播放状态字段名。</summary>
     private const string LiveStatusPropertyName = "live_status";
@@ -859,24 +911,25 @@ internal sealed class BilibiliParser : PlatformParserBase
         int.TryParse(qualityKey, NumberStyles.Integer, CultureInfo.InvariantCulture, out int qn) ? qn : null;
 
     /// <summary>
-    /// 从播放信息响应中枚举可选画质档位（含官方名称与 HDR 标记）。
+    /// 从播放信息响应中枚举可选画质档位（含官方名称、HDR 与高帧率标记）。
     /// </summary>
     /// <param name="playData">getRoomPlayInfo 响应的 data 节点。</param>
     /// <param name="requestedQuality">本次请求的 qn，可为 <see langword="null"/>。</param>
     /// <returns>档位列表（按从高到低）与实际生效的档位键。</returns>
     /// <remarks>
-    /// 官方把名称放在 <c>g_qn_desc</c>（<c>qn</c> + <c>desc</c> + <c>hdr_desc</c>），
-    /// 可用档位放在 <c>codec[].accept_qn</c>；两者都缺失时退化为"只有最高档"。
+    /// 官方把名称放在 <c>g_qn_desc</c>（<c>qn</c> + <c>desc</c> + <c>hdr_desc</c> +
+    /// <c>media_base_desc.detail_desc.desc/tag</c>），可用档位放在 <c>codec[].accept_qn</c>；
+    /// 两者都缺失时退化为"只有最高档"。
     /// </remarks>
-    private static (IReadOnlyList<QualityOption> Qualities, string? SelectedKey) BuildQualityOptions(
+    internal (IReadOnlyList<QualityOption> Qualities, string? SelectedKey) BuildQualityOptions(
         JsonElement playData,
         int? requestedQuality)
     {
-        Dictionary<int, (string Name, string Hdr)> names = ReadQualityNames(playData);
+        Dictionary<int, QualityDeclaration> declarations = ReadQualityDeclarations(playData);
         List<int> available = ReadAcceptedQualities(playData);
         if (available.Count == 0)
         {
-            available.AddRange(names.Keys);
+            available.AddRange(declarations.Keys);
         }
 
         if (available.Count == 0 && requestedQuality is { } requested)
@@ -892,7 +945,7 @@ internal sealed class BilibiliParser : PlatformParserBase
             options.Add(new QualityOption
             {
                 Key = qn.ToString(CultureInfo.InvariantCulture),
-                Label = BuildQualityLabel(qn, names, has4K),
+                Label = BuildQualityLabel(qn, declarations, has4K),
                 IsBest = options.Count == 0,
             });
         }
@@ -901,37 +954,154 @@ internal sealed class BilibiliParser : PlatformParserBase
             ? want
             : available.Count > 0 ? available[0] : requestedQuality;
 
+        Logger.Debug(ModuleName, "B站档位已按接口声明命名（高帧率/HDR 均取自 g_qn_desc，不按档位语义推断）。", new Dictionary<string, object?>
+        {
+            ["declaredQualities"] = DescribeDeclarations(available, declarations),
+            ["has4K"] = has4K,
+            ["requestedQuality"] = requestedQuality,
+            ["effectiveQuality"] = effective,
+        });
+
         return (options, effective?.ToString(CultureInfo.InvariantCulture));
     }
 
-    /// <summary>读取 g_qn_desc 中的官方档位名与 HDR 标记。</summary>
-    /// <param name="playData">播放信息 data 节点。</param>
-    /// <returns>qn →（名称，HDR 标记）映射。</returns>
-    private static Dictionary<int, (string Name, string Hdr)> ReadQualityNames(JsonElement playData)
+    /// <summary>把可用档位及其高帧率/HDR 标记拼成一行日志文本。</summary>
+    /// <param name="available">可用 qn 列表。</param>
+    /// <param name="declarations">qn → 档位声明。</param>
+    /// <returns>形如 <c>10000:高帧率=1,HDR=0;400:高帧率=0,HDR=0</c> 的文本。</returns>
+    private static string DescribeDeclarations(List<int> available, Dictionary<int, QualityDeclaration> declarations)
     {
-        Dictionary<int, (string Name, string Hdr)> names = [];
-        if (!TryReadProperty(playData, "playurl_info", out JsonElement info)
-            || !TryReadProperty(info, "playurl", out JsonElement playUrl)
-            || !TryReadProperty(playUrl, "g_qn_desc", out JsonElement descriptions)
+        StringBuilder builder = new();
+        foreach (int qn in available)
+        {
+            if (builder.Length > 0)
+            {
+                builder.Append(';');
+            }
+
+            declarations.TryGetValue(qn, out QualityDeclaration? declaration);
+            builder.Append(qn.ToString(CultureInfo.InvariantCulture));
+            builder.Append(":高帧率=");
+            builder.Append(declaration?.HighFrameRate == true ? '1' : '0');
+            builder.Append(",HDR=");
+            builder.Append(declaration?.Hdr == true ? '1' : '0');
+        }
+
+        return builder.ToString();
+    }
+
+    /// <summary>读取 g_qn_desc 中的官方档位名，并推导每个档位的 HDR / 高帧率标记。</summary>
+    /// <param name="playData">播放信息 data 节点。</param>
+    /// <returns>qn → 档位声明映射。</returns>
+    private static Dictionary<int, QualityDeclaration> ReadQualityDeclarations(JsonElement playData)
+    {
+        Dictionary<int, QualityDeclaration> declarations = [];
+        if (!TryReadProperty(playData, PlayUrlInfoField, out JsonElement info)
+            || !TryReadProperty(info, PlayUrlField, out JsonElement playUrl)
+            || !TryReadProperty(playUrl, QualityDescriptionsField, out JsonElement descriptions)
             || descriptions.ValueKind != JsonValueKind.Array)
         {
-            return names;
+            return declarations;
         }
 
         foreach (JsonElement item in descriptions.EnumerateArray())
         {
-            if (!TryReadInt32(item, "qn", out int qn))
+            if (!TryReadInt32(item, QualityNumberField, out int qn))
             {
                 continue;
             }
 
-            names[qn] = (
-                ReadOptionalString(item, "desc") ?? string.Empty,
-                ReadOptionalString(item, "hdr_desc") ?? string.Empty);
+            declarations[qn] = ReadQualityDeclaration(item);
         }
 
-        return names;
+        return declarations;
     }
+
+    /// <summary>读取单个 qn 的官方声明并推导 HDR / 高帧率标记。</summary>
+    /// <param name="item">g_qn_desc 数组中的一项。</param>
+    /// <returns>档位声明。</returns>
+    /// <remarks>
+    /// 帧率依据（实测对比 room_id=814 与 room_id=1868871278 的 getRoomPlayInfo 响应）：
+    /// 平台在 <c>g_qn_desc[].media_base_desc.detail_desc</c> 给出官方完整档位名，
+    /// 并把「高帧率」放在 <c>detail_desc.tag</c> 数组里。
+    /// 有 60 帧的 814 房间 <c>qn=10000</c> 为
+    /// <c>detail_desc.desc="1080P 原画"</c> + <c>tag=["高帧率"]</c>；
+    /// 没有 60 帧的 1868871278 房间 <c>qn=10000</c> 的 <c>tag</c> 字段缺失。
+    /// 因此这里只认接口声明，拿不到标记时不标"高帧率"。
+    /// </remarks>
+    private static QualityDeclaration ReadQualityDeclaration(JsonElement item)
+    {
+        string detailName = ReadNestedString(item, MediaBaseDescField, DetailDescField, QualityDescField) ?? string.Empty;
+        string legacyName = ReadOptionalString(item, QualityDescField) ?? string.Empty;
+        string hdrDesc = ReadOptionalString(item, HdrDescField) ?? string.Empty;
+        string attrDesc = ReadOptionalString(item, AttrDescField) ?? string.Empty;
+        bool hdrByType = TryReadInt32(item, HdrTypeField, out int hdrType) && hdrType != HdrTypeNone;
+
+        bool hdr = hdrByType || ContainsMarker(hdrDesc, HdrMarker) || ContainsMarker(attrDesc, HdrMarker);
+        bool highFrameRate = ContainsMarker(attrDesc, HighFrameRateMarker);
+        foreach (string marker in EnumerateDeclarationMarkers(item))
+        {
+            hdr |= ContainsMarker(marker, HdrMarker);
+            highFrameRate |= ContainsMarker(marker, HighFrameRateMarker);
+        }
+
+        return new QualityDeclaration(
+            detailName.Length > 0 ? detailName : legacyName,
+            hdr,
+            highFrameRate);
+    }
+
+    /// <summary>枚举平台给出的档位标记文案（<c>detail_desc.tag[]</c> 与简称、角标、HDR 文案）。</summary>
+    /// <param name="item">g_qn_desc 数组中的一项。</param>
+    /// <returns>标记文案序列（可能为空）。</returns>
+    private static IEnumerable<string> EnumerateDeclarationMarkers(JsonElement item)
+    {
+        if (TryReadProperty(item, MediaBaseDescField, out JsonElement mediaBase)
+            && mediaBase.ValueKind == JsonValueKind.Object)
+        {
+            string? briefName = ReadNestedString(mediaBase, BriefDescField, QualityDescField);
+            if (!string.IsNullOrWhiteSpace(briefName))
+            {
+                yield return briefName;
+            }
+
+            string? badge = ReadNestedString(mediaBase, BriefDescField, QualityBadgeField);
+            if (!string.IsNullOrWhiteSpace(badge))
+            {
+                yield return badge;
+            }
+
+            if (TryReadProperty(mediaBase, DetailDescField, out JsonElement detail)
+                && TryReadProperty(detail, QualityTagField, out JsonElement tags)
+                && tags.ValueKind == JsonValueKind.Array)
+            {
+                foreach (JsonElement tag in tags.EnumerateArray())
+                {
+                    if (tag.ValueKind == JsonValueKind.String)
+                    {
+                        string? text = tag.GetString();
+                        if (!string.IsNullOrWhiteSpace(text))
+                        {
+                            yield return text;
+                        }
+                    }
+                }
+            }
+        }
+
+        string? ownName = ReadOptionalString(item, QualityDescField);
+        if (!string.IsNullOrWhiteSpace(ownName))
+        {
+            yield return ownName;
+        }
+    }
+
+    /// <summary>判断文本里是否含某个标记（大小写不敏感）。</summary>
+    /// <param name="text">待检查文本。</param>
+    /// <param name="marker">标记。</param>
+    /// <returns>含该标记返回 <see langword="true"/>。</returns>
+    private static bool ContainsMarker(string text, string marker) =>
+        text.Contains(marker, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>读取 codec[].accept_qn 汇总可用档位（去重）。</summary>
     /// <param name="playData">播放信息 data 节点。</param>
@@ -986,37 +1156,52 @@ internal sealed class BilibiliParser : PlatformParserBase
 
     /// <summary>生成档位显示名，命名与官方直播间一致（用户可对照）。</summary>
     /// <param name="qn">档位数值。</param>
-    /// <param name="names">官方名称表（qn → 名称、HDR 标记）。</param>
+    /// <param name="declarations">官方档位声明表（qn → 名称、HDR、高帧率）。</param>
     /// <param name="has4K">本房间是否提供 4K 档位（决定 1080P 档叫"原画"还是"高码率"）。</param>
     /// <returns>显示名。</returns>
     /// <remarks>
-    /// 命名规则：有 4K 时依次为 4K 原画（高帧率）→ 1080P 高码率（高帧率）→ 1080P 蓝光 → 720P 超清；
-    /// 无 4K 时依次为 1080P 原画（高帧率）→ 1080P 蓝光 → 720P 超清。
-    /// 平台的 hdr_desc 为 HDR 时，标记写在"高帧率"之前；接口不逐档返回帧率，
-    /// 因此高帧率按 B站 的档位语义（1080P 原画 / 4K 原画 / 高码率）判定。
+    /// 命名规则（口径与官方直播间一致，保持不变）：
+    /// 有 4K 时依次为 4K 原画 → 1080P 高码率 → 1080P 蓝光 → 720P 超清；
+    /// 无 4K 时依次为 1080P 原画 → 1080P 蓝光 → 720P 超清。
+    /// "高帧率"与"HDR"后缀都只来自接口声明（见 <see cref="ReadQualityDeclaration"/>），
+    /// 拿不到声明时不加任何后缀，绝不按档位语义硬判。
     /// </remarks>
-    private static string BuildQualityLabel(int qn, Dictionary<int, (string Name, string Hdr)> names, bool has4K)
+    private static string BuildQualityLabel(int qn, Dictionary<int, QualityDeclaration> declarations, bool has4K)
     {
-        bool hdr = names.TryGetValue(qn, out (string Name, string Hdr) hdrEntry)
-            && hdrEntry.Hdr.Contains("HDR", StringComparison.OrdinalIgnoreCase);
+        declarations.TryGetValue(qn, out QualityDeclaration? declaration);
+        bool hdr = declaration?.Hdr ?? false;
+        bool highFrameRate = declaration?.HighFrameRate ?? false;
 
         return qn switch
         {
-            QualityNames.BilibiliMaxQualityNumber => "杜比原画",
-            QualityNames.BilibiliQuality4K => Decorate("4K 原画", hdr, highFrameRate: true),
-            QualityNames.BilibiliQuality2K => Decorate("2K 原画", hdr, highFrameRate: true),
+            QualityNames.BilibiliMaxQualityNumber => Decorate("杜比原画", hdr, highFrameRate),
+            QualityNames.BilibiliQuality4K => Decorate("4K 原画", hdr, highFrameRate),
+            QualityNames.BilibiliQuality2K => Decorate("2K 原画", hdr, highFrameRate),
             QualityNames.BilibiliQuality1080HighFps => has4K
-                ? Decorate("1080P 高码率", hdr, highFrameRate: true)
-                : Decorate("1080P 原画", hdr, highFrameRate: true),
-            QualityNames.BilibiliQuality1080 => Decorate("1080P 蓝光", hdr, highFrameRate: false),
-            QualityNames.BilibiliQuality720 => Decorate("720P 超清", hdr, highFrameRate: false),
-            QualityNames.BilibiliQuality480 => Decorate("高清", hdr, highFrameRate: false),
-            80 => "流畅",
-            _ => names.TryGetValue(qn, out (string Name, string Hdr) entry) && entry.Name.Length > 0
-                ? entry.Name
-                : $"qn={qn}",
+                ? Decorate("1080P 高码率", hdr, highFrameRate)
+                : Decorate("1080P 原画", hdr, highFrameRate),
+            QualityNames.BilibiliQuality1080 => Decorate("1080P 蓝光", hdr, highFrameRate),
+            QualityNames.BilibiliQuality720 => Decorate("720P 超清", hdr, highFrameRate),
+            QualityNames.BilibiliQuality480 => Decorate("高清", hdr, highFrameRate),
+            LowQualityNumber => Decorate("流畅", hdr, highFrameRate),
+            _ => BuildFallbackQualityLabel(qn, declaration),
         };
     }
+
+    /// <summary>生成未知 qn 的显示名：优先用平台给定的官方名称。</summary>
+    /// <param name="qn">档位数值。</param>
+    /// <param name="declaration">该 qn 的官方声明，可为 <see langword="null"/>。</param>
+    /// <returns>显示名。</returns>
+    private static string BuildFallbackQualityLabel(int qn, QualityDeclaration? declaration) =>
+        string.IsNullOrWhiteSpace(declaration?.Name)
+            ? $"qn={qn}"
+            : Decorate(declaration!.Name, declaration.Hdr, declaration.HighFrameRate);
+
+    /// <summary>B站 g_qn_desc 中的单个档位声明。</summary>
+    /// <param name="Name">官方完整档位名（<c>media_base_desc.detail_desc.desc</c>，缺失时退回 <c>desc</c>）。</param>
+    /// <param name="Hdr">平台是否声明该档位为 HDR。</param>
+    /// <param name="HighFrameRate">平台是否声明该档位为高帧率。</param>
+    private sealed record QualityDeclaration(string Name, bool Hdr, bool HighFrameRate);
 
     /// <summary>按需要给档位名补上（HDR 高帧率）后缀。</summary>
     /// <param name="name">档位名（例如「1080P 原画」）。</param>
@@ -1220,6 +1405,26 @@ internal sealed class BilibiliParser : PlatformParserBase
 
         value = default;
         return false;
+    }
+
+    /// <summary>
+    /// 按路径逐层读取字符串属性；任一层缺失或不是对象时返回 <see langword="null"/>。
+    /// </summary>
+    /// <param name="parent">起始节点。</param>
+    /// <param name="path">属性名路径（从外到内）。</param>
+    /// <returns>属性值，或 <see langword="null"/>。</returns>
+    private static string? ReadNestedString(JsonElement parent, params string[] path)
+    {
+        JsonElement current = parent;
+        for (int index = 0; index < path.Length - 1; index++)
+        {
+            if (!TryReadProperty(current, path[index], out current))
+            {
+                return null;
+            }
+        }
+
+        return path.Length == 0 ? null : ReadOptionalString(current, path[^1]);
     }
 
     /// <summary>

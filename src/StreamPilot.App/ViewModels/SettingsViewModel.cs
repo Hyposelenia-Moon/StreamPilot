@@ -28,7 +28,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private string _mpvPath = string.Empty;
     private int _extremeTargetMs = PlaybackRequest.DefaultExtremeTargetMs;
     private PlatformOption _selectedDefaultPlatform = PlatformOption.All[0];
-    private int _volume = 70;
+    private int _volume = PlaybackOptions.DefaultVolume;
     private bool _autoPlayOnResolve = true;
     private bool _autoLaunchMpv;
     private string _bilibiliCookie = string.Empty;
@@ -331,7 +331,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         MpvPath = options.Playback.MpvPath;
         ExtremeTargetMs = NormalizeTarget(options.Playback.ExtremeTargetMs);
         SelectedDefaultPlatform = PlatformOption.Find(options.DefaultPlatform) ?? PlatformOption.All[0];
-        Volume = Clamp(options.Playback.Volume, 0, 100, 70);
+        Volume = Clamp(options.Playback.Volume, 0, 100, PlaybackOptions.DefaultVolume);
         AutoPlayOnResolve = options.Playback.AutoPlayOnResolve;
         AutoLaunchMpv = options.Playback.AutoLaunchMpv;
         BilibiliCookie = options.Platforms.BilibiliCookie;
@@ -391,7 +391,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             {
                 MpvPath = resolvedMpv,
                 ExtremeTargetMs = NormalizeTarget(ExtremeTargetMs),
-                Volume = Clamp(Volume, 0, 100, 70),
+                Volume = Clamp(Volume, 0, 100, PlaybackOptions.DefaultVolume),
                 AutoPlayOnResolve = AutoPlayOnResolve,
                 AutoLaunchMpv = AutoLaunchMpv,
             },

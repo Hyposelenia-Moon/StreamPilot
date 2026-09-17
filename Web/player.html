@@ -679,75 +679,124 @@
         return Boolean(run) && state.run === run && !run.stopped;
       }
 
-      /** 并行探测所有候选，按"已知可用优先、延迟升序"重排队列。 */
+      /**
+       * 探测单个候选是否可达。
+       *
+       * 探测只为"排序"服务，因此拿到状态码后必须立刻 abort：直播流是长连接，
+       * 不主动断开就会一直占着这条连接。
+       * 实测（斗鱼房间 1811143）：同一签名地址的**第 2 条**连接会被上游在 0.2–0.4 秒内切断，
+       * 于是"探测量到 200、紧随其后的播放连接秒断"，首帧永远起不来。
+       * @param {object} candidate 候选（至少含 url）。
+       * @param {number} timeoutMs 探测超时（毫秒）。
+       * @returns {Promise<{outcome:string,statusCode?:number,elapsedMs:number,errorName?:string,errorMessage?:string}>} 探测结论。
+       */
+      async function probeCandidate(candidate, timeoutMs) {
+        const controller = new AbortController();
+        state.probeControllers.push(controller);
+        const startedAt = performance.now();
+        try {
+          const response = await awaitWithTimeout(
+            fetch(candidate.url, {
+              method: 'GET',
+              mode: 'cors',
+              cache: 'no-store',
+              credentials: 'omit',
+              referrerPolicy: 'no-referrer-when-downgrade',
+              signal: controller.signal,
+            }),
+            timeoutMs,
+            '候选探测超时',
+            function abortOnTimeout() {
+              controller.abort();
+            });
+
+          const elapsedMs = Math.round(performance.now() - startedAt);
+          const outcome = response.status >= 200 && response.status < 300
+            ? 'good'
+            : (response.status >= 400 ? 'rejected' : 'inconclusive');
+
+          // 拿到状态码就够了：立刻断开，把这条连接让给真正的播放器。
+          controller.abort();
+          return { outcome: outcome, statusCode: response.status, elapsedMs: elapsedMs };
+        } catch (error) {
+          const elapsedMs = Math.round(performance.now() - startedAt);
+          if (error && error.name === 'TimeoutError') {
+            return { outcome: 'inconclusive', elapsedMs: elapsedMs };
+          }
+
+          return {
+            outcome: 'inconclusive',
+            elapsedMs: elapsedMs,
+            errorName: error && error.name,
+            errorMessage: error && error.message,
+          };
+        }
+      }
+
+      /**
+       * 并行探测候选，按"已知可用优先、延迟升序"重排队列。
+       *
+       * 只有 1 条候选时**跳过探测**：探测对排序毫无收益，却会额外占用这条唯一的直播连接。
+       */
       async function buildCandidateQueue(run) {
+        if (run.candidates.length === 0) {
+          return [];
+        }
+
+        if (run.candidates.length === 1) {
+          appendLog('info', '只有 1 条候选线路，跳过探测直接连接');
+          report(outbound.CANDIDATE_QUEUE, '只有 1 条候选线路，已跳过探测', run, run.candidates[0], {
+            sourceIndexes: [run.candidates[0].sourceIndex],
+            knownGoodCount: 0,
+            inconclusiveCount: 1,
+          });
+          return run.candidates.slice();
+        }
+
         report(outbound.CHECKING, '正在探测 ' + run.candidates.length + ' 个候选线路…', run);
         const good = [];
         const inconclusive = [];
-
-        await Promise.all(run.candidates.map(async function probe(candidate) {
-          const controller = new AbortController();
-          state.probeControllers.push(controller);
-          const startedAt = performance.now();
-          try {
-            const response = await awaitWithTimeout(
-              fetch(candidate.url, {
-                method: 'GET',
-                mode: 'cors',
-                cache: 'no-store',
-                credentials: 'omit',
-                referrerPolicy: 'no-referrer-when-downgrade',
-                signal: controller.signal,
-              }),
-              core.PROBE_TIMEOUT_MS,
-              '候选探测超时',
-              function abortOnTimeout() {
-                controller.abort();
-              });
-            const elapsedMs = Math.round(performance.now() - startedAt);
-            if (!isActive(run)) {
-              return;
-            }
-
-            if (response.status >= 200 && response.status < 300) {
-              good.push({ candidate: candidate, elapsedMs: elapsedMs });
-              report(outbound.PROBE_RESULT, candidate.host + ' 可用', run, candidate, {
-                outcome: 'good',
-                elapsedMs: elapsedMs,
-                statusCode: response.status,
-              });
-            } else if (response.status >= 400) {
-              report(outbound.PROBE_REJECTED, candidate.host + ' 拒绝（HTTP ' + response.status + '）', run, candidate, {
-                outcome: 'rejected',
-                elapsedMs: elapsedMs,
-                statusCode: response.status,
-              });
-            } else {
-              inconclusive.push(candidate);
-              report(outbound.PROBE_RESULT, candidate.host + ' 结果不确定（HTTP ' + response.status + '）', run, candidate, {
-                outcome: 'inconclusive',
-                elapsedMs: elapsedMs,
-                statusCode: response.status,
-              });
-            }
-          } catch (error) {
-            if (!isActive(run)) {
-              return;
-            }
-
-            if (error && error.name === 'TimeoutError') {
-              inconclusive.push(candidate);
-              report(outbound.PROBE_RESULT, candidate.host + ' 探测超时', run, candidate, { outcome: 'inconclusive' });
-            } else {
-              inconclusive.push(candidate);
-              report(outbound.PROBE_RESULT, candidate.host + ' 探测失败：' + (error && error.message), run, candidate, {
-                outcome: 'inconclusive',
-                errorName: error && error.name,
-                errorMessage: error && error.message,
-              });
-            }
-          }
+        const results = await Promise.all(run.candidates.map(function probe(candidate) {
+          return probeCandidate(candidate, core.PROBE_TIMEOUT_MS);
         }));
+
+        results.forEach(function classify(result, index) {
+          if (!isActive(run)) {
+            return;
+          }
+
+          const candidate = run.candidates[index];
+          if (result.outcome === 'good') {
+            good.push({ candidate: candidate, elapsedMs: result.elapsedMs });
+            report(outbound.PROBE_RESULT, candidate.host + ' 可用', run, candidate, {
+              outcome: 'good',
+              elapsedMs: result.elapsedMs,
+              statusCode: result.statusCode,
+            });
+            return;
+          }
+
+          if (result.outcome === 'rejected') {
+            report(outbound.PROBE_REJECTED, candidate.host + ' 拒绝（HTTP ' + result.statusCode + '）', run, candidate, {
+              outcome: 'rejected',
+              elapsedMs: result.elapsedMs,
+              statusCode: result.statusCode,
+            });
+            return;
+          }
+
+          inconclusive.push(candidate);
+          const detail = result.errorMessage
+            ? candidate.host + ' 探测失败：' + result.errorMessage
+            : candidate.host + ' 结果不确定（HTTP ' + result.statusCode + '）';
+          report(outbound.PROBE_RESULT, detail, run, candidate, {
+            outcome: 'inconclusive',
+            elapsedMs: result.elapsedMs,
+            statusCode: result.statusCode,
+            errorName: result.errorName,
+            errorMessage: result.errorMessage,
+          });
+        });
 
         good.sort(function byLatency(left, right) {
           return left.elapsedMs - right.elapsedMs;
@@ -786,7 +835,10 @@
         }
 
         state.autoplayBlocked = false;
-        // 不再预先静音：首帧起来后用户应当直接听到声音（音量由 applyVolume 决定）。
+        /*
+          不预先静音：宿主已用 --autoplay-policy=no-user-gesture-required 打开内核的自动播放，
+          首帧应当直接带声音起来；若内核策略仍拦截，playWithAutoplayFallback 会静音起播再恢复音量。
+        */
         if ('preservesPitch' in elements.video) {
           elements.video.preservesPitch = true;
         }
@@ -818,12 +870,21 @@
 
         const startedAt = performance.now();
         try {
-          await awaitWithTimeout(
-            elements.video.play(),
+          const autoplay = await awaitWithTimeout(
+            playWithAutoplayFallback(elements.video),
             core.getStartupTimeoutMs(run),
             '等待首帧超时');
           if (!isActive(run)) {
             return;
+          }
+
+          if (autoplay.mutedStart) {
+            /*
+              内核自动播放策略要求静音才能起播时，先用静音拿到首帧，
+              再立刻恢复用户音量：这样"无需点击就能看"，音量也与滑块一致。
+            */
+            appendLog('info', '内核要求静音起播，已恢复音量 ' + state.lastVolume + '%');
+            applyVolume(state.lastVolume, false);
           }
 
           markPlaybackStarted(run, candidate, startedAt);
@@ -855,6 +916,30 @@
           } else {
             recoverAfterInterruption(run, candidate, '播放启动异常');
           }
+        }
+      }
+
+      /**
+       * 启动播放：先按当前音量尝试；被内核自动播放策略拦住时改用静音起播。
+       *
+       * 宿主 WebView2 已带 --autoplay-policy=no-user-gesture-required，
+       * 正常路径下这里一次就成功；静音兜底只在内核策略不可用时生效，
+       * 由调用方在起播后立刻恢复用户音量（见 startCandidate）。
+       * @param {HTMLVideoElement} video 视频元素。
+       * @returns {Promise<{mutedStart:boolean}>} 是否走了静音起播。
+       */
+      async function playWithAutoplayFallback(video) {
+        try {
+          await video.play();
+          return { mutedStart: false };
+        } catch (error) {
+          if (!core.isAutoplayBlocked(error)) {
+            throw error;
+          }
+
+          video.muted = true;
+          await video.play();
+          return { mutedStart: true };
         }
       }
 

@@ -64,11 +64,33 @@
 
 1. 规范化候选：丢弃空 URL，按 `sourceIndex:url` 去重，补默认 `format=flv`、`codec=avc`。
 2. 过滤：HLS 家族需 `hls.js` 可用，其余需 `mpegts.js` 可用；`codec=hevc` 需系统支持 HEVC MSE。
-3. **并行探测**全部候选：`fetch(url, { mode:'cors', cache:'no-store', credentials:'omit' })`，超时 **1200 ms**。
+3. **候选数 ≥ 2 时**并行探测全部候选：`fetch(url, { mode:'cors', cache:'no-store', credentials:'omit' })`，超时 **1200 ms**。
+   - 拿到状态码后**立即 `AbortController.abort()`**：直播流是长连接，不主动断开就会一直占着这条连接
+     （实测斗鱼 CDN 对同一签名地址只允许第 1 条连接，第 2 条会在 0.2–0.4 秒内被上游切断，
+     于是"探测成功、播放必然失败"）；
+   - **候选只有 1 条时直接跳过探测**：探测只用于排序，对单候选零收益。
    - `2xx` → `good`，按探测耗时升序排到队首；
    - `4xx/5xx` → `rejected`，丢弃；
    - 超时 / 网络异常 / 3xx → `inconclusive`，排在 `good` 之后保留重试机会。
 4. 队列为空 → 请求宿主重新解析（`refresh-needed`，每个会话只请求一次）。
+
+宿主侧对这条请求加了**上限**：`ShellViewModel.MaxAutomaticReResolves = 2`。
+原因是"重新解析 → 重新下发 play"会开新会话、新会话的"只请求一次"计数被重置，
+于是"只有 1 条候选且地址已过期"的房间（实测斗鱼部分房间）会无限循环重连。
+达到上限后停止自动重试并给出可操作提示；计数在真的出画后清零，用户手动点
+「开始播放」/「解析房间」/载入预设/换档位时也清零。
+
+## 4.1 自动播放（首帧无需点击）
+
+宿主 WebView2 以 `--autoplay-policy=no-user-gesture-required` 启动
+（`WebPlayerHost.AutoplayBrowserArgument`）：Chromium 默认策略是
+`document-user-activation-required`，没有用户手势时 `video.play()` 会抛 `NotAllowedError`，
+表现成"必须先点一下画面才开始播放"。
+
+播放页另有兜底：`playWithAutoplayFallback` 先按当前音量 `play()`，若被
+`NotAllowedError` 拦住则改为**静音起播**，起播后立刻用 `applyVolume(state.lastVolume, false)`
+恢复用户音量（用户看到的音量不变，只是绕开内核策略）。两条路径都失败时才回到
+"点一下画面"的交互（`state.autoplayBlocked`）。
 
 ## 5. 断流重连与恢复
 

@@ -67,6 +67,16 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>单个预设开播检查的超时时间。</summary>
     private static readonly TimeSpan PresetCheckTimeout = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// 同一房间"页面请求重新解析 → 重新解析 → 再下发播放"的最大连续自动重试次数。
+    /// </summary>
+    /// <remarks>
+    /// 播放页在每个会话里最多请求一次重新解析，但每次重新解析都会开一个新会话，
+    /// 于是"候选只有 1 条且地址已失效"的房间（实测斗鱼部分房间如此）会无限循环重连。
+    /// 这里给出上限：达到上限后停止自动重试并给出可操作的提示，避免无休止重连。
+    /// </remarks>
+    private const int MaxAutomaticReResolves = 2;
+
     /// <summary>自动识别平台失败时的提示（界面与状态栏共用）。</summary>
     private const string PlatformDetectionHint = "无法自动识别平台：请在链接中包含平台域名，或在设置里指定默认平台。";
 
@@ -109,6 +119,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>已订阅状态变化的预设项（重建列表时逐个退订，避免事件悬挂）。</summary>
     private readonly List<PresetItemViewModel> _presetItemSubscriptions = [];
+
+    /// <summary>预设列表当前选中项（见 <see cref="SelectedPresetItem"/>）。</summary>
+    private PresetItemViewModel? _selectedPresetItem;
     private string _roomInput = string.Empty;
     private int _extremeTargetMs;
     private int _volume;
@@ -126,6 +139,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     private ResolvedRoom? _currentRoom;
     private IRecordingSession? _recordingSession;
     private int _activeSessionId;
+
+    /// <summary>连续自动重新解析的次数（播放出画后清零）。</summary>
+    private int _automaticReResolveCount;
 
     /// <summary>用户选择的画质档位键；为空表示取平台最高档。</summary>
     private string? _preferredQualityKey;
@@ -158,8 +174,8 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             : _options.DefaultPlatform;
         _selectedPlatformOption = PlatformOption.Find(initialPlatform) ?? Platforms[0];
 
-        ResolveCommand = new AsyncRelayCommand(_ => ResolveAsync(), HandleCommandErrorAsync, _ => !IsBusy);
-        PlayCommand = new AsyncRelayCommand(_ => PlayAsync(), HandleCommandErrorAsync, _ => _currentRoom is not null && !IsBusy);
+        ResolveCommand = new AsyncRelayCommand(_ => ResolveFromUserAsync(), HandleCommandErrorAsync, _ => !IsBusy);
+        PlayCommand = new AsyncRelayCommand(_ => PlayFromUserAsync(), HandleCommandErrorAsync, _ => _currentRoom is not null && !IsBusy);
         StopCommand = new RelayCommand(_ => StopPlayback(), _ => _isPlayerReady);
         ChaseCommand = new RelayCommand(_ => SendToPlayer(new { type = HostChaseType, keepSeconds = ChaseKeepSeconds }), _ => _isPlayerReady);
         MpvCommand = new AsyncRelayCommand(_ => PlayWithMpvAsync(), HandleCommandErrorAsync, _ => _currentRoom is not null);
@@ -273,6 +289,18 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>主界面预设列表（每项自带平台徽标、状态词与点击命令）。</summary>
     public ObservableCollection<PresetItemViewModel> PresetItems { get; } = [];
+
+    /// <summary>
+    /// 预设列表当前选中项。
+    /// </summary>
+    /// <remarks>
+    /// 新增（或同平台同名覆盖）预设后会把它设为选中项，用户能立刻看到"确实加进去了"。
+    /// </remarks>
+    public PresetItemViewModel? SelectedPresetItem
+    {
+        get => _selectedPresetItem;
+        set => SetField(ref _selectedPresetItem, value);
+    }
 
     /// <summary>是否存在预设（供空列表占位文本使用）。</summary>
     public bool HasPresets => PresetItems.Count > 0;
@@ -521,6 +549,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                     {
                         // 新会话已经出画，这时才回收上一轮中继（否则切换瞬间会黑屏）。
                         _playback.ReleasePreviousRelays();
+
+                        // 真的看到了画面，之前的自动重试计数作废。
+                        _automaticReResolveCount = 0;
                     }
 
                     break;
@@ -532,7 +563,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
                 case PlayerRefreshNeededType:
                     AppendLog("播放页请求重新解析：" + message);
-                    _ = ReResolveAsync();
+                    HandleRefreshNeeded(message);
                     break;
 
                 case PlayerFullscreenEnterType:
@@ -645,6 +676,26 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             IsBusy = false;
             RaiseCommandStates();
         }
+    }
+
+    /// <summary>
+    /// 用户点「开始播放」：视为手动重试，先清空自动重试计数再下发播放。
+    /// </summary>
+    /// <returns>异步任务。</returns>
+    private async Task PlayFromUserAsync()
+    {
+        _automaticReResolveCount = 0;
+        await PlayAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// 用户点「解析房间」：视为手动重试，先清空自动重试计数再解析。
+    /// </summary>
+    /// <returns>异步任务。</returns>
+    private async Task ResolveFromUserAsync()
+    {
+        _automaticReResolveCount = 0;
+        await ResolveAsync().ConfigureAwait(true);
     }
 
     /// <summary>
@@ -879,6 +930,31 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
+    /// 处理播放页的"所有候选都连不上"请求：有上限地自动重新解析，超过上限就停下来提示用户。
+    /// </summary>
+    /// <param name="reason">播放页给出的原因。</param>
+    /// <remarks>
+    /// 斗鱼等平台的部分房间只会解析出 1 条候选，且该地址带时效签名；
+    /// 地址一过期就会"解析成功 → 连不上 → 请求重新解析 → 又拿到同一条地址"，
+    /// 表现为界面一直显示重连。这里限制连续自动重试次数（见 <see cref="MaxAutomaticReResolves"/>），
+    /// 到上限后交给用户手动重试或改用 mpv，不再无限循环。
+    /// </remarks>
+    private void HandleRefreshNeeded(string reason)
+    {
+        if (_automaticReResolveCount >= MaxAutomaticReResolves)
+        {
+            StatusMessage = $"已停止自动重试（连续 {_automaticReResolveCount} 次重新解析都未能出画）。"
+                + "请点「开始播放」手动重试，或改用「mpv 播放」。原因：" + reason;
+            AppendLog(StatusMessage);
+            return;
+        }
+
+        _automaticReResolveCount++;
+        AppendLog($"自动重新解析第 {_automaticReResolveCount}/{MaxAutomaticReResolves} 次。");
+        _ = ReResolveAsync();
+    }
+
+    /// <summary>
     /// 根据输入链接的域名识别平台。
     /// </summary>
     /// <remarks>
@@ -1031,6 +1107,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
         _preferredQualityKey = qualityKey;
         AppendLog("切换画质：" + (qualityKey ?? QualityOption.BestFlag));
+        _automaticReResolveCount = 0;
         await ResolveAsync().ConfigureAwait(true);
         if (_currentRoom is not null)
         {
@@ -1145,8 +1222,11 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     }
 
     /// <summary>按存储内容重建预设列表（不触发开播检查）。</summary>
-    private void RefreshPresetItems()
+    /// <param name="selectName">重建后要选中的预设显示名；为空时尽量保持原有选中项。</param>
+    private void RefreshPresetItems(string? selectName = null)
     {
+        string? keepName = selectName ?? _selectedPresetItem?.Preset.Name;
+
         foreach (PresetItemViewModel previous in _presetItemSubscriptions)
         {
             previous.PropertyChanged -= OnPresetItemPropertyChanged;
@@ -1154,14 +1234,20 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
         _presetItemSubscriptions.Clear();
         PresetItems.Clear();
+        PresetItemViewModel? restored = null;
         foreach (RoomPreset preset in _presetStore.Items)
         {
             PresetItemViewModel item = new(preset, ApplyPresetCommand);
             item.PropertyChanged += OnPresetItemPropertyChanged;
             _presetItemSubscriptions.Add(item);
             PresetItems.Add(item);
+            if (restored is null && keepName is not null && string.Equals(preset.Name, keepName, StringComparison.Ordinal))
+            {
+                restored = item;
+            }
         }
 
+        SelectedPresetItem = restored;
         OnPropertyChanged(nameof(HasPresets));
         UpdatePresetSummary();
         (DeletePresetCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
@@ -1370,6 +1456,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
         RoomInput = item.RoomInput;
         AppendLog("载入预设：" + item.Preset.Name + " → " + item.RoomInput);
+        _automaticReResolveCount = 0;
         await ResolveAsync().ConfigureAwait(true);
     }
 
@@ -1404,7 +1491,8 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             return;
         }
 
-        RefreshPresetItems();
+        // 重建列表并把新预设设为选中项，用户在列表里能立刻看到它。
+        RefreshPresetItems(name.Trim());
         StatusMessage = $"已新增预设「{name.Trim()}」，正在后台检测它是否开播（当前共 {PresetItems.Count} 个）。";
         AppendLog("已新增预设：" + name.Trim());
         _ = RefreshPresetStatusAsync();

@@ -35,6 +35,23 @@ internal sealed class DouyinParser : PlatformParserBase
     /// <summary>reflow 回退接口地址。</summary>
     private const string ReflowEndpoint = "https://webcast.amemv.com/webcast/room/reflow/info/";
 
+    /// <summary>
+    /// 抖音 Web 直播间进房接口地址（主要回退路径）。
+    /// </summary>
+    /// <remarks>
+    /// 实测（2026-02，房间 745964462470）：该接口在只带 UA + Referer + 首页下发的
+    /// <c>ttwid</c> 时返回 <c>status_code=0</c> 与完整房间 JSON；
+    /// 而 <see cref="ReflowEndpoint"/> 即便补齐公开参数仍返回
+    /// <c>status_code=10011 Request params error</c>。接口不需要任何平台签名。
+    /// </remarks>
+    private const string RoomEnterEndpoint = "https://live.douyin.com/webcast/room/web/enter/";
+
+    /// <summary>进房接口的固定查询参数（与抖音网页端一致，不含任何签名参数）。</summary>
+    private const string RoomEnterQuery =
+        "?aid=6383&app_name=douyin_web&live_id=1&device_platform=web&language=zh-CN&enter_from=web_live"
+        + "&cookie_enabled=true&screen_width=1920&screen_height=1080&browser_language=zh-CN"
+        + "&browser_platform=Win32&browser_name=Chrome&browser_version=131.0.0.0&web_rid=";
+
     /// <summary>reflow 回退接口的固定查询串。</summary>
     private const string ReflowQuery = "?type_id=0&live_id=1&room_id=";
 
@@ -54,6 +71,9 @@ internal sealed class DouyinParser : PlatformParserBase
     /// <summary>抓取房间页与标识候选地址时使用的 Referer。</summary>
     private const string RoomUrlReferer = "https://live.douyin.com/";
 
+    /// <summary>请求头名称：Cookie。</summary>
+    private const string CookieHeaderName = "Cookie";
+
     /// <summary>日志模块名。</summary>
     private const string ModuleName = "Parsers.Douyin";
 
@@ -62,6 +82,9 @@ internal sealed class DouyinParser : PlatformParserBase
 
     /// <summary>reflow 回退接口的操作名。</summary>
     private const string ReflowOperation = "reflow-info";
+
+    /// <summary>Web 进房接口的操作名。</summary>
+    private const string RoomEnterOperation = "room-enter";
 
     /// <summary>播放地址抽取的操作名。</summary>
     private const string StreamUrlOperation = "stream-url";
@@ -169,6 +192,17 @@ internal sealed class DouyinParser : PlatformParserBase
     /// <summary>平台拒绝 reflow 请求时的提示模板（参数为 status_code 与平台 message）。</summary>
     private const string ReflowRejectedDetailFormat =
         "抖音备用接口拒绝了本次请求：status_code={0}，message={1}。该接口按公开参数调用，不做平台签名。";
+
+    /// <summary>平台拒绝进房请求时的提示模板（参数为 status_code 与平台 message）。</summary>
+    private const string RoomEnterRejectedDetailFormat =
+        "抖音进房接口拒绝了本次请求：status_code={0}，message={1}。该接口按公开参数调用，不做平台签名。";
+
+    /// <summary>进房接口返回空响应体时的日志说明（实测：缺少 ttwid 时 HTTP 200 但正文为空）。</summary>
+    private const string RoomEnterEmptyBodyMessage =
+        "抖音进房接口返回空响应体（通常是缺少首页下发的 ttwid 会话 cookie），回退到下一条路径。";
+
+    /// <summary>进房接口显示未开播时的提示。</summary>
+    private const string RoomEnterNotLiveMessage = "抖音进房响应显示未开播（room 为空）。";
 
     /// <summary>平台未给出失败消息时的占位文本。</summary>
     private const string ReflowMessageUnknown = "（平台未给出 message）";
@@ -304,15 +338,19 @@ internal sealed class DouyinParser : PlatformParserBase
     private static readonly string[] RoomIdQueryParameterNames = ["live_web_rid", "web_rid", "room_id", "roomid"];
 
     private readonly HttpTextClient _http;
+    private readonly DouyinWebSession _session;
 
     /// <summary>初始化解析器。</summary>
     /// <param name="http">带超时与有界重试的 HTTP 客户端。</param>
+    /// <param name="httpClientFactory">HTTP 客户端工厂（用于取得抖音首页下发的会话 cookie）。</param>
     /// <param name="logger">结构化日志。</param>
-    public DouyinParser(HttpTextClient http, IStructuredLogger logger)
+    public DouyinParser(HttpTextClient http, HttpClientFactory httpClientFactory, IStructuredLogger logger)
         : base(logger)
     {
         ArgumentNullException.ThrowIfNull(http);
+        ArgumentNullException.ThrowIfNull(httpClientFactory);
         _http = http;
+        _session = new DouyinWebSession(httpClientFactory, logger);
     }
 
     /// <inheritdoc />
@@ -345,6 +383,8 @@ internal sealed class DouyinParser : PlatformParserBase
         // 页面只抓一次：主路径解析状态、备用路径取 sec_uid 都从这份 HTML 上做。
         string html = await FetchRoomPageAsync(roomId, cancellationToken).ConfigureAwait(false);
         ResolvedRoom? room = TryParseRoomPage(html, roomId, query.PreferredQualityKey, builder);
+        room ??= await TryParseRoomEnterAsync(roomId, query.PreferredQualityKey, builder, cancellationToken)
+            .ConfigureAwait(false);
         room ??= await TryParseReflowAsync(
             roomId,
             ExtractAnchorSecUid(html),
@@ -591,7 +631,8 @@ internal sealed class DouyinParser : PlatformParserBase
                 continue;
             }
 
-            if (GetNestedProperty(document.RootElement, RoomStoreField, RoomInfoField).ValueKind == JsonValueKind.Object)
+            JsonElement roomInfo = GetNestedProperty(document.RootElement, RoomStoreField, RoomInfoField);
+            if (roomInfo.ValueKind == JsonValueKind.Object && HasAnyProperty(roomInfo))
             {
                 return document;
             }
@@ -600,6 +641,27 @@ internal sealed class DouyinParser : PlatformParserBase
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// 判断 JSON 对象是否至少含有一个属性。
+    /// </summary>
+    /// <param name="element">待判断元素。</param>
+    /// <returns>含有属性返回 <see langword="true"/>。</returns>
+    /// <remarks>
+    /// 抖音房间页里 <c>roomStore</c> 会出现两次（实测房间 745964462470）：
+    /// 前一个在页面早期的 React Flight 片段里，<c>roomInfo</c> 是空对象 <c>{}</c>；
+    /// 后一个才是真正的房间状态，<c>roomInfo</c> 含 <c>anchor</c> 与 <c>room</c>。
+    /// 若接受空对象就会把可用房间误判成"房间不存在"，因此这里要求非空。
+    /// </remarks>
+    private static bool HasAnyProperty(JsonElement element)
+    {
+        foreach (JsonProperty _ in element.EnumerateObject())
+        {
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>把 <c>roomStore</c> 键名所在的那个 JSON 对象整段切出来（必要时做一次正确反转义）。</summary>
@@ -1019,6 +1081,143 @@ internal sealed class DouyinParser : PlatformParserBase
         return CreateRoom(roomId, anchorName, title, category, builder, qualities, selectedQualityKey);
     }
 
+    /// <summary>拼接 Web 进房接口的完整地址。</summary>
+    /// <param name="roomId">房间号（已由输入校验限定为数字）。</param>
+    /// <returns>完整请求地址（不含任何签名参数）。</returns>
+    internal static string BuildRoomEnterUrl(string roomId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(roomId);
+        return string.Concat(RoomEnterEndpoint, RoomEnterQuery, roomId);
+    }
+
+    /// <summary>
+    /// 走 Web 进房接口：用首页下发的 <c>ttwid</c> 会话 cookie 换取房间状态与播放地址。
+    /// </summary>
+    /// <param name="roomId">房间号。</param>
+    /// <param name="preferredQualityKey">调用方指定的档位键；为空时取最高档。</param>
+    /// <param name="builder">候选构造器。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>解析结果；会话 cookie 不可得或响应不可用时返回 <see langword="null"/>。</returns>
+    /// <remarks>
+    /// 该接口是页面解析失败的兜底：实测房间 745964462470 返回
+    /// <c>{"data":{"data":[{...room...}],"user":{"nickname":"..."}},"status_code":0}</c>；
+    /// 缺少 <c>ttwid</c> 时返回 <b>HTTP 200 + 空正文</b>，因此这里把空正文当作"该路径不可用"
+    /// 而不是解析错误。全程不使用任何平台签名。
+    /// </remarks>
+    private async Task<ResolvedRoom?> TryParseRoomEnterAsync(
+        string roomId,
+        string? preferredQualityKey,
+        StreamCandidateBuilder builder,
+        CancellationToken cancellationToken)
+    {
+        string? ttwid = await _session.TryGetTtwidAsync(cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(ttwid))
+        {
+            Logger.Warn(ModuleName, "未能取得抖音会话 cookie，跳过进房接口。", new Dictionary<string, object?>
+            {
+                ["operation"] = RoomEnterOperation,
+                ["roomId"] = roomId,
+            });
+            return null;
+        }
+
+        HttpRequestSpec spec = new()
+        {
+            Url = BuildRoomEnterUrl(roomId),
+            Platform = Platform,
+            Operation = RoomEnterOperation,
+            Headers = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["Referer"] = string.Concat(RoomUrlReferer, roomId),
+                [CookieHeaderName] = string.Concat(DouyinWebSession.CookieName, "=", ttwid),
+            },
+        };
+
+        string text = await _http.GetStringAsync(spec, cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            Logger.Warn(ModuleName, RoomEnterEmptyBodyMessage, new Dictionary<string, object?>
+            {
+                ["operation"] = RoomEnterOperation,
+                ["roomId"] = roomId,
+            });
+            return null;
+        }
+
+        using JsonDocument? document = TryParseDocument(text, RoomEnterOperation);
+        if (document is null)
+        {
+            return null;
+        }
+
+        EnsureRoomEnterAccepted(document.RootElement, roomId);
+
+        JsonElement data = GetPropertyOrUndefined(document.RootElement, DataField);
+        if (data.ValueKind != JsonValueKind.Object)
+        {
+            Logger.Debug(ModuleName, "抖音进房接口未返回 data 对象。", new Dictionary<string, object?>
+            {
+                ["operation"] = RoomEnterOperation,
+                ["roomId"] = roomId,
+            });
+            return null;
+        }
+
+        JsonElement user = GetPropertyOrUndefined(data, UserField);
+        if (user.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            throw Fail(
+                ResolveFailure.RoomNotFound,
+                RoomEnterOperation,
+                string.Format(CultureInfo.InvariantCulture, RoomNotFoundDetailFormat, roomId));
+        }
+
+        string? anchorName = ReadString(user, NicknameField);
+        if (string.IsNullOrWhiteSpace(anchorName))
+        {
+            throw Fail(ResolveFailure.ParseError, RoomEnterOperation, MissingAnchorMessage);
+        }
+
+        JsonElement room = ResolveRoomEnterRoom(data);
+        if (room.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            throw Fail(ResolveFailure.NotLive, RoomEnterOperation, RoomEnterNotLiveMessage);
+        }
+
+        (IReadOnlyList<QualityOption> qualities, string? selectedQualityKey) =
+            BuildQualityOptions(room, preferredQualityKey);
+        _ = CollectCandidates(builder, room, RoomEnterOperation, selectedQualityKey, out string title, out string category);
+        return CreateRoom(roomId, anchorName, title, category, builder, qualities, selectedQualityKey);
+    }
+
+    /// <summary>定位进房响应里的 room 对象（<c>data.data[0]</c>，兼容 <c>data.room</c>）。</summary>
+    /// <param name="data">进房响应的 <c>data</c> 节点。</param>
+    /// <returns>room 对象；不存在时返回未定义元素。</returns>
+    private static JsonElement ResolveRoomEnterRoom(JsonElement data)
+    {
+        JsonElement list = GetPropertyOrUndefined(data, DataField);
+        if (list.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement item in list.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.Object)
+                {
+                    return item;
+                }
+            }
+
+            return default;
+        }
+
+        return GetPropertyOrUndefined(data, RoomField);
+    }
+
+    /// <summary>进房响应的 <c>status_code</c> 非 0 时按"平台拒绝"抛出。</summary>
+    /// <param name="root">响应根元素。</param>
+    /// <param name="roomId">房间号，用于日志与消息上下文。</param>
+    internal void EnsureRoomEnterAccepted(JsonElement root, string roomId) =>
+        EnsureStatusCodeAccepted(root, roomId, RoomEnterOperation, RoomEnterRejectedDetailFormat);
+
     /// <summary>reflow 响应的 <c>status_code</c> 非 0 时按"平台拒绝"抛出。</summary>
     /// <param name="root">响应根元素。</param>
     /// <param name="roomId">房间号，用于日志与消息上下文。</param>
@@ -1027,7 +1226,16 @@ internal sealed class DouyinParser : PlatformParserBase
     /// （例如 10011 对应 <c>Request params error</c>）；两者都写进 detail，
     /// 便于和"房间不存在""未开播"区分（本项目不实现平台签名，见 ADR 0003）。
     /// </remarks>
-    internal void EnsureReflowAccepted(JsonElement root, string roomId)
+    internal void EnsureReflowAccepted(JsonElement root, string roomId) =>
+        EnsureStatusCodeAccepted(root, roomId, ReflowOperation, ReflowRejectedDetailFormat);
+
+    /// <summary>抖音接口的 <c>status_code</c> 非 0 时按"平台拒绝"抛出。</summary>
+    /// <param name="root">响应根元素。</param>
+    /// <param name="roomId">房间号，用于日志与消息上下文。</param>
+    /// <param name="operation">操作名。</param>
+    /// <param name="detailFormat">失败详情模板（参数为 status_code 与平台 message）。</param>
+    /// <exception >平台返回非 0 状态码时抛出。</exception>
+    private void EnsureStatusCodeAccepted(JsonElement root, string roomId, string operation, string detailFormat)
     {
         int? statusCode = ReadFlexibleInt32(root, StatusCodeField);
         if (statusCode is not { } code || code == 0)
@@ -1036,10 +1244,17 @@ internal sealed class DouyinParser : PlatformParserBase
         }
 
         string message = ReadString(GetPropertyOrUndefined(root, DataField), MessageField) ?? ReflowMessageUnknown;
+        Logger.Warn(ModuleName, "抖音接口返回非 0 状态码。", new Dictionary<string, object?>
+        {
+            ["operation"] = operation,
+            ["roomId"] = roomId,
+            ["statusCode"] = code,
+            ["message"] = message,
+        });
         throw Fail(
             ResolveFailure.Rejected,
-            ReflowOperation,
-            string.Format(CultureInfo.InvariantCulture, ReflowRejectedDetailFormat, code, message));
+            operation,
+            string.Format(CultureInfo.InvariantCulture, detailFormat, code, message));
     }
 
     /// <summary>定位 reflow 响应里的房间数据对象。</summary>

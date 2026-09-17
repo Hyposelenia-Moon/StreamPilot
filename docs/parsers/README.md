@@ -34,6 +34,9 @@ URL 指纹由 `StreamCandidateBuilder` 统一生成，解析器不得自行拼�
 - 档位与地址通常绑定（B站 qn、斗鱼 rate 必须重新请求接口；虎牙可在签名后追加 `ratio`），
   因此候选列表里**不允许混入多个档位的地址**；
 - 语义未经证实的档位（例如 YY `gear`）只放一项"默认（平台给定）"，不得宣称它等于某档画质。
+- 档位名里的限定后缀（HDR / 高帧率）**必须来自平台声明**，不允许按档位语义硬判：
+  B站只在 `g_qn_desc[].media_base_desc.detail_desc.tag` 含「高帧率」时才加该后缀
+  （实测依据见 [bilibili.md](bilibili.md)）。各平台完整口径见 `README.md` 的「画质档位说明」。
 
 详见 [ADR 0003](../adr/0003-parser-contract.md) 第 6.1 节。
 
@@ -46,6 +49,11 @@ URL 指纹由 `StreamCandidateBuilder` 统一生成，解析器不得自行拼�
 - Cookie **只用于解析请求**：播放地址本身不带登录态，本地中继客户端 `UseCookies = false`，
   因此 CDN 与平台都收不到用户的登录态；
 - 日志只记 Cookie 指纹/键名（`SensitiveData.RedactCookie`），永不写原文。
+
+**唯一的例外（抖音进房接口）**：`live.douyin.com/webcast/room/web/enter/` 需要站点给每个访客
+`Set-Cookie` 下发的会话 cookie `ttwid`。该值是服务器签发的普通会话标识，**不是签名、也不是用户凭据**，
+程序由 `DouyinWebSession` 请求一次 `https://live.douyin.com/` 取得（内存缓存 30 分钟），
+只在本次解析请求里使用，伪造值会被平台拒绝（实测返回空正文）。详见 [douyin.md](douyin.md)。
 
 ## 失败分类
 
@@ -84,5 +92,7 @@ URL 指纹由 `StreamCandidateBuilder` 统一生成，解析器不得自行拼�
 2. 新建 `src/StreamPilot.Parsers/<新平台>/<新平台>Parser.cs`，继承 `PlatformParserBase`；
 3. 在 `PlatformId` 末尾追加枚举值（**不得**修改已有数值）；
 4. 在 `App.xaml.cs` 的 `BuildServices` 中注册：`new XxxParser(textClient, _logger)`；
+   若解析器还需要 `HttpClientFactory`（例如抖音要读 `Set-Cookie` 取会话 cookie），
+   追加该参数并把组合根里的 `factory` 传进去；
 5. 在 `tests/StreamPilot.Tests` 增加：正常 / 未开播 / 房间不存在 / 轮播 / 网络错误 / 结构变化 六类用例；
 6. 更新本文件与 `README.md` 的平台支持表。

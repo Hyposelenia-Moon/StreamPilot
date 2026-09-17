@@ -231,7 +231,7 @@ public partial class App : WpfApplication
         registry.RegisterSingleton<IPlatformParserFactory>(_ => new PlatformParserFactory(
         [
             new BilibiliParser(textClient, _logger),
-            new DouyinParser(textClient, _logger),
+            new DouyinParser(textClient, factory, _logger),
             new HuyaParser(textClient, _logger),
             new DouyuParser(textClient, _logger),
             new YyParser(textClient, _logger),

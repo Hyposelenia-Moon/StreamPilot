@@ -371,7 +371,162 @@ public sealed class PlatformParserTests
         Assert.Equal(4000, selected);
     }
 
+    /// <summary>
+    /// B站：高帧率后缀必须来自接口声明（<c>g_qn_desc[].media_base_desc.detail_desc.tag</c>），
+    /// 不能按档位语义硬判。
+    /// </summary>
+    /// <remarks>
+    /// 两份响应取自真实房间：814（有 60 帧，<c>tag=["高帧率"]</c>）与 1868871278（无 60 帧，<c>tag</c> 缺失）。
+    /// </remarks>
+    [TestMethod("B站：高帧率后缀只认接口声明的 detail_desc.tag")]
+    public void BilibiliReadsHighFrameRateFromDeclaration()
+    {
+        using JsonDocument highFrameRate = JsonDocument.Parse(
+            """
+            { "playurl_info": { "playurl": {
+                "g_qn_desc": [
+                  { "qn": 10000, "desc": "原画", "hdr_desc": "",
+                    "media_base_desc": { "detail_desc": { "desc": "1080P 原画", "tag": ["高帧率"] },
+                                         "brief_desc": { "desc": "1080P", "badge": "原画" } } },
+                  { "qn": 400, "desc": "蓝光", "hdr_desc": "",
+                    "media_base_desc": { "detail_desc": { "desc": "1080P 蓝光" } } } ],
+                "stream": [ { "format": [ { "codec": [ { "accept_qn": [10000, 400] } ] } ] } ] } } }
+            """);
+
+        (IReadOnlyList<QualityOption> declared, string? declaredKey) =
+            CreateBilibiliParser().BuildQualityOptions(highFrameRate.RootElement, requestedQuality: null);
+
+        Assert.Equal(2, declared.Count);
+        Assert.Equal("1080P 原画（高帧率）", declared[0].Label);
+        Assert.Equal("1080P 蓝光", declared[1].Label);
+        Assert.Equal("10000", declaredKey);
+
+        using JsonDocument normal = JsonDocument.Parse(
+            """
+            { "playurl_info": { "playurl": {
+                "g_qn_desc": [
+                  { "qn": 10000, "desc": "原画", "hdr_desc": "",
+                    "media_base_desc": { "detail_desc": { "desc": "1080P 原画" },
+                                         "brief_desc": { "desc": "1080P", "badge": "原画" } } } ],
+                "stream": [ { "format": [ { "codec": [ { "accept_qn": [10000] } ] } ] } ] } } }
+            """);
+
+        (IReadOnlyList<QualityOption> plain, _) =
+            CreateBilibiliParser().BuildQualityOptions(normal.RootElement, requestedQuality: null);
+
+        Assert.Equal(1, plain.Count);
+        Assert.Equal("1080P 原画", plain[0].Label, "接口没有声明高帧率时不得加后缀");
+    }
+
+    /// <summary>B站：完全没有档位声明时同样不能凭空标注高帧率。</summary>
+    [TestMethod("B站：缺少 g_qn_desc 时不标注高帧率")]
+    public void BilibiliDoesNotGuessHighFrameRateWithoutDeclaration()
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            """
+            { "playurl_info": { "playurl": {
+                "stream": [ { "format": [ { "codec": [ { "accept_qn": [10000, 400, 250] } ] } ] } ] } } }
+            """);
+
+        (IReadOnlyList<QualityOption> qualities, _) =
+            CreateBilibiliParser().BuildQualityOptions(document.RootElement, requestedQuality: null);
+
+        Assert.Equal(3, qualities.Count);
+        Assert.Equal("1080P 原画", qualities[0].Label);
+        Assert.Equal("1080P 蓝光", qualities[1].Label);
+        Assert.Equal("720P 超清", qualities[2].Label);
+    }
+
+    /// <summary>B站：hdr_type 非 0 或 detail_desc.tag 含 HDR 时补 HDR 标记。</summary>
+    [TestMethod("B站：HDR 标记来自 hdr_type 与 tag 声明")]
+    public void BilibiliReadsHdrFromDeclaration()
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            """
+            { "playurl_info": { "playurl": {
+                "g_qn_desc": [
+                  { "qn": 10000, "desc": "原画", "hdr_desc": "", "hdr_type": 1,
+                    "media_base_desc": { "detail_desc": { "desc": "1080P 原画", "tag": ["高帧率", "HDR"] } } } ],
+                "stream": [ { "format": [ { "codec": [ { "accept_qn": [10000] } ] } ] } ] } } }
+            """);
+
+        (IReadOnlyList<QualityOption> qualities, _) =
+            CreateBilibiliParser().BuildQualityOptions(document.RootElement, requestedQuality: null);
+
+        Assert.Equal(1, qualities.Count);
+        Assert.Equal("1080P 原画（HDR 高帧率）", qualities[0].Label);
+    }
+
+    /// <summary>
+    /// 抖音：房间页里 <c>roomStore</c> 会出现两次，前一个是空的 <c>roomInfo:{}</c> 外壳，
+    /// 后一个才是真正的房间状态；必须跳过空壳继续扫描。
+    /// </summary>
+    [TestMethod("抖音：跳过空的 roomStore 外壳")]
+    public void DouyinSkipsEmptyRoomStoreShell()
+    {
+        const string Html = """
+            <script>self.__pace_f.push([1,"{\"state\":{\"roomStore\":{\"roomInfo\":{},\"liveStatus\":\"normal\"}}}"])</script>
+            <script>self.__pace_f.push([1,"{\"state\":{\"roomStore\":{\"roomInfo\":{\"anchor\":{\"nickname\":\"A\"},\"room\":{\"status\":2}}}}}"])</script>
+            """;
+
+        using JsonDocument? document = CreateDouyinParser().ExtractRoomStoreDocument(Html);
+
+        Assert.NotNull(document, "必须跳过空壳取到真正的房间状态");
+        JsonElement roomInfo = document!.RootElement.GetProperty("roomStore").GetProperty("roomInfo");
+        Assert.Equal("A", roomInfo.GetProperty("anchor").GetProperty("nickname").GetString() ?? string.Empty);
+    }
+
+    /// <summary>抖音：页面只有空壳时不能当成房间状态，必须返回 null 交给下一条路径。</summary>
+    [TestMethod("抖音：只有空 roomStore 外壳时返回 null")]
+    public void DouyinIgnoresOnlyEmptyRoomStoreShell()
+    {
+        const string Html = """<script>self.__pace_f.push([1,"{\"roomStore\":{\"roomInfo\":{}}}"])</script>""";
+
+        using JsonDocument? document = CreateDouyinParser().ExtractRoomStoreDocument(Html);
+
+        Assert.Null(document);
+    }
+
+    /// <summary>抖音：进房接口地址只带公开参数，不含任何平台签名。</summary>
+    [TestMethod("抖音：进房接口地址不含签名")]
+    public void DouyinBuildsRoomEnterUrlWithoutSignature()
+    {
+        string url = DouyinParser.BuildRoomEnterUrl("745964462470");
+
+        Assert.Contains("live.douyin.com/webcast/room/web/enter/", url, "必须走实测可用的进房接口");
+        Assert.Contains("web_rid=745964462470", url, "房间号必须带上");
+        Assert.Contains("aid=6383", url, "公开参数缺失会被平台拒绝");
+        Assert.Contains("app_name=douyin_web", url, "公开参数缺失会被平台拒绝");
+        Assert.DoesNotContain("a_bogus", url, "不得实现平台签名");
+        Assert.DoesNotContain("ms_token", url, "不得实现平台签名");
+        Assert.DoesNotContain("__ac_signature", url, "不得实现平台签名");
+    }
+
+    /// <summary>抖音：进房接口的 status_code 非 0 同样归类为"平台拒绝"。</summary>
+    [TestMethod("抖音：进房接口非 0 status_code 归类为平台拒绝")]
+    public void DouyinClassifiesRoomEnterRejectionAsRejected()
+    {
+        DouyinParser parser = CreateDouyinParser();
+
+        using JsonDocument rejected = JsonDocument.Parse(
+            """{ "data": { "message": "Request params error" }, "status_code": 10011 }""");
+        ResolveException exception = Assert.Throws<ResolveException>(
+            () => parser.EnsureRoomEnterAccepted(rejected.RootElement, "745964462470"));
+
+        Assert.Equal(ResolveFailure.Rejected, exception.Failure);
+        Assert.Contains("10011", exception.Message, "detail 必须带 status_code");
+
+        using JsonDocument accepted = JsonDocument.Parse("""{ "status_code": 0, "data": { "data": [] } }""");
+        parser.EnsureRoomEnterAccepted(accepted.RootElement, "745964462470");
+    }
+
     private static YyParser CreateYyParser() =>
+        new(new HttpTextClient(new HttpClientFactory(new NetworkOptions(), NullStructuredLogger.Instance), NullStructuredLogger.Instance),
+            NullStructuredLogger.Instance);
+
+    /// <summary>创建一个不发起网络请求的 B站解析器（HTTP 客户端只在测试里被构造，不会被调用）。</summary>
+    /// <returns>B站解析器实例。</returns>
+    private static BilibiliParser CreateBilibiliParser() =>
         new(new HttpTextClient(new HttpClientFactory(new NetworkOptions(), NullStructuredLogger.Instance), NullStructuredLogger.Instance),
             NullStructuredLogger.Instance);
 
@@ -381,9 +536,11 @@ public sealed class PlatformParserTests
 
     /// <summary>创建一个不发起网络请求的抖音解析器（HTTP 客户端只在测试里被构造，不会被调用）。</summary>
     /// <returns>抖音解析器实例。</returns>
-    private static DouyinParser CreateDouyinParser() =>
-        new(new HttpTextClient(new HttpClientFactory(new NetworkOptions(), NullStructuredLogger.Instance), NullStructuredLogger.Instance),
-            NullStructuredLogger.Instance);
+    private static DouyinParser CreateDouyinParser()
+    {
+        HttpClientFactory factory = new(new NetworkOptions(), NullStructuredLogger.Instance);
+        return new DouyinParser(new HttpTextClient(factory, NullStructuredLogger.Instance), factory, NullStructuredLogger.Instance);
+    }
 
     /// <summary>创建一个不发起网络请求的斗鱼解析器（HTTP 客户端只在测试里被构造，不会被调用）。</summary>
     /// <returns>斗鱼解析器实例。</returns>

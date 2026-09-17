@@ -31,6 +31,19 @@ public sealed class WebPlayerHost : UserControl, IAsyncDisposable
     /// <summary>播放页相对路径。</summary>
     public const string PlayerPage = "player.html";
 
+    /// <summary>
+    /// 允许"无用户手势自动播放"的内核启动参数。
+    /// </summary>
+    /// <remarks>
+    /// Chromium 默认策略是 <c>document-user-activation-required</c>：没有用户手势时不允许带声音自动播放，
+    /// WebView2 继承该策略，于是播放页的 <c>video.play()</c> 会立刻抛 <c>NotAllowedError</c>，
+    /// 用户看到的现象就是"必须先点一下画面才开始播放"。
+    /// 显式声明 Chromium 的 <c>autoplay-policy=no-user-gesture-required</c> 开关（命令行前缀由
+    /// <see cref="AutoplayBrowserArgument"/> 给出）后，首帧无需点击即可自动播放。
+    /// 播放页仍保留"静音起播后立刻恢复音量"的兜底，见 Web/player.html。
+    /// </remarks>
+    private const string AutoplayBrowserArgument = "--autoplay-policy=no-user-gesture-required";
+
     private readonly IStructuredLogger _logger;
     private readonly string _moduleName = "App.WebPlayer";
     private readonly WebView2 _webView = new();
@@ -88,8 +101,13 @@ public sealed class WebPlayerHost : UserControl, IAsyncDisposable
         string userDataFolder = Path.Combine(AppPaths.UserDataDirectory, "WebView2");
         Directory.CreateDirectory(userDataFolder);
 
+        CoreWebView2EnvironmentOptions environmentOptions = new()
+        {
+            AdditionalBrowserArguments = AutoplayBrowserArgument,
+        };
+
         CoreWebView2Environment environment = await CoreWebView2Environment
-            .CreateAsync(browserExecutableFolder: null, userDataFolder: userDataFolder)
+            .CreateAsync(browserExecutableFolder: null, userDataFolder: userDataFolder, options: environmentOptions)
             .ConfigureAwait(true);
 
         await _webView.EnsureCoreWebView2Async(environment).ConfigureAwait(true);
@@ -125,6 +143,7 @@ public sealed class WebPlayerHost : UserControl, IAsyncDisposable
         {
             ["url"] = VirtualHostBase + PlayerPage,
             ["webRoot"] = webRoot,
+            ["autoplayPolicy"] = "no-user-gesture-required",
         });
     }
 

@@ -49,6 +49,13 @@ public sealed record StreamPilotOptions
 /// <summary>播放设置。</summary>
 public sealed record PlaybackOptions
 {
+    /// <summary>首次运行时的默认音量（0-100）。</summary>
+    /// <remarks>
+    /// 用户已保存的 <c>config.json</c> 里若有 <c>playback.volume</c>，反序列化会保留用户值，
+    /// 这里的默认值只影响"首次运行 / 配置里没有该字段"的场景，不会强改用户已保存的音量。
+    /// </remarks>
+    public const int DefaultVolume = 30;
+
     /// <summary>默认播放模式。</summary>
     public PlaybackMode Mode { get; init; } = PlaybackMode.Extreme;
 
@@ -56,7 +63,7 @@ public sealed record PlaybackOptions
     public int ExtremeTargetMs { get; init; } = PlaybackRequest.DefaultExtremeTargetMs;
 
     /// <summary>默认音量（0-100）。</summary>
-    public int Volume { get; init; } = 70;
+    public int Volume { get; init; } = DefaultVolume;
 
     /// <summary>是否自动外挂 mpv 播放（false 表示仅在用户点击时启动）。</summary>
     public bool AutoLaunchMpv { get; init; }

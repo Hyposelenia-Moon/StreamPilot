@@ -19,17 +19,44 @@
 | 3 | `GET https://api.live.bilibili.com/xlive/web-room/v1/index/getRoomBaseInfo?room_ids={id}&req_biz=web_room_componet` | 仅在第 2 步不可用时调用；取 `data.by_room_ids` 里的 `title` / `uname` / `area_name` / `cover` |
 | 4 | `GET https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?protocol=0,1&format=0,1,2&codec=0,1&qn={qn}&platform=web&ptype=8&dolby=5&panorama=1&room_id={id}` | 全部候选线路与画质；`qn` 默认 `30000`，用户选了档位时用该档位的 qn |
 
-`qn` 取值：`30000`=杜比原画、`25000`=默认原画、`20000`=4K、`15000`=2K、`10000`=1080P 高帧率（官方名"原画"）、`400`=蓝光、`250`=超清、`150`=高清、`80`=流畅。
+`qn` 取值：`30000`=杜比原画、`25000`=默认原画、`20000`=4K、`15000`=2K、`10000`=1080P 原画（有 4K 的房间显示为「1080P 高码率」）、`400`=蓝光、`250`=超清、`150`=高清、`80`=流畅。是否追加「高帧率」「HDR」后缀见下文「HDR / 高帧率后缀只看接口声明」。
 
 ## 画质档位（`Qualities`）
 
 - **可用档位**来自 `playurl_info.playurl.stream[].format[].codec[].accept_qn[]`（同一房间所有编码的并集去重）。
   注意 `accept_qn[0]` 是**最低**档，不能当成最高档使用。
-- **官方档位名与 HDR 标记**来自 `playurl_info.playurl.g_qn_desc[]`：`qn` + `desc` + `hdr_desc`
-  （HDR 不是独立的 qn，而是某个 qn 上的 `hdr_desc == "HDR"` 属性，显示时追加"（HDR）"）。
+- **官方档位名与标记**来自 `playurl_info.playurl.g_qn_desc[]`：`qn` + `desc` + `hdr_desc` + `hdr_type`
+  + `media_base_desc.detail_desc.desc/tag`（完整官方名，例如 `1080P 原画`）与 `media_base_desc.brief_desc`。
 - 请求的 `qn` 与实际生效档位（`codec[].current_qn` 或请求值）写入 `SelectedQualityKey`；
   用户选的键不在可用列表里时回退到最高档并记 `Warn`。
 - 匿名请求通常只能拿到较低档位（例如 1080P 原画）；要拿 4K/HDR/杜比需要在设置里填自己的 `SESSDATA`。
+
+### 档位命名口径（有 4K / 无 4K 两套，保持不变）
+
+| 房间有 4K（`accept_qn` 含 `20000`） | 房间没有 4K |
+|-----------------------------------|-------------|
+| `杜比原画`(30000) → `4K 原画`(20000) → `2K 原画`(15000) → `1080P 高码率`(10000) → `1080P 蓝光`(400) → `720P 超清`(250) → `高清`(150) → `流畅`(80) | `杜比原画`(30000) → `2K 原画`(15000) → `1080P 原画`(10000) → `1080P 蓝光`(400) → `720P 超清`(250) → `高清`(150) → `流畅`(80) |
+
+即同一个 `qn=10000`：**有 4K** 的房间叫「1080P 高码率」，**没有 4K** 的房间叫「1080P 原画」。
+
+### HDR / 高帧率后缀只看接口声明
+
+`BuildQualityLabel` **不再按档位语义硬判高帧率**，两个后缀都取自 `g_qn_desc` 里该 qn 自己的声明：
+
+| 后缀 | 判定依据 |
+|------|----------|
+| `高帧率` | `media_base_desc.detail_desc.tag[]` 含「高帧率」，或 `attr_desc` 含「高帧率」 |
+| `HDR` | `hdr_type != 0`，或 `hdr_desc` / `attr_desc` / `detail_desc.tag[]` / `brief_desc` 含 `HDR` |
+
+实测对比（`GET https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?protocol=0,1&format=0,1,2&codec=0,1&qn=30000&platform=web&ptype=8&dolby=5&panorama=1&room_id={房间号}`，
+UA 为桌面 Chrome，`Referer: https://live.bilibili.com/`）：
+
+| 房间 | `qn=10000` 的 `media_base_desc` | 显示 |
+|------|--------------------------------|------|
+| `814`（1080P 60 帧） | `{"detail_desc":{"desc":"1080P 原画","tag":["高帧率"]},"brief_desc":{"desc":"1080P","badge":"原画"}}` | `1080P 原画（高帧率）` |
+| `1868871278`（1080P 无 60 帧） | `{"detail_desc":{"desc":"1080P 原画"},"brief_desc":{"desc":"1080P","badge":"原画"}}` | `1080P 原画` |
+
+`g_qn_desc` 整体缺失（或该 qn 没有声明）时**不加任何后缀**，只输出基础档位名。
 
 ## 候选映射
 

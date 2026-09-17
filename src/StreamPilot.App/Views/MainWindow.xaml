@@ -60,9 +60,15 @@
                   <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                   </Grid.ColumnDefinitions>
                   <TextBlock Grid.Column="0" Text="预设" Style="{StaticResource SectionTitle}" Margin="0,0,0,0" />
-                  <Button Grid.Column="1" Command="{Binding RefreshPresetStatusCommand}" Margin="0"
+                  <!-- 新增预设入口：放在预设卡片头部，始终可点；房间号为空时点它也会给出明确提示 -->
+                  <Button Grid.Column="1" Content="＋ 新增预设" Command="{Binding SavePresetCommand}"
+                          Style="{StaticResource PrimaryButton}" Margin="0,0,8,0"
+                          AutomationProperties.AutomationId="AddPresetButton"
+                          ToolTip="把「直播源」里的房间号或直播间链接存成预设，下次一键打开" />
+                  <Button Grid.Column="2" Command="{Binding RefreshPresetStatusCommand}" Margin="0"
                           ToolTip="重新检测所有预设是否开播（并发 2 个，单个超时 10 秒）">
                     <TextBlock>
                       <TextBlock.Style>
@@ -99,6 +105,7 @@
                   </TextBlock>
 
                   <ListBox ItemsSource="{Binding PresetItems}"
+                           SelectedItem="{Binding SelectedPresetItem, Mode=TwoWay}"
                            MaxHeight="240"
                            Background="Transparent"
                            BorderThickness="0"

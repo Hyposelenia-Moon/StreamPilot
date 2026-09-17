@@ -16,6 +16,25 @@
    - 平台可能限制了来源（Referer）。确认桥接服务已启动（状态行显示 `桥接：http://127.0.0.1:xxxx`），
      中继会自动为需要 Referer 的流（B站/抖音）加上 Referer；
    - 也可能是候选地址确实过期，点击"解析房间"重新解析。
+3. 看状态行是否出现 `已停止自动重试（连续 N 次重新解析都未能出画）`：
+   说明该房间的地址反复失效（斗鱼常见）。点「开始播放」手动重试或改用 mpv；
+   详见 [斗鱼解析器说明](../parsers/douyu.md) 的「一直重连」一节。
+
+## 1.1 首帧需要点一下画面才开始播放
+
+1. 正常路径不该需要点击：宿主 WebView2 以 `--autoplay-policy=no-user-gesture-required` 启动
+   （日志 `播放宿主已初始化` 里带 `autoplayPolicy=no-user-gesture-required`）；
+2. 若内核仍要求手势，播放页会走"静音起播 → 立刻恢复音量"的兜底，
+   页面日志里会出现 `内核要求静音起播，已恢复音量 30%`；这种情况下**依然不需要点击**；
+3. 只有极旧的内核（既不认启动参数、又拒绝静音起播）才会回到"点一下画面"的交互，
+   此时页面顶部会给出提示。升级 [WebView2 运行时](https://developer.microsoft.com/microsoft-edge/webview2/) 可解决。
+
+## 1.2 音量不是预期的 30
+
+- 30 只对**首次运行**（或配置里没有 `playback.volume` 字段）生效；
+- 程序**不会**强改用户已保存的音量：`%LOCALAPPDATA%\StreamPilot\config.json` 里已有
+  `playback.volume` 时按该值生效；
+- 需要改成 30：设置页 → 默认音量 → 保存；或退出程序后删除 `config.json` 里的 `volume` 字段再启动。
 
 ## 2. 画面卡顿 / 追帧无效
 
