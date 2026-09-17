@@ -1,102 +1,121 @@
 # StreamPilot
 
-Windows 桌面直播工具：**多平台低延迟播放** + **多平台解析** + **直播原始流录制**。
+Windows 桌面直播工具：**多平台低延迟播放 + 直播回放录制 + mpv 外挂**。B站 / 抖音 / 虎牙 / 斗鱼 / YY / Bigo 一个界面搞定，解压即用、不需要装任何环境。
 
-Web 端负责低延迟观看，mpv 端负责超分 / HDR / 高画质，两者互不关联。全部为自研源码，最终以自包含产物发布，解压双击即可运行。
-
----
-
-## 摘要
-
-**StreamPilot 是一个 Windows 桌面直播客户端，把"低延迟观看、多平台解析、原始流录制"三件事做在同一个自研程序里**：WebView2 承载自研播放页负责低延迟播放（极限追帧最低 150 ms），C# 解析层负责 B站 / 抖音 / 虎牙 / 斗鱼 / YY / Bigo 六个平台的房间与直播流解析，录制层以字节级搬运方式保存平台原始 FLV / TS（**不转码**），内嵌回环桥接服务把当前流一键交给 mpv 以获得超分 / HDR 画质。三个参考项目（录播姬、Lsar、MultiLive）只作只读参考，源码 100% 自研，最终以自包含单文件产物发布，用户解压双击即用、无需安装任何环境。
-
-### 核心亮点
-
-- **五要素统一的解析契约**：所有平台都产出 `StreamCandidate`（流地址 / 格式 / CDN host / 编码 / 源索引），并区分八类失败（未开播、房间不存在、轮播中、解析错误、网络错误、平台拒绝、非法输入、不受支持），UI 提示与录制层对平台无感知。
-- **可量化的低延迟策略**：三档追帧目标 150 / 200 / 250 ms，CDN 候选**并行**探测（1.2 s 上限）后按延迟排序，首帧超时 6 / 8 s，卡顿判定 4 / 6.5 s（追帧档）与 6 / 9 s（稳定档），每候选重连 2 次（250 ms → 1000 ms）后自动切换线路。全部阈值集中定义于 `Web/player-core.js`，由 `node --test` 回归覆盖。
-- **真·原始流录制**：不转码、不重新编码；FLV 按视频关键帧分片并重写文件头 + `onMetaData` + 序列头、时间戳按分片首帧重定基，使每个分片可独立播放；HLS 按 TS 整包对齐并按 m3u8 边界切分；断流按 2/4/8/15/30 s 退避自动重连，编码参数变化时强制切分；每场录制写一份 JSON 侧车元数据（主播名 / 房间号 / 标题 / 分区 / 开播时间 / 时长 / 分片清单）。
-- **安全边界写进代码而非文档**：桥接服务只监听 `127.0.0.1`，由 `LoopbackOnlyGuard` 在启动前强制校验（出现 `+` / `*` / `0.0.0.0` 直接拒绝启动）；`Access-Control-Allow-Private-Network` 只出现在预检响应；日志写入前统一脱敏 Cookie 与 `wsSecret` / `txSecret` / `sign` / `token` 等签名参数，只记录不可逆指纹；不实现任何风控绕过（如抖音 `a_bogus`）。
-- **依赖极简 + 自研测试**：只引入 1 个 NuGet 运行时依赖（`Microsoft.Web.WebView2`），其余全部使用 BCL；测试用自研极简运行器，因此在**没有外网、无法还原 xunit** 的环境里也能跑回归测试。
-
-### 当前状态
-
-| 项 | 数值 / 结果 |
-|----|-------------|
-| 交付规模 | 141 个文件 / 1.70 MiB；C# 93 个文件 / 约 1.4 万行（其中 `src` 74 个文件、`tests` 19 个文件） |
-| 编译 | `dotnet build StreamPilot.slnx`（Debug 与 Release）**0 警告 / 0 错误** |
-| 测试 | C# 单元测试 **87 / 87 通过**；播放策略前端测试 **13 / 13 通过**；静态红线自检与离线结构分析均通过 |
-| 产物 | 发行版目录 `StreamPilot-windows-v0.1.0`（单文件 exe 67.0 MiB，整包 69.1 MiB）与同名校验过的压缩包 `StreamPilot-windows-v0.1.0.zip`（62.0 MiB；校验值见随包 `.zip.sha256`） |
-| 运行时 | 已做冒烟验证：桥接 `/health` 返回 `{"status":"ok","version":"0.1.0","port":5566}`，播放页握手成功并报告 `HEVC: 支持，H.264: 支持` |
-| 平台解析实测 | B站（`live.bilibili.com/6`）、虎牙（`660000`）、斗鱼（`1126960`）、YY（`54880976`）已实测拿到候选线路；B站风控环境下元数据自动降级；全屏、预设保存与切换预设自动解析均已通过界面自动化验证 |
-| 尚未验证 | **真实直播流的落盘录制**（拉流 → 分片 → 元数据）：需要长时间开播的真实房间，请在目标机器上实测 |
-
-技术栈：.NET 10（`net10.0-windows`）+ WPF + WebView2，产物为 win-x64 自包含单文件。架构决策见 [`docs/adr/`](docs/adr/)，平台实现细节见 [`docs/parsers/`](docs/parsers/README.md)。
+> 本文分成两栏：**普通用户**只看第一栏就够了；**开发者**（构建、测试、架构、验证状态）内容在第二栏。
 
 ---
 
-## 项目定位
+# 一、普通用户
 
-| 能力 | 说明 |
+## 1. 这是什么
+
+| 想做的事 | StreamPilot 怎么做 |
+|----------|-------------------|
+| 用电脑看直播，画面比网页更跟手 | 内置播放器，支持 150 / 200 / 250 ms 三档极限追帧 |
+| 想要最高画质（B站 4K/原画、虎牙蓝光20M…） | 播放页右上角「画质」下拉，档位名与官方直播间一致 |
+| 一边看一边把直播存下来 | 「直播回放录制」：原样保存、不转码、自动分段、断流自动重连 |
+| 想要超分 / HDR / 高画质 | 一键把当前直播交给自己的 mpv 播放 |
+
+## 2. 下载与安装
+
+1. 解压 `StreamPilot-windows-v0.1.0.zip`，得到同名文件夹；
+2. 双击文件夹里的 `StreamPilot-windows-v0.1.0.exe`；
+3. 首次启动若提示缺少 **WebView2 运行时**，装一次 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)（Win10 1803+ 与 Win11 一般自带）。
+
+绿色软件：程序不写注册表、不装服务，卸载就是删掉文件夹（用户数据在另一处，见第 8 节）。
+
+## 3. 三分钟上手
+
+1. 左侧 **平台** 选直播平台，**房间号 / 直播间链接** 里粘贴房间号（例如 `660000`）或直播间网址；
+2. 点 **解析房间**：下方会显示主播、标题、分区与「直播状态」；
+   - 想以后一键打开，点 **保存预设**，之后从顶部「预设」下拉里选它就会自动填入并解析；
+3. 点 **开始播放**：右侧画面自动完成线路探测 → 选最快线路 → 追帧；
+4. 想换画质：右侧画面右上角 **画质** 下拉（不同平台档位名不同，例如 B站「4K 原画」、抖音「原画」、虎牙「蓝光20M」）；
+5. 想录制：点 **开始录制**，文件按 `{平台}\{主播}\` 存放，命名为「主播名-房间号-开始时间-分片序号」；
+6. 想要更高画质/超分：点 **mpv 播放**（需要你自己准备 mpv，见第 6 节）。
+
+## 4. 画质与码率怎么来的
+
+- 程序会按平台官方接口请求**当前可用的档位列表**，档位名尽量与官方直播间一致（原画 / 4K / HDR / 蓝光20M / 超清 / 高清…），并在下拉里显示码率（平台提供时）。
+- 默认取**能拿到的最高档**；如果某个高档需要登录态，请按第 5 节填 Cookie，否则平台只会给你匿名档位。
+- 换档会重新向平台请求一次地址（平台地址本身与档位绑定），因此切换后画面会重新连接，这是正常现象。
+
+## 5. （可选）填 Cookie 换取更高画质
+
+**为什么需要**：部分平台把最高档（例如虎牙“蓝光 20M”、B站 4K/HDR）留给登录用户。填上你自己账号的 Cookie 后，程序就能请求到这些档位。
+
+**注意**：Cookie 相当于你的登录凭证，请只填在自己的电脑上；程序把它保存在本机 `%LOCALAPPDATA%\StreamPilot\config.json`，**不会**写进日志、**不会**随程序发布、**不会**发给 CDN。
+
+### 获取步骤（以 B站为例，其它平台同理）
+
+1. 用浏览器打开该平台官网并**登录**；打开任意一个正在直播的直播间；
+2. 按 `F12` 打开开发者工具 → 切到 **Network（网络）** 面板 → 按 `F5` 刷新页面；
+3. 在请求列表里点任意一个发往该平台域名（B站是 `api.live.bilibili.com`）的请求；
+4. 在 **Headers（标头）** → **Request Headers（请求标头）** 里找到 `Cookie:` 一行，**复制整行冒号后面的内容**；
+   - 想省事：也可以只复制关键字段，例如 B站的 `SESSDATA=xxxx`（分号分隔的多个 `名字=值` 都行）；
+5. 回到 StreamPilot → 右上角 **⚙** → **高级** → **账号与 Cookie** → 把内容粘贴到对应平台输入框 → **保存**；
+6. 重新点一次 **解析房间**，画质下拉里就会出现更高档位。
+
+> 不想填也没关系：留空即匿名解析，只是拿不到需要登录的最高档。
+
+## 6. mpv 外挂播放（可选）
+
+1. 下载 mpv（<https://mpv.io/>），把 `mpv.exe` 放到程序目录的 `tools\mpv\` 下（或 `tools\` 下）；
+2. 点界面上的 **mpv 播放** 即可用 mpv 打开当前直播；
+3. 想调画质/缓存/倍速：直接改**你自己的 mpv 配置**（`mpv.conf` 等）。StreamPilot 只传窗口标题与防盗链 `Referer`，不会覆盖你的 mpv 设置。
+
+## 7. 常见问题
+
+| 现象 | 原因与处理 |
+|------|-----------|
+| 提示「解析失败：主播未开播（状态：未开播）」 | 主播确实没在播。等开播后再点解析 |
+| 提示「找不到这个直播间」 | 房间号或链接写错了；有的平台要填**直播间链接**而不是主页链接 |
+| 提示「平台拒绝了本次请求（可能触发风控）」 | 平台限流，等一会儿再试；B站可填 Cookie 提高成功率 |
+| 提示「Bigo 要求登录后才能读取直播信息」 | Bigo 对匿名/部分地区不返回播放信息，填该平台 Cookie 后重试 |
+| 点开始播放后提示「所有线路都连不上」 | 多数是该房间的分发线路受限或主播刚下播；换档位或改用 mpv 播放；详情见左侧「候选线路」与日志 |
+| 画面提示需要 HEVC 解码 | 系统缺少 HEVC 视频扩展：改用 **mpv 播放**，或在画质下拉里换成 H.264 档位 |
+| 斗鱼房间没有画面 | 斗鱼多数房间只给 RTMP，网页播放器放不了：用 **mpv 播放**（此时也不能录制） |
+| 录制文件打不开 | 直播中断导致的分片末尾不完整属正常，播放器一般能播到断点；分片大小/时长可在设置里调 |
+| 想反馈问题 | 设置 → 高级 → 勾选「记录详细诊断日志」，然后把 `%LOCALAPPDATA%\StreamPilot\logs` 里的日志发出来（已自动脱敏签名与 Cookie） |
+
+## 8. 我的数据在哪
+
+| 内容 | 位置 |
 |------|------|
-| 低延迟播放 | B站 / 抖音 HTTP-FLV 优先、HLS 兜底；极限追帧档位 150 / 200 / 250 ms（默认 250 ms）；首帧超时、CDN 并行探测、候选切换、冻结恢复；HEVC 不可解码时明确提示并推荐 mpv |
-| 多平台解析 | B站、抖音、虎牙（P0）、斗鱼、YY（P1）、Bigo（P2）；统一 `StreamCandidate`（流地址 / 格式 / CDN host / 编码 / 源索引）；失败区分未开播、房间不存在、轮播中、解析错误、网络错误、平台拒绝 |
-| 原始流录制 | 不转码、不重新编码，直接写平台原始 FLV / TS；按大小或时长自动分片；断流自动重连；写元数据（主播名、房间号、标题、开播时间、录制时长） |
-| mpv 外挂 | 内嵌 127.0.0.1 桥接服务（不再依赖外部 PowerShell 脚本），一键把当前流转给 mpv，享受超分 / HDR |
+| 配置（含 Cookie） | `%LOCALAPPDATA%\StreamPilot\config.json` |
+| 预设 | `%LOCALAPPDATA%\StreamPilot\presets.json` |
+| 日志 | `%LOCALAPPDATA%\StreamPilot\logs\` |
+| 网页内核缓存 | `%LOCALAPPDATA%\StreamPilot\WebView2\` |
+| 录制文件 | 默认 `%USERPROFILE%\Videos\StreamPilot\{平台}\{主播}\` |
 
-## 环境要求
+**卸载**：删掉程序文件夹 + 上面的 `%LOCALAPPDATA%\StreamPilot` 目录即可。
 
-- **运行（用户）**：Windows 10 / 11 x64 + Microsoft Edge WebView2 运行时（Win10 1803+ 通常随系统或 Edge 自带；缺失时请安装 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)）
-- **构建（开发者）**：.NET 10 SDK（`dotnet --list-sdks` 应能看到 `10.x`）+ Node.js（仅用于运行播放策略前端测试）
-- **可选**：`mpv.exe`（外挂播放），放在 `tools\mpv\mpv.exe` 或在“设置”中指定路径
+**隐私说明**：Cookie 只用于「解析」这一步换取播放地址；实际拉流走的是平台 CDN 的匿名地址，程序不会把你的登录态发给 CDN，也不会向平台发送“在看”心跳，因此主播的观众列表里不会出现你。
 
-## 安装与使用
+---
 
-1. 解压发行版压缩包 `StreamPilot-windows-v0.1.0.zip` 到任意目录（得到同名目录）。目录内容：
-   `StreamPilot-windows-v0.1.0.exe`、`Web\`（播放页与前端库）、`tools\`（自行放置 mpv）、`docs\`、`README.md`、`LICENSE`、`THIRD-PARTY-NOTICES.md`、`VERSION.txt`（含构建信息与 exe 的 SHA256）。
-2. 双击其中的 `StreamPilot-windows-v0.1.0.exe`。
-3. 在左侧面板选择平台，填入房间号或直播间链接，点击 **解析房间**（也可以先选中顶部的 **预设**，会自动填入并解析）。
-4. 点击 **开始播放**：播放页会自动完成“候选探测 → 排序 → 首帧 → 追帧”，状态与遥测显示在左侧。
-5. 需要高画质 / HDR / 超分时点击 **mpv 播放**（需 mpv 可用）；画质、缓存、倍速等参数请在 mpv 自己的配置文件里设置，本程序只传窗口标题与防盗链 `Referer`。
-6. 需要留存时点击 **开始录制**，输出目录显示在“原始流录制”卡片里。
-7. 需要长期追的房间可以点 **保存预设** 存进顶部下拉；点 **⚙** 打开独立设置窗口（常用 / 高级两个页签）。
+# 二、开发者
 
-## 平台支持
+## 1. 环境要求
 
-| 平台 | 状态 | 房间号 | 链接 | Web 播放 | 原始流录制 |
-|------|------|--------|------|----------|------------|
-| 哔哩哔哩 | P0 稳定 | ✅ | ✅ | ✅ FLV / HLS | ✅ FLV / TS |
-| 抖音 | P0 稳定 | ✅ | ✅ | ✅ FLV / HLS | ✅ FLV / TS |
-| 虎牙 | P0 稳定 | ✅ | ✅ | ✅ FLV / HLS | ✅ FLV / TS |
-| 斗鱼 | P1 | ✅ | ✅ | ⚠️ 多数房间仅 RTMP，需用 mpv | ⚠️ 同上 |
-| YY | P1 | ✅ | ✅ | ✅ FLV / HLS | ✅ FLV / TS |
-| Bigo Live | P2 | ✅ | ✅ | ✅ HLS | ✅ TS |
+- Windows 10 / 11 x64；
+- .NET 10 SDK（`dotnet --list-sdks` 能看到 `10.x`）+ Node.js（仅用于前端回归测试）；
+- 可选：`mpv.exe`（外挂播放）。
 
-> “解析成功”需要直播间**正在开播**：未开播、房间不存在、平台风控/需要登录会被分别提示，不会互相混淆。
-
-## 已知限制
-
-- **斗鱼**：`getH5PlayV1` 常只返回 RTMP 地址。Web 端无法播放 RTMP，程序会明确提示并使用 mpv 外挂；此时也不支持原始流录制（BCL 无 RTMP 客户端，引入第三方库违反依赖约束，见 [ADR 0004](docs/adr/0004-raw-recording.md)）。
-- **HLS fMP4 录制**：只支持播放，不支持录制（需要 ISO-BMFF 分片重写能力）。
-- **HEVC**：WebView2 能否播放 HEVC 取决于系统是否安装 HEVC 视频扩展。不支持的候选会被过滤并提示使用 mpv；本程序**不内置** ffmpeg 软解转码（与“不转码录制”的定位冲突，见 [ADR 0005](docs/adr/0005-bridge-and-packaging.md)）。
-- **抖音签名**：不实现 `a_bogus` / `ms_token` 等风控签名（属绕过平台风控，见 [ADR 0003](docs/adr/0003-parser-contract.md)）。页面无 `roomStore` 时回退 reflow 接口；极端情况下可能解析失败。
-- **虎牙 URL 有效期**：候选未声明过期时间，依赖“探测失败即切换候选”兜底。
-- **B站风控**：房间信息接口（`getInfoByRoom`）在部分网络下返回 `-352`，此时自动改用 `getRoomBaseInfo` 取主播名与标题，再用播放接口判定开播状态；两条通道都不可用时主播名显示“未知主播”。
-- **绝对单文件**：WebView2 需要 `WebView2Loader.dll`，播放页与 `tools\` 必须是磁盘文件，因此产物形态为 `exe + Web\ + tools\ + 文档`。
-- **Bigo**：匿名请求可能返回 `needLogin: true`（部分地区/IP 受限），此时提示“要求登录后才能读取直播信息”，而不是“未开播”。
-
-## 构建
+## 2. 构建与测试
 
 ```powershell
-# 开发运行（需要 .NET 10 SDK）
+# 开发运行
 powershell -NoProfile -ExecutionPolicy Bypass -File build\run-dev.ps1
 
-# 运行全部测试：C# 单测 + 前端回归 + 静态红线自检 + 离线结构分析
+# 全部测试：C# 单测 + 前端回归 + 静态红线自检 + 离线结构分析
 powershell -NoProfile -ExecutionPolicy Bypass -File build\test.ps1
 
-# 打包发布：产物写入 D:\文件\实用软件\b站插件\StreamPilot_publish\
-#   StreamPilot-windows-v<版本>\          发行版目录
-#   StreamPilot-windows-v<版本>.zip       发行版压缩包（与目录同名）
-#   StreamPilot-windows-v<版本>.zip.sha256  压缩包校验值
+# 打包发布（产物写入 D:\文件\实用软件\b站插件\StreamPilot_publish\）
+#   StreamPilot-windows-v<版本>\           发行版目录
+#   StreamPilot-windows-v<版本>.zip        发行版压缩包
+#   StreamPilot-windows-v<版本>.zip.sha256 压缩包校验值（放在 zip 外面，避免自引用）
 powershell -NoProfile -ExecutionPolicy Bypass -File build\publish.ps1
 
 # 仅静态红线检查（可附带第三方资产 SHA256）
@@ -106,66 +125,86 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build\verify-tree.ps1 -Verif
 node build\analyze-csharp.mjs
 ```
 
-### 当前验证状态（.NET SDK 10.0.401 实测）
+单独跑测试：
 
-| 检查项 | 结果 |
-|--------|------|
-| `dotnet build StreamPilot.slnx`（Debug / Release） | 0 警告 / 0 错误 |
-| C# 单元测试 | **87 / 87 通过** |
-| 播放策略前端测试（`node --test`） | **13 / 13 通过** |
-| 静态红线自检 | 通过（无 TODO / Console / 依赖方向 / 通配监听 / 二进制混入） |
-| 离线 C# 结构分析 | 93 文件 / 16663 行 / 140 类型 / 546 方法，无结构性问题 |
-| 发布产物 | 发行版压缩包 `StreamPilot-windows-v0.1.0.zip`（62.0 MiB，含 69.1 MiB 的单文件自包含发行版目录；`zip.sha256` 记录校验值） |
-| 运行时冒烟测试 | 启动正常；桥接 `/health` 返回 `{"status":"ok","version":"0.1.0","port":5566}`；日志出现 `播放器内核已就绪（HEVC: 支持，H.264: 支持）` 与 `播放页加载完成` |
-| 平台解析实测 | 虎牙 `660000` → 12 条线路；斗鱼 `1126960`、YY `54880976`、B站 `6` 均拿到候选；YY 短号自动换用页面 `sid` |
-| 界面验证 | 切换平台后日志出现对应 `Parsers.<平台>`；双击播放区进出全屏（窗口铺满屏幕、左侧面板隐藏）；保存预设与切换预设自动解析 |
+```powershell
+dotnet run --project tests/StreamPilot.Tests                            # C# 单测
+dotnet run --project tests/StreamPilot.Tests -- QueryStringParser       # 按类型名过滤
+node --test tests/web/player-core.test.js                               # 播放策略纯函数
+```
 
-## 目录结构
+## 3. 目录结构
 
 ```
 StreamPilot/
 ├── CLAUDE.md                    项目规范（质量红线）
+├── assets/                      自绘程序图标（ICO，随 exe 嵌入）
 ├── docs/                        文件名一律 ASCII 英文；正文与注释使用中文
 │   ├── adr/                     架构决策记录（0001-technology-stack ~ 0005-bridge-and-packaging）
 │   ├── architecture/            依赖规则（含文件名规范）、播放策略、播放消息契约
-│   ├── parsers/                 各平台解析器说明
+│   ├── parsers/                 各平台解析器说明（含画质档位来源）
 │   ├── testing/                 测试与覆盖率矩阵
 │   └── runbooks/                故障排查
 ├── src/
 │   ├── StreamPilot.Core         领域模型 / 契约接口 / 错误 / 日志 / HTTP / 配置（无 UI 依赖）
 │   ├── StreamPilot.Parsers      六个平台解析器（只依赖 Core）
 │   ├── StreamPilot.Recording    原始流录制：FLV/TS 字节级、分片、重连、元数据（只依赖 Core）
-│   ├── StreamPilot.Bridge       仅监听 127.0.0.1 的内嵌 HTTP 服务（只依赖 Core）
+│   ├── StreamPilot.Bridge       仅监听 127.0.0.1 的内嵌 HTTP 服务与本地中继（只依赖 Core）
 │   └── StreamPilot.App          WPF + WebView2 界面与组合根
 ├── tests/
-│   ├── StreamPilot.Tests        C# 单元测试（自研极简运行器，运行方式见下）
+│   ├── StreamPilot.Tests        C# 单元测试（自研极简运行器）
 │   └── web/                     播放策略纯函数测试（node --test）
 ├── Web/                         播放页（player.html + player-core.js）+ mpegts.js 1.8.2 / hls.js 1.6.16（Apache-2.0）
-├── build/                       构建与校验脚本（run-dev / test / publish / verify-tree）
+├── build/                       构建与校验脚本（run-dev / test / publish / verify-tree / analyze-csharp）
 └── tools/                       外部工具目录（用户自备 mpv，不提交仓库）
 ```
 
-### 运行 C# 单元测试
+## 4. 平台支持
 
-测试工程是普通控制台程序（不依赖任何测试框架包，见 [ADR 0001](docs/adr/0001-technology-stack.md)）：
+| 平台 | 优先级 | 房间号 | 链接 | Web 播放 | 回放录制 | 画质档位 |
+|------|--------|--------|------|----------|----------|----------|
+| 哔哩哔哩 | P0 | ✅ | ✅ | ✅ FLV / HLS | ✅ FLV / TS | 杜比 / 4K / 原画 / 蓝光 / 超清 / 高清（含 HDR 标记） |
+| 抖音 | P0 | ✅ | ✅ | ✅ FLV / HLS | ✅ FLV / TS | 原画 / 蓝光 / 超清 / 高清 / 标清 |
+| 虎牙 | P0 | ✅ | ✅ | ✅ FLV / HLS | ✅ FLV / TS | 真原画 / 蓝光20M / 2K HDR / 蓝光10M / 8M / 4M / 原画 |
+| 斗鱼 | P1 | ✅ | ✅ | ⚠️ 多数房间仅 RTMP，需 mpv | ⚠️ 同上 | 原画 / 蓝光8M / 蓝光4M / 超清 / 高清 |
+| YY | P1 | ✅ | ✅ | ✅ FLV / HLS | ✅ FLV / TS | 默认（平台给定，档位语义未公开） |
+| Bigo Live | P2 | ✅ | ✅ | ✅ HLS | ✅ TS | 默认（接口只给单条 HLS） |
 
-```powershell
-dotnet run --project tests/StreamPilot.Tests
-dotnet run --project tests/StreamPilot.Tests -- QueryStringParser   # 按类型名过滤
-```
+> 「解析成功」需要直播间**正在开播**；未开播 / 房间不存在 / 轮播中 / 风控被拒 / 解析错误 / 网络错误会分别给出不同提示。
 
-退出码 `0` 表示全部通过，`1` 表示存在失败。
+## 5. 当前验证状态（.NET SDK 10.0.401）
 
-## 用户数据
+| 检查项 | 结果 |
+|--------|------|
+| `dotnet build StreamPilot.slnx`（Debug / Release） | 0 警告 / 0 错误 |
+| C# 单元测试 | **97 / 97 通过** |
+| 播放策略前端测试（`node --test`） | **15 / 15 通过** |
+| 静态红线自检 | 通过（无 TODO / Console / 依赖方向 / 通配监听 / 二进制混入） |
+| 离线 C# 结构分析 | 无结构性问题 |
+| 发布产物 | `StreamPilot-windows-v0.1.0.zip`（约 62 MiB，含单文件自包含发行版目录；校验值见 `zip.sha256`） |
+| 运行时冒烟测试 | 启动正常；桥接 `/health` 返回 `{"status":"ok",...}`；播放页报告 `HEVC: 支持，H.264: 支持` |
+| 平台解析实测 | B站 `6`、虎牙 `660000`、斗鱼 `1126960`、YY `54880976` 均拿到候选线路；B站风控环境下元数据自动降级 |
+| 画质档位实测 | 虎牙 `660000` → 平台声明的 `蓝光10M / 蓝光4M / 超清 / 流畅`（官方名），默认最高档；选 `蓝光4M` 时地址追加 `&ratio=4000`、选 `超清` 时 `&ratio=2000`；B站 `6` → `原画 / 蓝光 / 超清 / 高清`，默认 `原画`（qn=10000） |
+| 播放实测 | 虎牙 `660000`：8/8 候选可用（FLV 经本地中继、HLS 经播放列表改写的本地中继），首帧成功、追帧生效 |
+| 界面验证 | 切换平台后日志出现对应 `Parsers.<平台>`；双击画面进出全屏（铺满屏幕、左栏隐藏）；保存预设与切换预设自动解析；播放页画质下拉随档位重解析 |
 
-- 配置：`%LOCALAPPDATA%\StreamPilot\config.json`
-- 日志：`%LOCALAPPDATA%\StreamPilot\logs\`
-- WebView2 缓存：`%LOCALAPPDATA%\StreamPilot\WebView2\`
-- 录制输出：默认 `%USERPROFILE%\Videos\StreamPilot\{平台}\{主播}\`
+## 6. 已知限制
 
-用户数据与程序目录分离，卸载时删除 `%LOCALAPPDATA%\StreamPilot` 即可清理（`config.json` 中可能含 B站 Cookie，请勿分享）。
+- **斗鱼**：`getH5PlayV1` 常只返回 RTMP 地址，Web 端无法播放（会明确提示并用 mpv），此时也不支持原始流录制。
+- **HLS fMP4 录制**：只支持播放，不支持录制（需要 ISO-BMFF 分片重写能力）。
+- **HEVC**：能否播放取决于系统是否装 HEVC 视频扩展；不支持的候选会被过滤并提示改用 mpv，本程序**不内置** ffmpeg 软解转码。
+- **抖音签名**：不实现 `a_bogus` / `ms_token` 等风控签名（属绕过平台风控）；页面结构变化时可能解析失败。
+- **虎牙 URL 有效期**：候选未声明过期时间，依赖"探测失败即切换候选"兜底。
+- **B站风控**：`getInfoByRoom` 在部分网络返回 `-352`，此时自动改用 `getRoomBaseInfo` 取主播名与标题，再用播放接口判定开播状态。
+- **Bigo**：匿名请求可能返回 `needLogin: true`（部分地区/IP 受限），此时提示"要求登录后才能读取直播信息"，而不是"未开播"。
+- **绝对单文件**：WebView2 需要 `WebView2Loader.dll`，播放页与 `tools\` 必须是磁盘文件，因此产物形态是 `exe + Web\ + tools\ + 文档`。
 
-## 文档索引
+## 7. 架构与质量红线
+
+- 分层：`App`（UI/组合根）→ `Core`（模型/契约）← `Parsers` / `Recording` / `Bridge`；`Core` 不依赖任何 UI 框架，`Bridge` 只监听 `127.0.0.1`。
+- 核心约束见 [`CLAUDE.md`](CLAUDE.md)：不提交隐私文件与官方二进制、不绕过平台风控、不在 UI 线程阻塞、不吞异常、不无限重试、核心模块覆盖率不低于 60%。
+
+## 8. 文档索引
 
 - [ADR 0001 技术栈选型](docs/adr/0001-technology-stack.md)
 - [ADR 0002 架构分层与模块划分](docs/adr/0002-architecture-layering.md)
@@ -180,7 +219,7 @@ dotnet run --project tests/StreamPilot.Tests -- QueryStringParser   # 按类型�
 - [平台解析器说明](docs/parsers/README.md)
 - [第三方依赖清单](THIRD-PARTY-NOTICES.md)
 
-## 参考项目
+## 9. 参考项目
 
 StreamPilot 的三个能力方向分别参考了以下开源 / 公开项目。**均为只读参考：没有复用其源码，也没有修改其任何文件**；具体复用与重写边界见各 ADR。
 
@@ -189,13 +228,10 @@ StreamPilot 的三个能力方向分别参考了以下开源 / 公开项目。**
 | **录播姬**（BililiveRecorder） | <https://github.com/BililiveRecorder/BililiveRecorder> | 直播**原始流录制**的行为：FLV 标签级写入、分片触发条件、"断流后新分片总是重发文件头 + onMetaData + 序列头"、时间戳错位/跳变修复思路、侧车元数据 | 参考行为、**独立实现**（`src/StreamPilot.Recording`），见 [ADR 0004](docs/adr/0004-raw-recording.md) |
 | **Lsar** | <https://github.com/alley-rs/lsar> | 多平台**解析思路**：统一结果结构、房间状态分类、各平台接口与签名算法（B站 / 抖音 / 虎牙 / 斗鱼 / YY / Bigo） | 参考思路、**用 C# 全部重写**（`src/StreamPilot.Parsers`），并修正其无超时、`unreachable!` panic、错误分类不一致等问题，见 [ADR 0003](docs/adr/0003-parser-contract.md) |
 | **MultiLive** | <https://www.bilibili.com/video/BV1y1tu66ERj/> | **低延迟播放**：WebView2 宿主与页面的消息契约、三档极限追帧参数、CDN 候选并行探测与切换、冻结恢复阈值、WebView2 虚拟主机映射 | 播放逻辑自研重写（`Web/player.html` + `player-core.js`），并复用其随包的 Apache-2.0 前端库 `mpegts.js 1.8.2` / `hls.js 1.6.16`；修正其 PNA 响应头位置错误，见 [ADR 0005](docs/adr/0005-bridge-and-packaging.md) 与 [播放策略](docs/architecture/playback-strategy.md) |
+| **biliLive-tools** | <https://github.com/renmu123/biliLive-tools> | 平台**画质/码率档位**的整理：虎牙 `iBitRate` 档位表与 `ratio` 参数、斗鱼 `rate` 档位表、B站 `qn` 表与 HDR 表达方式 | 只参考档位命名与参数含义，**自行实现**（`src/StreamPilot.Parsers`）；未复用其代码 |
 
 > 上述项目各自适用其自身的开源许可；StreamPilot 的分发物中只包含 `mpegts.js` 与 `hls.js` 两个 Apache-2.0 库（版本与 SHA256 登记于 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)）。
 
-## 质量红线
-
-见 `CLAUDE.md`。摘要：不提交隐私文件与官方二进制、不绕过平台风控、不在 UI 线程阻塞、不吞异常、不无限重试、桥接只监听回环地址、核心模块覆盖率不低于 60%。
-
-## 许可
+## 10. 许可
 
 本项目源码采用 MIT 许可（见 `LICENSE`）。随包分发的 `mpegts.js` 与 `hls.js` 为 Apache-2.0，其许可文本见 `Web\*-LICENSE.txt`，版权与版本见 `THIRD-PARTY-NOTICES.md`。

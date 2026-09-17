@@ -99,8 +99,35 @@ internal sealed class DouyuParser : PlatformParserBase
     /// <summary>加密参数 <c>is_special</c> 缺失时的默认取值。</summary>
     private const int SpecialFlagOff = 0;
 
-    /// <summary>播放接口 <c>rate</c> 参数：-1 表示请求平台给出的全部清晰度。</summary>
-    private const string RateAll = "-1";
+    /// <summary>播放接口 <c>rate</c> 参数：原画档位值，同时也是斗鱼的最高档。</summary>
+    private const int OriginalRate = 0;
+
+    /// <summary>档位取值下限（防御性校验，超出视为非法档位键）。</summary>
+    private const int MinRate = 0;
+
+    /// <summary>档位取值上限（防御性校验，超出视为非法档位键）。</summary>
+    private const int MaxRate = 100;
+
+    /// <summary>档位值：蓝光 8M。</summary>
+    private const int BlueRay8Rate = 8;
+
+    /// <summary>档位值：蓝光 4M。</summary>
+    private const int BlueRay4Rate = 4;
+
+    /// <summary>档位值：超清。</summary>
+    private const int UltraHighRate = 3;
+
+    /// <summary>档位值：高清。</summary>
+    private const int HighRate = 2;
+
+    /// <summary><c>rateSwitch</c> 表示支持多档切换的取值。</summary>
+    private const int RateSwitchOn = 1;
+
+    /// <summary>码率单位判定阈值：不小于该值视为 bps（需换算为 kbps）。</summary>
+    private const int BitrateBpsThreshold = 1000;
+
+    /// <summary>1 kbps 对应的比特数。</summary>
+    private const int BitsPerKilobit = 1000;
 
     /// <summary>播放接口 <c>hevc</c>/<c>fa</c>/<c>ive</c> 参数：0 表示关闭。</summary>
     private const string FlagOff = "0";
@@ -189,6 +216,21 @@ internal sealed class DouyuParser : PlatformParserBase
     /// <summary>主地址字段名。</summary>
     private const string MainUrlField = "main_url";
 
+    /// <summary>当前生效档位的字段名。</summary>
+    private const string RateField = "rate";
+
+    /// <summary>可用档位列表的字段名。</summary>
+    private const string MultiratesField = "multirates";
+
+    /// <summary>多档切换支持标记的字段名。</summary>
+    private const string RateSwitchField = "rateSwitch";
+
+    /// <summary>档位显示名的字段名。</summary>
+    private const string RateNameField = "name";
+
+    /// <summary>档位码率的字段名。</summary>
+    private const string RateBitRateField = "bitRate";
+
     /// <summary>房间页内嵌最终房间号的正则。</summary>
     private static readonly Regex LegacyRoomIdRegex = new(
         "getLegacyFirstStream\\(\\{\\s*roomID:\\s*(\\d+),",
@@ -233,6 +275,8 @@ internal sealed class DouyuParser : PlatformParserBase
     /// <inheritdoc />
     protected override async Task<ResolvedRoom> OnParseAsync(RoomQuery query, CancellationToken cancellationToken)
     {
+        // 用户自备 Cookie 只作用于本次解析的请求（播放地址与中继都不带它）。
+        using IDisposable cookieScope = _http.UseCookie(query.Cookie);
         string? roomId = string.IsNullOrWhiteSpace(query.RoomId)
             ? TryExtractRoomIdFromUrl(query.RoomUrl)
             : query.RoomId;
@@ -246,7 +290,9 @@ internal sealed class DouyuParser : PlatformParserBase
         await FetchBetardAsync(page.RoomId, cancellationToken).ConfigureAwait(false);
 
         DouyuEncryption encryption = await FetchEncryptionAsync(page.RoomId, cancellationToken).ConfigureAwait(false);
-        DouyuPlayInfo playInfo = await FetchPlayInfoAsync(page.RoomId, encryption, cancellationToken).ConfigureAwait(false);
+        int requestedRate = ResolveRequestedRate(query.PreferredQualityKey);
+        DouyuPlayInfo playInfo = await FetchPlayInfoAsync(page.RoomId, encryption, requestedRate, cancellationToken)
+            .ConfigureAwait(false);
         IReadOnlyList<StreamCandidate> candidates = CollectCandidates(page.RoomId, playInfo);
 
         Logger.Info(ModuleName, "斗鱼解析完成。", new Dictionary<string, object?>
@@ -255,6 +301,8 @@ internal sealed class DouyuParser : PlatformParserBase
             ["anchor"] = page.Anchor,
             ["candidateCount"] = candidates.Count,
             ["formats"] = string.Join(",", candidates.Select(static candidate => candidate.Format.ToString())),
+            ["rate"] = requestedRate,
+            ["selectedRate"] = playInfo.SelectedQualityKey,
         });
 
         return new ResolvedRoom
@@ -266,8 +314,185 @@ internal sealed class DouyuParser : PlatformParserBase
             Category = page.Category,
             Candidates = candidates,
             ResolvedAt = DateTimeOffset.UtcNow,
+            Qualities = playInfo.Qualities,
+            SelectedQualityKey = playInfo.SelectedQualityKey,
         };
     }
+
+    /// <summary>
+    /// 把调用方指定的档位键解析为播放接口的 <c>rate</c> 参数。
+    /// </summary>
+    /// <param name="preferredQualityKey">档位键（rate 数值字符串）；为空或 <c>best</c> 时取最高档。</param>
+    /// <returns>播放接口使用的 rate 数值。</returns>
+    /// <remarks>
+    /// 地址签名与档位绑定，换档必须带新的 rate 重新请求接口；档位键不是数字或超出
+    /// <see cref="MinRate"/> 到 <see cref="MaxRate"/> 的范围时回退到最高档（原画）并记 Warn，
+    /// 而不是让整个解析失败。
+    /// </remarks>
+    internal int ResolveRequestedRate(string? preferredQualityKey)
+    {
+        if (string.IsNullOrWhiteSpace(preferredQualityKey)
+            || string.Equals(preferredQualityKey, QualityOption.BestFlag, StringComparison.OrdinalIgnoreCase))
+        {
+            return OriginalRate;
+        }
+
+        if (int.TryParse(preferredQualityKey, NumberStyles.Integer, CultureInfo.InvariantCulture, out int rate)
+            && rate >= MinRate
+            && rate <= MaxRate)
+        {
+            return rate;
+        }
+
+        Logger.Warn(ModuleName, "斗鱼档位键无效，回退到最高档（原画）。", new Dictionary<string, object?>
+        {
+            ["operation"] = PlayInfoOperation,
+            ["preferredQualityKey"] = preferredQualityKey,
+            ["fallbackRate"] = OriginalRate,
+        });
+
+        return OriginalRate;
+    }
+
+    /// <summary>
+    /// 从播放信息响应中构造画质档位列表，并回读平台实际生效的档位。
+    /// </summary>
+    /// <param name="data">getH5PlayV1 响应的 data 对象。</param>
+    /// <returns>档位列表（从高到低）与实际生效的档位键。</returns>
+    /// <remarks>
+    /// 档位取自 <c>data.multirates[]</c>（每项含 <c>rate</c>/<c>name</c>/<c>bitRate</c>），排序规则为
+    /// "原画（rate=0）最高，其余按 rate 数值从大到小"；<c>data.rateSwitch != 1</c> 时平台只给原画，
+    /// 此时档位列表固定为一项原画；<c>data.rate</c> 是平台实际给出的档位，可能与请求的 rate 不同。
+    /// </remarks>
+    internal static (IReadOnlyList<QualityOption> Qualities, string? SelectedKey) BuildQualityOptions(JsonElement data)
+    {
+        int? actualRate = ReadInt32(data, RateField);
+        int? rateSwitch = ReadInt32(data, RateSwitchField);
+        if (rateSwitch is not null && rateSwitch != RateSwitchOn)
+        {
+            // rateSwitch 非 1 表示平台把档位固定在原画，multirates 不可作为可选档位使用。
+            int originalRate = actualRate ?? OriginalRate;
+            IReadOnlyList<QualityOption> single =
+            [
+                new QualityOption
+                {
+                    Key = originalRate.ToString(CultureInfo.InvariantCulture),
+                    Label = DescribeRate(OriginalRate),
+                    IsBest = true,
+                },
+            ];
+
+            return (single, originalRate.ToString(CultureInfo.InvariantCulture));
+        }
+
+        List<DouyuRateOption> declared = ReadMultirates(data);
+        if (declared.Count == 0)
+        {
+            int fallbackRate = actualRate ?? OriginalRate;
+            IReadOnlyList<QualityOption> fallback =
+            [
+                new QualityOption
+                {
+                    Key = fallbackRate.ToString(CultureInfo.InvariantCulture),
+                    Label = DescribeRate(fallbackRate),
+                    IsBest = true,
+                },
+            ];
+
+            return (fallback, fallbackRate.ToString(CultureInfo.InvariantCulture));
+        }
+
+        declared.Sort(static (left, right) => RankRate(right.Rate).CompareTo(RankRate(left.Rate)));
+        List<QualityOption> qualities = [];
+        foreach (DouyuRateOption option in declared)
+        {
+            string? platformName = option.Name;
+            qualities.Add(new QualityOption
+            {
+                Key = option.Rate.ToString(CultureInfo.InvariantCulture),
+                Label = string.IsNullOrWhiteSpace(platformName) ? DescribeRate(option.Rate) : platformName,
+                BitrateKbps = ToBitrateKbps(option.BitRate),
+                IsBest = qualities.Count == 0,
+            });
+        }
+
+        string selected = actualRate is { } rate
+            ? rate.ToString(CultureInfo.InvariantCulture)
+            : qualities[0].Key;
+        return (qualities, selected);
+    }
+
+    /// <summary>
+    /// 读取 <c>data.multirates</c> 里的可用档位。
+    /// </summary>
+    /// <param name="data">getH5PlayV1 响应的 data 对象。</param>
+    /// <returns>档位列表（按响应顺序，rate 去重）；字段缺失或结构不符时为空列表。</returns>
+    private static List<DouyuRateOption> ReadMultirates(JsonElement data)
+    {
+        List<DouyuRateOption> options = [];
+        JsonElement array = GetPropertyOrUndefined(data, MultiratesField);
+        if (array.ValueKind != JsonValueKind.Array)
+        {
+            return options;
+        }
+
+        foreach (JsonElement item in array.EnumerateArray())
+        {
+            int? rate = ReadInt32(item, RateField);
+            if (rate is not { } value || options.Exists(option => option.Rate == value))
+            {
+                continue;
+            }
+
+            options.Add(new DouyuRateOption(value, ReadString(item, RateNameField), ReadInt32(item, RateBitRateField)));
+        }
+
+        return options;
+    }
+
+    /// <summary>档位排序权重：原画（rate=0）最高，其余按 rate 数值。</summary>
+    /// <param name="rate">档位数值。</param>
+    /// <returns>排序权重。</returns>
+    private static int RankRate(int rate) => rate == OriginalRate ? int.MaxValue : rate;
+
+    /// <summary>把档位数值映射为内置中文档位名。</summary>
+    /// <param name="rate">档位数值。</param>
+    /// <returns>档位名；未知数值退化为 <c>rate=数值</c> 形式。</returns>
+    /// <remarks>映射与官方 Web 端一致：<c>0</c>=原画、<c>8</c>=蓝光8M、<c>4</c>=蓝光4M、<c>3</c>=超清、<c>2</c>=高清。</remarks>
+    private static string DescribeRate(int rate) => rate switch
+    {
+        OriginalRate => "原画",
+        BlueRay8Rate => "蓝光8M",
+        BlueRay4Rate => "蓝光4M",
+        UltraHighRate => "超清",
+        HighRate => "高清",
+        _ => string.Concat("rate=", rate.ToString(CultureInfo.InvariantCulture)),
+    };
+
+    /// <summary>
+    /// 把平台给出的码率归一化为 kbps。
+    /// </summary>
+    /// <param name="rawBitRate"><c>multirates[].bitRate</c> 的原始取值。</param>
+    /// <returns>kbps 码率；缺失或非正数时返回 <see langword="null"/>。</returns>
+    /// <remarks>
+    /// 斗鱼该字段的单位未经官方确认：不小于 <see cref="BitrateBpsThreshold"/> 时按 bps 换算，
+    /// 否则按 kbps 直接使用。
+    /// </remarks>
+    private static int? ToBitrateKbps(int? rawBitRate)
+    {
+        if (rawBitRate is not { } value || value <= 0)
+        {
+            return null;
+        }
+
+        return value >= BitrateBpsThreshold ? value / BitsPerKilobit : value;
+    }
+
+    /// <summary>斗鱼 multirates 中的一项档位。</summary>
+    /// <param name="Rate">档位数值。</param>
+    /// <param name="Name">平台给出的档位名；缺失时为 <see langword="null"/>。</param>
+    /// <param name="BitRate">平台给出的码率原始取值；缺失时为 <see langword="null"/>。</param>
+    private sealed record DouyuRateOption(int Rate, string? Name, int? BitRate);
 
     /// <summary>抓取房间页并抽取最终房间号、标题、主播名与分区。</summary>
     /// <param name="roomId">用户输入或链接中提取的房间号。</param>
@@ -448,16 +673,18 @@ internal sealed class DouyuParser : PlatformParserBase
     /// <summary>请求播放信息接口并把响应归一化为 <see cref="DouyuPlayInfo"/>。</summary>
     /// <param name="roomId">页面确认后的最终房间号。</param>
     /// <param name="encryption">加密参数与计算出的签名。</param>
+    /// <param name="requestedRate">请求的画质档位（rate 数值）；由调用方解析并做越界回退。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>归一化后的播放信息。</returns>
     /// <exception cref="ResolveException">平台拒绝、未开播、错误码未知或响应结构异常时抛出。</exception>
     /// <remarks>
-    /// 表单字段与顺序由接口约定固定：<c>rate=-1</c> 取全部清晰度，<c>hevc</c>/<c>fa</c>/<c>ive</c> 全部为 0。
-    /// HTTP-FLV/HLS 相关字段可能整体缺失，读取时全部按可选处理。
+    /// 表单字段与顺序由接口约定固定：<c>rate</c> 是画质档位（地址签名与档位绑定，换档必须重新请求），
+    /// <c>hevc</c>/<c>fa</c>/<c>ive</c> 全部为 0。HTTP-FLV/HLS 相关字段可能整体缺失，读取时全部按可选处理。
     /// </remarks>
     private async Task<DouyuPlayInfo> FetchPlayInfoAsync(
         string roomId,
         DouyuEncryption encryption,
+        int requestedRate,
         CancellationToken cancellationToken)
     {
         IReadOnlyList<KeyValuePair<string, string>> form =
@@ -467,7 +694,7 @@ internal sealed class DouyuParser : PlatformParserBase
             new KeyValuePair<string, string>("did", DeviceId),
             new KeyValuePair<string, string>("auth", encryption.Auth),
             new KeyValuePair<string, string>("cdn", string.Empty),
-            new KeyValuePair<string, string>("rate", RateAll),
+            new KeyValuePair<string, string>("rate", requestedRate.ToString(CultureInfo.InvariantCulture)),
             new KeyValuePair<string, string>("hevc", FlagOff),
             new KeyValuePair<string, string>("fa", FlagOff),
             new KeyValuePair<string, string>("ive", FlagOff),
@@ -529,6 +756,7 @@ internal sealed class DouyuParser : PlatformParserBase
         string hlsUrl = ReadString(data, HlsUrlField) ?? string.Empty;
         List<KeyValuePair<string, string>> flvUrls = ReadFlvUrls(data);
         List<KeyValuePair<string, string>> hlsUrls = ReadStringMap(data, HlsUrlMapField);
+        (IReadOnlyList<QualityOption> qualities, string? selectedQualityKey) = BuildQualityOptions(data);
 
         Logger.Debug(ModuleName, "斗鱼播放信息已解析。", new Dictionary<string, object?>
         {
@@ -539,9 +767,11 @@ internal sealed class DouyuParser : PlatformParserBase
             ["hlsUrlPresent"] = hlsUrl.Length > 0,
             ["rtmpUrlPresent"] = rtmpUrl.Length > 0,
             ["rtmpLive"] = SensitiveData.Fingerprint(rtmpLive),
+            ["qualityCount"] = qualities.Count,
+            ["selectedRate"] = selectedQualityKey,
         });
 
-        return new DouyuPlayInfo(rtmpUrl, rtmpLive, hlsUrl, flvUrls, hlsUrls);
+        return new DouyuPlayInfo(rtmpUrl, rtmpLive, hlsUrl, flvUrls, hlsUrls, qualities, selectedQualityKey);
     }
 
     /// <summary>按优先级把播放信息组装为候选流：HTTP-FLV → HLS → RTMP 兜底。</summary>
@@ -788,10 +1018,14 @@ internal sealed class DouyuParser : PlatformParserBase
     /// <param name="HlsUrl">HLS 地址；部分房间不返回。</param>
     /// <param name="FlvUrls">HTTP-FLV 画质键与地址。</param>
     /// <param name="HlsUrls">HLS 画质键与地址。</param>
+    /// <param name="Qualities">本次可选的画质档位（从高到低）。</param>
+    /// <param name="SelectedQualityKey">平台实际生效的档位键（来自响应里的 <c>data.rate</c>）。</param>
     private sealed record DouyuPlayInfo(
         string RtmpUrl,
         string RtmpLive,
         string HlsUrl,
         IReadOnlyList<KeyValuePair<string, string>> FlvUrls,
-        IReadOnlyList<KeyValuePair<string, string>> HlsUrls);
+        IReadOnlyList<KeyValuePair<string, string>> HlsUrls,
+        IReadOnlyList<QualityOption> Qualities,
+        string? SelectedQualityKey);
 }

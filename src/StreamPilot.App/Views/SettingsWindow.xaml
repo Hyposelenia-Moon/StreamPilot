@@ -5,6 +5,7 @@
         Height="720" Width="900"
         MinHeight="560" MinWidth="760"
         Background="{StaticResource WindowBackgroundBrush}"
+        Icon="pack://application:,,,/Assets/streampilot.ico"
         FontFamily="{StaticResource UiFontFamily}"
         FontSize="13"
         UseLayoutRounding="True"
@@ -175,13 +176,41 @@
 
             <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
               <StackPanel>
-                <TextBlock Text="账号与风控" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <TextBlock Text="B站 Cookie（可选）" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                <TextBox Text="{Binding BilibiliCookie, UpdateSourceTrigger=PropertyChanged}" MinHeight="60"
+                <TextBlock Text="账号与 Cookie（可选）" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
+                <TextBlock Text="填 Cookie 才能拿到需要登录的最高画质（例如虎牙“蓝光20M”、B站 4K/HDR）。获取方法：登录官网 → F12 → Network → 刷新 → 任一平台接口请求 → 复制请求标头里 Cookie 冒号后的内容。"
+                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,0,0,8" />
+                <TextBlock Text="Cookie 仅保存在本机 %LOCALAPPDATA%\StreamPilot\config.json，不写入日志、不随程序发布；只用于解析接口换地址，播放时不会发给 CDN，主播看不到你。留空即匿名解析。"
+                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,0,0,10" />
+
+                <TextBlock Text="哔哩哔哩 Cookie" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
+                <TextBox Text="{Binding BilibiliCookie, UpdateSourceTrigger=PropertyChanged}" MinHeight="52"
                          AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
                          VerticalContentAlignment="Top" />
-                <TextBlock Text="仅保存在本机 %LOCALAPPDATA%\StreamPilot\config.json，不写入日志、不随程序发布。留空时匿名解析。"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,6,0,0" />
+
+                <TextBlock Text="抖音 Cookie" Style="{StaticResource MutedText}" Margin="0,10,0,4" />
+                <TextBox Text="{Binding DouyinCookie, UpdateSourceTrigger=PropertyChanged}" MinHeight="52"
+                         AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                         VerticalContentAlignment="Top" />
+
+                <TextBlock Text="虎牙 Cookie" Style="{StaticResource MutedText}" Margin="0,10,0,4" />
+                <TextBox Text="{Binding HuyaCookie, UpdateSourceTrigger=PropertyChanged}" MinHeight="52"
+                         AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                         VerticalContentAlignment="Top" />
+
+                <TextBlock Text="斗鱼 Cookie" Style="{StaticResource MutedText}" Margin="0,10,0,4" />
+                <TextBox Text="{Binding DouyuCookie, UpdateSourceTrigger=PropertyChanged}" MinHeight="52"
+                         AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                         VerticalContentAlignment="Top" />
+
+                <TextBlock Text="YY Cookie" Style="{StaticResource MutedText}" Margin="0,10,0,4" />
+                <TextBox Text="{Binding YyCookie, UpdateSourceTrigger=PropertyChanged}" MinHeight="52"
+                         AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                         VerticalContentAlignment="Top" />
+
+                <TextBlock Text="Bigo Cookie" Style="{StaticResource MutedText}" Margin="0,10,0,4" />
+                <TextBox Text="{Binding BigoCookie, UpdateSourceTrigger=PropertyChanged}" MinHeight="52"
+                         AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                         VerticalContentAlignment="Top" />
               </StackPanel>
             </Border>
 

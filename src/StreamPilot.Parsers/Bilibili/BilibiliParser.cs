@@ -182,14 +182,14 @@ internal sealed class BilibiliParser : PlatformParserBase
         bool roomInfoAvailable = true;
         try
         {
-            roomInfo = await FetchRoomInfoAsync(numericRoomId, query.BilibiliCookie, cancellationToken).ConfigureAwait(false);
+            roomInfo = await FetchRoomInfoAsync(numericRoomId, query.Cookie, cancellationToken).ConfigureAwait(false);
         }
         catch (ResolveException exception) when (exception.Failure is ResolveFailure.Rejected or ResolveFailure.ParseError)
         {
             // getInfoByRoom 被风控时先试 getRoomBaseInfo：它同样给出主播名与标题，
             // 能避免"解析成功但界面上一片未知"。
             RoomInfoSnapshot? fallback =
-                await TryFetchRoomBaseInfoAsync(numericRoomId, query.BilibiliCookie, cancellationToken).ConfigureAwait(false);
+                await TryFetchRoomBaseInfoAsync(numericRoomId, query.Cookie, cancellationToken).ConfigureAwait(false);
 
             if (fallback is not null)
             {
@@ -213,11 +213,13 @@ internal sealed class BilibiliParser : PlatformParserBase
             }
         }
 
-        (IReadOnlyList<StreamCandidate> candidates, int liveStatus) = await FetchPlayInfoAsync(
-            roomInfo.RoomId,
-            query.BilibiliCookie,
-            roomInfoAvailable,
-            cancellationToken).ConfigureAwait(false);
+        (IReadOnlyList<StreamCandidate> candidates, int liveStatus, IReadOnlyList<QualityOption> qualities, string? selectedQualityKey) =
+            await FetchPlayInfoAsync(
+                roomInfo.RoomId,
+                query.Cookie,
+                roomInfoAvailable,
+                cancellationToken,
+                ParseQualityNumber(query.PreferredQualityKey)).ConfigureAwait(false);
 
         if (candidates.Count == 0)
         {
@@ -231,6 +233,7 @@ internal sealed class BilibiliParser : PlatformParserBase
             ["roomId"] = roomInfo.RoomId,
             ["candidateCount"] = candidates.Count,
             ["roomInfoAvailable"] = roomInfoAvailable,
+            ["quality"] = selectedQualityKey,
         });
 
         return new ResolvedRoom
@@ -243,6 +246,8 @@ internal sealed class BilibiliParser : PlatformParserBase
             Candidates = candidates,
             ResolvedAt = DateTimeOffset.UtcNow,
             CoverUrl = roomInfo.CoverUrl,
+            Qualities = qualities,
+            SelectedQualityKey = selectedQualityKey,
         };
     }
 
@@ -535,16 +540,18 @@ internal sealed class BilibiliParser : PlatformParserBase
     /// 避免在信息缺失时把"未开播"与"接口不可用"混为一谈。
     /// </param>
     /// <param name="cancellationToken">取消令牌。</param>
+    /// <param name="requestedQuality">调用方指定的 qn，可为 <see langword="null"/>（最高档）。</param>
     /// <returns>候选流与平台声明的直播状态（未声明时为 -1）。</returns>
-    private async Task<(IReadOnlyList<StreamCandidate> Candidates, int LiveStatus)> FetchPlayInfoAsync(
+    private async Task<(IReadOnlyList<StreamCandidate> Candidates, int LiveStatus, IReadOnlyList<QualityOption> Qualities, string? SelectedKey)> FetchPlayInfoAsync(
         string numericRoomId,
         string? cookie,
         bool failOnOfflineStatus,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? requestedQuality = null)
     {
         HttpRequestSpec spec = new()
         {
-            Url = BuildPlayInfoUrl(numericRoomId),
+            Url = BuildPlayInfoUrl(numericRoomId, requestedQuality),
             Platform = PlatformId.Bilibili,
             Operation = OperationGetPlayInfo,
             Headers = BuildApiHeaders(cookie),
@@ -591,13 +598,16 @@ internal sealed class BilibiliParser : PlatformParserBase
             }
 
             StreamCandidateBuilder builder = new(PlatformId.Bilibili, Logger);
+            IReadOnlyList<QualityOption> qualities = [];
+            string? selectedKey = null;
             if (hasData && HasPlayUrlInfo(data))
             {
                 CollectCandidates(data, builder);
+                (qualities, selectedKey) = BuildQualityOptions(data, requestedQuality);
             }
 
             // 不在这里判定"未开播"：候选为空的最终分类由调用方结合房间信息是否可用统一决定。
-            return (builder.Build(), observedLiveStatus);
+            return (builder.Build(), observedLiveStatus, qualities, selectedKey);
         }
         catch (Exception exception) when (exception is InvalidOperationException or JsonException)
         {
@@ -824,14 +834,179 @@ internal sealed class BilibiliParser : PlatformParserBase
     }
 
     /// <summary>
-    /// 构造 getRoomPlayInfo 请求地址，画质取 <see cref="QualityNames.BilibiliMaxQualityNumber"/>。
+    /// 构造 getRoomPlayInfo 请求地址，画质取调用方指定的 qn（默认最高档）。
     /// </summary>
     /// <param name="numericRoomId">数字房间号。</param>
+    /// <param name="qualityNumber">qn 数值；为 <see langword="null"/> 时使用最高档。</param>
     /// <returns>完整请求地址。</returns>
-    private static string BuildPlayInfoUrl(string numericRoomId)
+    private static string BuildPlayInfoUrl(string numericRoomId, int? qualityNumber)
     {
-        string maxQualityNumber = QualityNames.BilibiliMaxQualityNumber.ToString(CultureInfo.InvariantCulture);
-        return $"{PlayInfoUrlPrefix}{PlayInfoQueryPrefix}{maxQualityNumber}{PlayInfoQuerySuffix}{numericRoomId}";
+        int qn = qualityNumber ?? QualityNames.BilibiliMaxQualityNumber;
+        return string.Concat(
+            PlayInfoUrlPrefix,
+            PlayInfoQueryPrefix,
+            qn.ToString(CultureInfo.InvariantCulture),
+            PlayInfoQuerySuffix,
+            numericRoomId);
+    }
+
+    /// <summary>
+    /// 把调用方给的档位键解析为 qn 数值；不是合法整数时返回 <see langword="null"/>（按最高档处理）。
+    /// </summary>
+    /// <param name="qualityKey">档位键（B站为 qn 数值字符串）。</param>
+    /// <returns>qn 数值，或 <see langword="null"/>。</returns>
+    private static int? ParseQualityNumber(string? qualityKey) =>
+        int.TryParse(qualityKey, NumberStyles.Integer, CultureInfo.InvariantCulture, out int qn) ? qn : null;
+
+    /// <summary>
+    /// 从播放信息响应中枚举可选画质档位（含官方名称与 HDR 标记）。
+    /// </summary>
+    /// <param name="playData">getRoomPlayInfo 响应的 data 节点。</param>
+    /// <param name="requestedQuality">本次请求的 qn，可为 <see langword="null"/>。</param>
+    /// <returns>档位列表（按从高到低）与实际生效的档位键。</returns>
+    /// <remarks>
+    /// 官方把名称放在 <c>g_qn_desc</c>（<c>qn</c> + <c>desc</c> + <c>hdr_desc</c>），
+    /// 可用档位放在 <c>codec[].accept_qn</c>；两者都缺失时退化为"只有最高档"。
+    /// </remarks>
+    private static (IReadOnlyList<QualityOption> Qualities, string? SelectedKey) BuildQualityOptions(
+        JsonElement playData,
+        int? requestedQuality)
+    {
+        Dictionary<int, (string Name, string Hdr)> names = ReadQualityNames(playData);
+        List<int> available = ReadAcceptedQualities(playData);
+        if (available.Count == 0)
+        {
+            available.AddRange(names.Keys);
+        }
+
+        if (available.Count == 0 && requestedQuality is { } requested)
+        {
+            available.Add(requested);
+        }
+
+        available.Sort(static (left, right) => right.CompareTo(left));
+        List<QualityOption> options = [];
+        foreach (int qn in available)
+        {
+            options.Add(new QualityOption
+            {
+                Key = qn.ToString(CultureInfo.InvariantCulture),
+                Label = BuildQualityLabel(qn, names),
+                IsBest = options.Count == 0,
+            });
+        }
+
+        int? effective = requestedQuality is { } want && available.Contains(want)
+            ? want
+            : available.Count > 0 ? available[0] : requestedQuality;
+
+        return (options, effective?.ToString(CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>读取 g_qn_desc 中的官方档位名与 HDR 标记。</summary>
+    /// <param name="playData">播放信息 data 节点。</param>
+    /// <returns>qn →（名称，HDR 标记）映射。</returns>
+    private static Dictionary<int, (string Name, string Hdr)> ReadQualityNames(JsonElement playData)
+    {
+        Dictionary<int, (string Name, string Hdr)> names = [];
+        if (!TryReadProperty(playData, "playurl_info", out JsonElement info)
+            || !TryReadProperty(info, "playurl", out JsonElement playUrl)
+            || !TryReadProperty(playUrl, "g_qn_desc", out JsonElement descriptions)
+            || descriptions.ValueKind != JsonValueKind.Array)
+        {
+            return names;
+        }
+
+        foreach (JsonElement item in descriptions.EnumerateArray())
+        {
+            if (!TryReadInt32(item, "qn", out int qn))
+            {
+                continue;
+            }
+
+            names[qn] = (
+                ReadOptionalString(item, "desc") ?? string.Empty,
+                ReadOptionalString(item, "hdr_desc") ?? string.Empty);
+        }
+
+        return names;
+    }
+
+    /// <summary>读取 codec[].accept_qn 汇总可用档位（去重）。</summary>
+    /// <param name="playData">播放信息 data 节点。</param>
+    /// <returns>可用 qn 列表。</returns>
+    private static List<int> ReadAcceptedQualities(JsonElement playData)
+    {
+        List<int> result = [];
+        if (!TryReadProperty(playData, "playurl_info", out JsonElement info)
+            || !TryReadProperty(info, "playurl", out JsonElement playUrl)
+            || !TryReadProperty(playUrl, "stream", out JsonElement streams)
+            || streams.ValueKind != JsonValueKind.Array)
+        {
+            return result;
+        }
+
+        foreach (JsonElement stream in streams.EnumerateArray())
+        {
+            if (!TryReadProperty(stream, "format", out JsonElement formats) || formats.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            foreach (JsonElement format in formats.EnumerateArray())
+            {
+                if (!TryReadProperty(format, "codec", out JsonElement codecs) || codecs.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                foreach (JsonElement codec in codecs.EnumerateArray())
+                {
+                    if (!TryReadProperty(codec, "accept_qn", out JsonElement accepted) || accepted.ValueKind != JsonValueKind.Array)
+                    {
+                        continue;
+                    }
+
+                    foreach (JsonElement value in accepted.EnumerateArray())
+                    {
+                        if (value.ValueKind == JsonValueKind.Number
+                            && value.TryGetInt32(out int qn)
+                            && !result.Contains(qn))
+                        {
+                            result.Add(qn);
+                        }
+                    }
+                }
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>生成档位显示名：优先官方 desc，缺失时用内置中文名，HDR 追加标记。</summary>
+    /// <param name="qn">档位数值。</param>
+    /// <param name="names">官方名称表。</param>
+    /// <returns>显示名。</returns>
+    private static string BuildQualityLabel(int qn, Dictionary<int, (string Name, string Hdr)> names)
+    {
+        string label = names.TryGetValue(qn, out (string Name, string Hdr) entry) && entry.Name.Length > 0
+            ? entry.Name
+            : qn switch
+            {
+                QualityNames.BilibiliMaxQualityNumber => "杜比原画",
+                QualityNames.BilibiliQuality4K => "4K 原画",
+                QualityNames.BilibiliQuality2K => "2K 原画",
+                QualityNames.BilibiliQuality1080HighFps => "原画（1080P 高帧率）",
+                QualityNames.BilibiliQuality1080 => "蓝光（1080P）",
+                QualityNames.BilibiliQuality720 => "超清（720P）",
+                QualityNames.BilibiliQuality480 => "高清（480P）",
+                80 => "流畅",
+                _ => $"qn={qn}",
+            };
+
+        bool hdr = names.TryGetValue(qn, out (string Name, string Hdr) hdrEntry)
+            && hdrEntry.Hdr.Contains("HDR", StringComparison.OrdinalIgnoreCase);
+        return hdr && !label.Contains("HDR", StringComparison.OrdinalIgnoreCase) ? label + "（HDR）" : label;
     }
 
     /// <summary>

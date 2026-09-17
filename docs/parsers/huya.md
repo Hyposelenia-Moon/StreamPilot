@@ -18,15 +18,35 @@
 
 ## 候选映射
 
-每条线路先 FLV 后 HLS（仅当对应 anticode 非空）：
+每条线路先 FLV 后 HLS（仅当对应 anticode 非空），档位由 `&ratio=` 决定（见下）：
 
 ```
-{sFlvUrl}/{sStreamName}.{sFlvUrlSuffix}?{签名后的 anticode}   → FlvHttp
-{sHlsUrl}/{sStreamName}.{sHlsUrlSuffix}?{签名后的 anticode}   → HlsTs
+{sFlvUrl}/{sStreamName}.{sFlvUrlSuffix}?{签名后的 anticode}[&ratio={选中档位}]   → FlvHttp
+{sHlsUrl}/{sStreamName}.{sHlsUrlSuffix}?{签名后的 anticode}[&ratio={选中档位}]   → HlsTs
 ```
 
 - `CdnHost` 取基地址主机名，`HttpReferer = https://www.huya.com/`，`Codec = Avc`；
-- `Quality` 由 `iBitRate` 阈值推导（≥8 Mbps → `Hd1080HighFps`，≥4 Mbps → `Hd1080`，≥2 Mbps → `Hd720`，缺失 → `Unknown`）。
+- `Quality` 由选中档位的码率阈值推导（≥8 Mbps → `Hd1080HighFps`，≥4 Mbps → `Hd1080`，≥2 Mbps → `Hd720`，缺失 → `Unknown`）。
+
+## 画质档位（`Qualities`）
+
+- **档位不在线路对象里**：`data.stream.baseSteamInfoList[]` 是 **CDN 维度**（同一档位的多个 CDN），
+  没有 `iBitRate` 字段；档位由平台单独声明，实测路径与内容：
+
+  | 来源（按优先级） | 结构 | 说明 |
+  |------------------|------|------|
+  | `data.liveData.bitRateInfo` | **JSON 字符串**，二次解析后为数组 | 每项 `{sDisplayName, iBitRate, iHEVCBitRate}`，`sDisplayName` 就是官方档位名（蓝光10M/蓝光4M/超清/流畅） |
+  | `data.stream.flv.rateArray[]` / `data.stream.hls.rateArray[]` | 数组 | 同上结构（该房间是子集，例如只有蓝光4M/超清/流畅） |
+
+- `QualityOption.Key` = `iBitRate` 的十进制文本（`0`、`4000`、`2000`、`500`…），
+  `Label` 直接用平台的 `sDisplayName`（缺失时才用内置表：`20000`=蓝光20M、`14100`=2K HDR、`10000`=蓝光10M、
+  `8000`=蓝光8M、`4200`=HDR（10M）、`4000`=蓝光4M、`-1`=真原画）；
+- 排序权重：`-1`（真原画）> `0`（原画/平台自选）> 正码率降序；默认取最高档；
+- **切换档位在签名之后追加 `&ratio={iBitRate}`**（正码率才加；`-1`/`0` 不加，由平台自选）：
+  anticode 的签名输入只覆盖 `uid/流名/ss/wsTime`，**不包含 ratio**，因此无需重新签名
+  （依据见 `README.md` 第 9 节参考项目 biliLive-tools）；
+- 参考实现（biliLive-tools / lsar）走的是**匿名**路径：最高码率并不需要 Cookie；
+  若某房间因登录态限制拿不到高档，可在设置里填自己的虎牙 Cookie（只用于解析请求）。
 
 ## anticode 签名算法（完整复刻参考实现）
 

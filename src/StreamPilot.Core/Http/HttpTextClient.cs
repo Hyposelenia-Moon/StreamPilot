@@ -52,6 +52,19 @@ public readonly record struct HttpTextResponse(HttpStatusCode Status, string Tex
 /// </summary>
 public sealed class HttpTextClient
 {
+    /// <summary>请求头名称：Cookie。</summary>
+    private const string CookieHeaderName = "Cookie";
+
+    /// <summary>
+    /// 当前异步作用域内附加的 Cookie（由 <see cref="UseCookie"/> 设置）。
+    /// </summary>
+    /// <remarks>
+    /// 用 <see cref="AsyncLocal{T}"/> 而不是实例字段：同一个客户端实例会被多个平台解析器共用，
+    /// 并发解析时必须各带各的 Cookie，不能互相串。Cookie 只用于解析请求，
+    /// 播放地址与中继请求都不带它（见 README 的隐私说明）。
+    /// </remarks>
+    private static readonly AsyncLocal<string?> CookieScopeValue = new();
+
     private readonly HttpClientFactory _factory;
     private readonly IStructuredLogger _logger;
     private readonly string _moduleName = "Core.Http";
@@ -65,6 +78,18 @@ public sealed class HttpTextClient
         ArgumentNullException.ThrowIfNull(logger);
         _factory = factory;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// 在返回的作用域内，所有请求都带上该 Cookie（空值表示不带）。
+    /// </summary>
+    /// <param name="cookie">用户自备的该平台 Cookie，可为空。</param>
+    /// <returns>释放后恢复原值的作用域。</returns>
+    public IDisposable UseCookie(string? cookie)
+    {
+        string? previous = CookieScopeValue.Value;
+        CookieScopeValue.Value = string.IsNullOrWhiteSpace(cookie) ? null : cookie.Trim();
+        return new CookieScope(previous);
     }
 
     /// <summary>发送请求并返回完整响应快照。</summary>
@@ -229,6 +254,7 @@ public sealed class HttpTextClient
 
         if (spec.Headers is null)
         {
+            ApplyAmbientCookie(request);
             return request;
         }
 
@@ -240,7 +266,46 @@ public sealed class HttpTextClient
             }
         }
 
+        ApplyAmbientCookie(request);
         return request;
+    }
+
+    /// <summary>在没有显式 Cookie 头时，补上当前作用域的 Cookie。</summary>
+    /// <param name="request">待发送的请求。</param>
+    private static void ApplyAmbientCookie(HttpRequestMessage request)
+    {
+        string? cookie = CookieScopeValue.Value;
+        if (string.IsNullOrWhiteSpace(cookie))
+        {
+            return;
+        }
+
+        // 解析器显式设置的 Cookie 优先，避免出现两个 Cookie 头。
+        bool hasExplicit = request.Headers.Contains(CookieHeaderName)
+            || request.Content?.Headers.Contains(CookieHeaderName) == true;
+        if (!hasExplicit)
+        {
+            request.Headers.TryAddWithoutValidation(CookieHeaderName, cookie);
+        }
+    }
+
+    /// <summary>Cookie 作用域：释放时恢复进入前的值。</summary>
+    /// <param name="previous">进入前的 Cookie。</param>
+    private sealed class CookieScope(string? previous) : IDisposable
+    {
+        private bool _disposed;
+
+        /// <inheritdoc />
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            CookieScopeValue.Value = previous;
+        }
     }
 
     private static string DecodeText(byte[] payload, string? charset)

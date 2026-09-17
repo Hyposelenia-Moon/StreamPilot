@@ -17,9 +17,19 @@
 | 1 | `GET https://live.bilibili.com/{idOrShortId}` | 仅在输入不是纯数字时执行；解析 `defaultRoomId` / `room_id` / `roomid` / `roomId` |
 | 2 | `GET https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByRoom?room_id={id}` | 标题、主播名、分区、封面；`data: null` → 房间不存在；被风控（`code=-352/-412/-509`）时降级到第 3 步 |
 | 3 | `GET https://api.live.bilibili.com/xlive/web-room/v1/index/getRoomBaseInfo?room_ids={id}&req_biz=web_room_componet` | 仅在第 2 步不可用时调用；取 `data.by_room_ids` 里的 `title` / `uname` / `area_name` / `cover` |
-| 4 | `GET https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?protocol=0,1&format=0,1,2&codec=0,1&qn=30000&platform=web&ptype=8&dolby=5&panorama=1&room_id={id}` | 全部候选线路与画质 |
+| 4 | `GET https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?protocol=0,1&format=0,1,2&codec=0,1&qn={qn}&platform=web&ptype=8&dolby=5&panorama=1&room_id={id}` | 全部候选线路与画质；`qn` 默认 `30000`，用户选了档位时用该档位的 qn |
 
-`qn=30000` 为 B站最高画质请求值（杜比原画，其他档位：`20000`=4K、`15000`=2K、`10000`=1080P 高帧率、`400`=1080P）。
+`qn` 取值：`30000`=杜比原画、`25000`=默认原画、`20000`=4K、`15000`=2K、`10000`=1080P 高帧率（官方名"原画"）、`400`=蓝光、`250`=超清、`150`=高清、`80`=流畅。
+
+## 画质档位（`Qualities`）
+
+- **可用档位**来自 `playurl_info.playurl.stream[].format[].codec[].accept_qn[]`（同一房间所有编码的并集去重）。
+  注意 `accept_qn[0]` 是**最低**档，不能当成最高档使用。
+- **官方档位名与 HDR 标记**来自 `playurl_info.playurl.g_qn_desc[]`：`qn` + `desc` + `hdr_desc`
+  （HDR 不是独立的 qn，而是某个 qn 上的 `hdr_desc == "HDR"` 属性，显示时追加"（HDR）"）。
+- 请求的 `qn` 与实际生效档位（`codec[].current_qn` 或请求值）写入 `SelectedQualityKey`；
+  用户选的键不在可用列表里时回退到最高档并记 `Warn`。
+- 匿名请求通常只能拿到较低档位（例如 1080P 原画）；要拿 4K/HDR/杜比需要在设置里填自己的 `SESSDATA`。
 
 ## 候选映射
 

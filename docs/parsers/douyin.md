@@ -49,3 +49,14 @@
 - 画质由 `FULL_HD1/HD1/SD1/SD2` 映射（`QualityNames.FromDouyinQualityName`）；
 - 抖音部分直播间为 HEVC：编码按 `Unknown` 之外的已知值填充，若 Web 端无法解码，
   播放页会提示使用「mpv 播放」（mpv 支持 HEVC 硬解 + 超分）。
+
+## 画质档位（`Qualities`）
+
+- 档位来源优先 `options.qualities[]`（`sdk_key` + `name` + `v_bit_rate`），
+  缺失时退回 `flv_pull_url` / `hls_pull_url_map` / `stream_url` 的键名；
+- 官方档位名：`origin`=原画、`uhd`=蓝光、`hd`=超清、`sd`=高清、`ld`=标清；
+  老键名（`FULL_HD1`/`HD1`/`SD1`/`SD2`）按同义档位处理，键名原样作为 `QualityOption.Key`；
+- 抖音是六个平台里**唯一在接口里直接给出码率**的（`v_bit_rate`），填入 `BitrateKbps`
+  （若字段单位是 bps 则换算为 kbps）；
+- `PreferredQualityKey` 命中时取该档；否则按"最高档在前"取第一个可用档，
+  并且**只把选中档位的地址放进候选列表**（避免播放页选中的档位被其它档位顶掉）。

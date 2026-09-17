@@ -145,6 +145,7 @@ const OUTBOUND_MESSAGE_TYPES = Object.freeze({
   REFRESH_NEEDED: 'refresh-needed',
   FULLSCREEN_ENTER: 'fullscreen-enter',
   FULLSCREEN_EXIT: 'fullscreen-exit',
+  QUALITY: 'quality',
 });
 
 /**
@@ -408,6 +409,47 @@ function buildPlaybackPlan(payload, canPlayFlv, canPlayHls, hevcSupported) {
 }
 
 /**
+ * 规范化宿主下发的画质档位列表，供页面渲染下拉框。
+ * @param {*} qualities 宿主 play 消息里的 qualities 字段。
+ * @param {*} selectedKey 当前生效的档位键。
+ * @returns {{items:Array<{key:string,label:string,selected:boolean}>,selectedKey:string}} 下拉项与选中键。
+ */
+function normalizeQualities(qualities, selectedKey) {
+  const items = [];
+  if (!Array.isArray(qualities)) {
+    return { items, selectedKey: '' };
+  }
+
+  const wanted = typeof selectedKey === 'string' ? selectedKey : '';
+  for (const entry of qualities) {
+    if (!entry || typeof entry !== 'object') {
+      continue;
+    }
+
+    const key = typeof entry.key === 'string' ? entry.key.trim() : '';
+    if (key.length === 0) {
+      continue;
+    }
+
+    const rawLabel = typeof entry.label === 'string' ? entry.label.trim() : '';
+    const bitrate = Number.isFinite(entry.bitrateKbps) ? Math.round(entry.bitrateKbps) : null;
+    const label = rawLabel.length > 0 ? rawLabel : key;
+    items.push({
+      key,
+      label: bitrate !== null && bitrate > 0 ? label + ' · ' + bitrate + ' kbps' : label,
+      selected: key === wanted,
+    });
+  }
+
+  const effective = items.some((item) => item.key === wanted) ? wanted : (items.length > 0 ? items[0].key : '');
+  for (const item of items) {
+    item.selected = item.key === effective;
+  }
+
+  return { items, selectedKey: effective };
+}
+
+/**
  * 判断 mpegts 错误是否代表 HTTP 状态异常（需要立刻切换候选）。
  * @param {*} errorType 错误类型枚举值。
  * @param {*} errorDetail 错误详情枚举值。
@@ -474,6 +516,7 @@ const StreamPilotPlayerCore = {
   getStartupTimeoutMs,
   modeLabel,
   buildPlaybackPlan,
+  normalizeQualities,
   isHttpStatusInvalid,
   isMseError,
   isHevcUnsupportedDescription,

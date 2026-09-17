@@ -17,6 +17,8 @@
     <RootNamespace>StreamPilot.App</RootNamespace>
     <AssemblyName>StreamPilot</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- 自绘图标（assets/ = 仓库根目录）：标题栏、任务栏与 exe 图标统一使用 -->
+    <ApplicationIcon>..\..\assets\streampilot.ico</ApplicationIcon>
     <Description>StreamPilot 桌面应用：多平台低延迟播放、原始流录制与 mpv 外挂桥接。</Description>
     <!--
       Version 只影响包版本；AssemblyVersion 决定运行时 AppVersion.Current 的取值，
@@ -62,6 +64,13 @@
       <Link>Web\%(RecursiveDir)%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 图标同时作为 WPF 资源，供窗口显式指定 Icon（不依赖 exe 图标回退） -->
+    <Resource Include="..\..\assets\streampilot.ico">
+      <Link>Assets\streampilot.ico</Link>
+    </Resource>
   </ItemGroup>
 
 </Project>

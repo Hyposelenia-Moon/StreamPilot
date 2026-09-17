@@ -15,7 +15,7 @@
 | 1 | `GET https://www.douyu.com/{id}` | 提取最终房间号（正则 `getLegacyFirstStream\(\{\s*roomID:\s*(\d+),`）与标题/主播名/分区 |
 | 2 | `GET https://www.douyu.com/betard/{finalRoomId}` | 轮播检测：`room.videoLoop == 1` → `Replaying`（失败只记 Debug，不阻断解析） |
 | 3 | `GET https://www.douyu.com/wgapi/livenc/liveweb/websec/getEncryption?did={DEVICE_ID}` | 取 `rand_str` / `key` / `enc_time` / `is_special` / `enc_data` |
-| 4 | `POST https://www.douyu.com/lapi/live/getH5PlayV1/{finalRoomId}` | 表单字段顺序固定：`enc_data`、`tt`、`did`、`auth`、`cdn`、`rate=-1`、`hevc=0`、`fa=0`、`ive=0`；`Referer` 必带 |
+| 4 | `POST https://www.douyu.com/lapi/live/getH5PlayV1/{finalRoomId}` | 表单字段顺序固定：`enc_data`、`tt`、`did`、`auth`、`cdn`、`rate={档位}`、`hevc=0`、`fa=0`、`ive=0`；`Referer` 必带 |
 
 `DEVICE_ID = 10000000000000000000000000003306`（与参考实现一致）。
 
@@ -50,9 +50,18 @@ auth    = md5(auth + key + signStr)
 | 平台拒绝 | `error == -15`，或 `msg == "非法请求"` → `Rejected`（不重试、不绕过） |
 | 解析错误 | 其他非零 `error`、加密参数异常、页面结构变化 |
 
+## 画质档位（`Qualities`）
+
+- `getH5PlayV1` 表单里的 `rate` 就是档位：`0`=原画（最高档，也是默认值）、`8`=蓝光8M、
+  `4`=蓝光4M、`3`=超清、`2`=高清；
+- 可用档位来自响应 `data.multirates[]`（每项含 `rate`/`name`/`bitRate`），
+  实际生效档位取 `data.rate` 写入 `SelectedQualityKey`；
+- `data.rateSwitch != 1` 表示平台只提供原画，此时档位列表只有一项；
+- **地址签名与档位绑定**：换档必须重新请求接口（不像虎牙那样可以在签名后追加参数）。
+
 ## 已知限制
 
 - **多数房间仅返回 RTMP**：Web 端（WebView2 + mse）无法播放 RTMP，因此 Web 播放与原始流录制对这类房间不可用。
   这是平台能力限制，不是缺陷；UI 会明确提示改用 mpv（mpv 原生支持 RTMP）。
   不引入 RTMP 客户端库的原因见 [ADR 0004](../../adr/0004-raw-recording.md)。
-- 参考实现把 `rate=-1`（服务器自选画质）与 `hevc=0`（优先 AVC）作为固定参数，本项目保持一致。
+- 参考实现把 `rate=-1`（服务器自选画质）与 `hevc=0`（优先 AVC）作为固定参数；本项目改为**显式档位**：`PreferredQualityKey` 为空/`best`/非法时用 `rate=0`（原画 = 最高档），否则用用户选择的 rate（非法值记 Warn 后回退 0）。

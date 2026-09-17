@@ -41,6 +41,44 @@ public static class ResolveMessages
     /// <summary>平台未返回分区时的占位文本。</summary>
     public const string CategoryUnavailable = "未知分区";
 
+    /// <summary>直播状态名：正在直播。</summary>
+    public const string LiveStatusLive = "直播中";
+
+    /// <summary>直播状态名：未开播。</summary>
+    public const string LiveStatusOffline = "未开播";
+
+    /// <summary>直播状态名：轮播 / 重播。</summary>
+    public const string LiveStatusReplaying = "轮播中";
+
+    /// <summary>直播状态名：无法判定。</summary>
+    public const string LiveStatusUnknown = "未知";
+
+    /// <summary>把失败分类转换为"解析失败：原因（状态：xxx）"形式的直白提示。</summary>
+    /// <param name="failure">失败分类。</param>
+    /// <returns>面向用户的一句话说明。</returns>
+    public static string DescribeFailure(ResolveFailure failure) => failure switch
+    {
+        ResolveFailure.NotLive => $"解析失败：主播未开播（状态：{LiveStatusOffline}）",
+        ResolveFailure.Replaying => $"解析失败：主播正在轮播（状态：{LiveStatusReplaying}）",
+        ResolveFailure.RoomNotFound => "解析失败：找不到这个直播间（房间号或链接可能有误）",
+        ResolveFailure.NetworkError => "解析失败：网络连接不上平台（请检查网络或代理后重试）",
+        ResolveFailure.Rejected => "解析失败：平台拒绝了本次请求（可能触发风控，请稍后重试）",
+        ResolveFailure.InvalidInput => "解析失败：房间号或链接不合法",
+        ResolveFailure.Unsupported => "解析失败：该平台暂不受支持",
+        ResolveFailure.ParseError => "解析失败：平台返回内容无法识别（接口可能已变更）",
+        _ => "解析失败：请稍后重试",
+    };
+
+    /// <summary>把失败分类映射为简短的直播状态词。</summary>
+    /// <param name="failure">失败分类。</param>
+    /// <returns>直播状态词。</returns>
+    public static string DescribeLiveStatus(ResolveFailure failure) => failure switch
+    {
+        ResolveFailure.NotLive => LiveStatusOffline,
+        ResolveFailure.Replaying => LiveStatusReplaying,
+        _ => LiveStatusUnknown,
+    };
+
     /// <summary>把失败分类转换为面向用户的提示。</summary>
     /// <param name="failure">失败分类。</param>
     /// <returns>中文提示。</returns>

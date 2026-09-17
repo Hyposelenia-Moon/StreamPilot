@@ -183,3 +183,29 @@ test('getStartupTimeoutMs 按模式返回 6000/8000', () => {
   assert.equal(core.getStartupTimeoutMs({ extreme: false }), 8000);
   assert.equal(core.getStartupTimeoutMs(null), 8000);
 });
+
+test('normalizeQualities 生成下拉项并回落到首档', () => {
+  const payload = [
+    { key: '20000', label: '4K 原画', bitrateKbps: 20000, isBest: true },
+    { key: '10000', label: '原画', bitrateKbps: 10000 },
+    { key: '', label: '无效档位' },
+  ];
+
+  const picked = core.normalizeQualities(payload, '10000');
+  assert.equal(picked.items.length, 2);
+  assert.equal(picked.selectedKey, '10000');
+  assert.deepEqual(picked.items.map((item) => item.selected), [false, true]);
+  assert.equal(picked.items[0].label, '4K 原画 · 20000 kbps');
+  assert.equal(picked.items[1].label, '原画 · 10000 kbps');
+
+  const fallback = core.normalizeQualities(payload, 'not-exist');
+  assert.equal(fallback.selectedKey, '20000');
+  assert.deepEqual(fallback.items.map((item) => item.selected), [true, false]);
+
+  assert.deepEqual(core.normalizeQualities(null, 'x'), { items: [], selectedKey: '' });
+  assert.deepEqual(core.normalizeQualities([], 'x'), { items: [], selectedKey: '' });
+});
+
+test('OUTBOUND_MESSAGE_TYPES 包含画质消息', () => {
+  assert.equal(core.OUTBOUND_MESSAGE_TYPES.QUALITY, 'quality');
+});

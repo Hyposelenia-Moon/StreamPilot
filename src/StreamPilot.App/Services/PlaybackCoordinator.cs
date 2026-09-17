@@ -96,14 +96,17 @@ public sealed class PlaybackCoordinator : IPlaybackCoordinator
             }
 
             string url = candidate.Url;
-            if (request.AllowRelay && options.Bridge.AutoStart && _bridge.IsRunning && NeedsRelay(candidate))
+            if (request.AllowRelay && options.Bridge.AutoStart && _bridge.IsRunning)
             {
                 try
                 {
+                    // 一律走本地中继：页面源是 https，而很多平台只给 http 流或要求 Referer，
+                    // 直连会被混合内容 / CORS / 防盗链三重拦住（表现为"所有候选线路均不可用"）。
                     url = _bridge.RegisterRelay(new RelayTarget
                     {
                         UpstreamUrl = candidate.Url,
                         Referer = candidate.HttpReferer,
+                        Kind = IsPlaylist(candidate.Format) ? RelayKind.HlsPlaylist : RelayKind.Stream,
                     });
                     usedRelay = true;
                     lock (_relayGate)
@@ -163,6 +166,8 @@ public sealed class PlaybackCoordinator : IPlaybackCoordinator
             Candidates = playable,
             HasUnsupportedCodec = hasUnsupportedCodec,
             Hint = hint,
+            Qualities = request.Room.Qualities,
+            SelectedQualityKey = request.Room.SelectedQualityKey,
         };
 
         _logger.Info(_moduleName, "播放计划已准备。", new Dictionary<string, object?>
@@ -209,13 +214,12 @@ public sealed class PlaybackCoordinator : IPlaybackCoordinator
     }
 
     /// <summary>
-    /// 判断候选是否需要经过本地中继（跨域受限或必须带 Referer 的平台）。
+    /// 判断候选格式是否需要按 HLS 播放列表中继（需要逐行改写内部地址）。
     /// </summary>
-    /// <param name="candidate">候选。</param>
-    /// <returns>需要中继返回 <see langword="true"/>。</returns>
-    private static bool NeedsRelay(StreamCandidate candidate) =>
-        candidate.Format == StreamFormat.FlvHttp
-        && !string.IsNullOrWhiteSpace(candidate.HttpReferer);
+    /// <param name="format">候选格式。</param>
+    /// <returns>播放列表格式返回 <see langword="true"/>。</returns>
+    private static bool IsPlaylist(StreamFormat format) =>
+        format is StreamFormat.HlsTs or StreamFormat.HlsFmp4;
 
     private static string FormatName(StreamFormat format) => format switch
     {

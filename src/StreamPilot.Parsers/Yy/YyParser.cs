@@ -59,8 +59,23 @@ internal sealed class YyParser : PlatformParserBase
     /// <summary>毫秒与秒的换算。</summary>
     private const long MillisecondsPerSecond = 1000;
 
+    /// <summary>默认的 <c>gear</c> 取值（与 Web 端播放器一致的请求口径）。</summary>
+    private const int DefaultGear = 2;
+
+    /// <summary><c>gear</c> 允许的下限（防御性校验，语义未经证实）。</summary>
+    private const int MinGear = 0;
+
+    /// <summary><c>gear</c> 允许的上限（防御性校验，语义未经证实）。</summary>
+    private const int MaxGear = 100;
+
+    /// <summary>唯一档位的显示名。</summary>
+    private const string DefaultQualityLabel = "默认（平台给定）";
+
     /// <summary>请求体中的序号占位符。</summary>
     private const string SequencePlaceholder = "@SEQ@";
+
+    /// <summary>请求体中的 <c>gear</c> 占位符。</summary>
+    private const string GearPlaceholder = "@GEAR@";
 
     /// <summary>请求体中的发送时间占位符。</summary>
     private const string SendTimePlaceholder = "@SENDTIME@";
@@ -132,7 +147,7 @@ internal sealed class YyParser : PlatformParserBase
     private const string StreamRequestBodyTemplate = """
         {"head":{"seq":@SEQ@,"appidstr":"0","bidstr":"120","cidstr":"@ROOMID@","sidstr":"@ROOMID@","uid64":0,"client_type":108,"client_ver":"@CLIENTVER@","stream_sys_ver":1,"app":"yylive_web","playersdk_ver":"@CLIENTVER@","thundersdk_ver":"0","streamsdk_ver":"@CLIENTVER@"},
         "client_attribute":{"client":"web","model":"web0","cpu":"","graphics_card":"","os":"chrome","osversion":"141.0.0.0","vsdk_version":"","app_identify":"","app_version":"","business":"","width":"1536","height":"960","scale":"","client_type":8,"h265":0},
-        "avp_parameter":{"version":1,"client_type":8,"service_type":0,"imsi":0,"send_time":@SENDTIME@,"line_seq":-1,"gear":2,"ssl":1,"stream_format":0}}
+        "avp_parameter":{"version":1,"client_type":8,"service_type":0,"imsi":0,"send_time":@SENDTIME@,"line_seq":-1,"gear":@GEAR@,"ssl":1,"stream_format":0}}
         """;
 
     /// <summary>avp_info_res 字段名。</summary>
@@ -169,12 +184,20 @@ internal sealed class YyParser : PlatformParserBase
     public override string RoomUrlPrefix => "https://www.yy.com/";
 
     /// <inheritdoc />
+    /// <remarks>
+    /// 档位由请求体里的 <c>gear</c> 决定：YY 的响应里没有档位表，<c>gear</c> 的取值语义也未经证实，
+    /// 因此这里只把调用方给的数值原样透传（缺失或非法时回退到与 Web 端一致的默认值），
+    /// 并且不对外声明任何一个 <c>gear</c> 等于某个画质档位。
+    /// </remarks>
     protected override async Task<ResolvedRoom> OnParseAsync(RoomQuery query, CancellationToken cancellationToken)
     {
+        // 用户自备 Cookie 只作用于本次解析的请求（播放地址与中继都不带它）。
+        using IDisposable cookieScope = _http.UseCookie(query.Cookie);
         string roomId = ResolveRoomId(query);
+        int gear = ResolveGear(query.PreferredQualityKey);
         YyRoomPage page = await FetchRoomPageAsync(roomId, cancellationToken).ConfigureAwait(false);
         IReadOnlyList<string> addresses =
-            await FetchStreamAddressesAsync(page.StreamId, cancellationToken).ConfigureAwait(false);
+            await FetchStreamAddressesAsync(page.StreamId, gear, cancellationToken).ConfigureAwait(false);
 
         StreamCandidateBuilder builder = new(Platform, Logger);
         CollectCandidates(builder, addresses);
@@ -188,7 +211,67 @@ internal sealed class YyParser : PlatformParserBase
             Category = page.Category,
             Candidates = builder.Build(),
             ResolvedAt = DateTimeOffset.UtcNow,
+            Qualities = BuildQualityOptions(gear),
+            SelectedQualityKey = gear.ToString(CultureInfo.InvariantCulture),
         };
+    }
+
+    /// <summary>
+    /// 把调用方指定的档位键解析为请求体的 <c>gear</c> 取值。
+    /// </summary>
+    /// <param name="preferredQualityKey">档位键（纯数字的 <c>gear</c> 文本）；为空时取默认值。</param>
+    /// <returns>请求使用的 <c>gear</c> 数值。</returns>
+    /// <remarks>
+    /// YY 的 <c>gear</c> 取值语义未经证实，这里只做防御性校验：不是纯数字或超出
+    /// <see cref="MinGear"/> 到 <see cref="MaxGear"/> 的范围时回退到 <see cref="DefaultGear"/> 并记 Warn，
+    /// 不会因为档位键异常而让解析失败。
+    /// </remarks>
+    internal int ResolveGear(string? preferredQualityKey)
+    {
+        if (string.IsNullOrWhiteSpace(preferredQualityKey)
+            || string.Equals(preferredQualityKey, QualityOption.BestFlag, StringComparison.OrdinalIgnoreCase))
+        {
+            return DefaultGear;
+        }
+
+        if (int.TryParse(preferredQualityKey, NumberStyles.None, CultureInfo.InvariantCulture, out int gear)
+            && gear >= MinGear
+            && gear <= MaxGear)
+        {
+            return gear;
+        }
+
+        Logger.Warn(ModuleName, "YY 档位键无效，回退默认 gear。", new Dictionary<string, object?>
+        {
+            ["preferredQualityKey"] = preferredQualityKey,
+            ["gear"] = DefaultGear,
+        });
+
+        return DefaultGear;
+    }
+
+    /// <summary>
+    /// 构造 YY 的画质档位列表。
+    /// </summary>
+    /// <param name="gear">本次请求使用的 <c>gear</c> 数值。</param>
+    /// <returns>只含一项的档位列表（档位键即当前 <c>gear</c>）。</returns>
+    /// <remarks>
+    /// 响应里没有档位表，<c>gear</c> 与画质的对应关系未经证实，因此只暴露当前取值本身的"默认档"，
+    /// 不推测、也不标注它等于某个画质。
+    /// </remarks>
+    internal static IReadOnlyList<QualityOption> BuildQualityOptions(int gear)
+    {
+        IReadOnlyList<QualityOption> qualities =
+        [
+            new QualityOption
+            {
+                Key = gear.ToString(CultureInfo.InvariantCulture),
+                Label = DefaultQualityLabel,
+                IsBest = true,
+            },
+        ];
+
+        return qualities;
     }
 
     /// <summary>YY 房间页中抽取到的直播信息。</summary>
@@ -271,14 +354,16 @@ internal sealed class YyParser : PlatformParserBase
 
     /// <summary>调用 stream-manager 接口并取出全部线路地址。</summary>
     /// <param name="streamId">真实流标识（页面 pageInfo.sid）。</param>
+    /// <param name="gear">请求体里的档位取值（<c>gear</c>，语义未证实，由调用方决定）。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>线路地址列表（顺序与接口返回一致，可能为空）。</returns>
     private async Task<IReadOnlyList<string>> FetchStreamAddressesAsync(
         string streamId,
+        int gear,
         CancellationToken cancellationToken)
     {
         long sequenceMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        string body = BuildStreamRequestBody(streamId, sequenceMs);
+        string body = BuildStreamRequestBody(streamId, sequenceMs, gear);
 
         HttpRequestSpec spec = new()
         {
@@ -336,16 +421,21 @@ internal sealed class YyParser : PlatformParserBase
     /// <summary>构造 stream-manager 播放接口的 JSON 请求体。</summary>
     /// <param name="streamId">真实流标识（页面 pageInfo.sid）。</param>
     /// <param name="sequenceMs">请求序号（毫秒时间戳）。</param>
+    /// <param name="gear">请求体里的档位取值（<c>gear</c>）。</param>
     /// <returns>JSON 请求体文本。</returns>
-    /// <remarks>流标识已由基类限定为字母数字，直接内嵌不会破坏 JSON 结构。</remarks>
-    private static string BuildStreamRequestBody(string streamId, long sequenceMs)
+    /// <remarks>
+    /// 流标识已由基类限定为字母数字，直接内嵌不会破坏 JSON 结构；
+    /// <c>gear</c> 由调用方保证为整数，写入的是十进制文本。
+    /// </remarks>
+    private static string BuildStreamRequestBody(string streamId, long sequenceMs, int gear)
     {
         long sendTimeSeconds = sequenceMs / MillisecondsPerSecond;
         return StreamRequestBodyTemplate
             .Replace(SequencePlaceholder, sequenceMs.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)
             .Replace(SendTimePlaceholder, sendTimeSeconds.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)
             .Replace(RoomIdPlaceholder, streamId, StringComparison.Ordinal)
-            .Replace(ClientVersionPlaceholder, ClientVersion, StringComparison.Ordinal);
+            .Replace(ClientVersionPlaceholder, ClientVersion, StringComparison.Ordinal)
+            .Replace(GearPlaceholder, gear.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal);
     }
 
     /// <summary>从播放接口响应中取出全部非空线路地址。</summary>

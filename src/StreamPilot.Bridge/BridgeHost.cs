@@ -41,8 +41,23 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// <summary>请求体最大字节数（防止被本机恶意页面塞入超大请求）。</summary>
     private const int MaxRequestBodyBytes = 8 * 1024;
 
-    /// <summary>客户端断开后可继续等待上游的最长时间（秒）。</summary>
+    /// <summary>中继上游连续无数据多久判定断流（秒）。</summary>
     private const int IdleTimeoutSeconds = 30;
+
+    /// <summary>中继转发缓冲区大小（字节）。</summary>
+    private const int RelayBufferBytes = 64 * 1024;
+
+    /// <summary>播放列表改写时的预留容量（避免边拼接边扩容）。</summary>
+    private const int PlaylistRewriteHeadroomBytes = 4096;
+
+    /// <summary>建立上游连接的超时（秒）。</summary>
+    private const int UpstreamConnectTimeoutSeconds = 10;
+
+    /// <summary>HLS 播放列表响应的内容类型。</summary>
+    private const string HlsPlaylistContentType = "application/vnd.apple.mpegurl; charset=utf-8";
+
+    /// <summary>中继请求体里表示 HLS 播放列表的 kind 取值。</summary>
+    private const string PlaylistKindValue = "hls";
 
     private readonly IStructuredLogger _logger;
     private readonly string _moduleName = "Bridge.Host";
@@ -51,6 +66,10 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     private readonly MpvLauncher _mpvLauncher;
     private readonly Func<PlaybackOptions?> _playbackOptionsProvider;
     private readonly HttpClient _relayClient;
+
+    /// <summary>播放列表地址 → 该列表上一次改写登记的子节点本地地址。</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<string>> _playlistChildren = new(StringComparer.Ordinal);
+
     private readonly CancellationTokenSource _shutdown = new();
     private readonly SemaphoreSlim _outputLock = new(1, 1);
     private HttpListener? _listener;
@@ -80,10 +99,12 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
             AllowAutoRedirect = true,
             AutomaticDecompression = System.Net.DecompressionMethods.None,
             PooledConnectionLifetime = TimeSpan.FromMinutes(10),
+            ConnectTimeout = TimeSpan.FromSeconds(UpstreamConnectTimeoutSeconds),
         })
         {
-            // 中继是长连接：整体超时交由读取消与客户端断开处理，这里只限制"建连+首字节"。
-            Timeout = TimeSpan.FromSeconds(IdleTimeoutSeconds),
+            // 中继是长连接：整体超时必须关闭，否则 HttpClient 会在 30 秒后连直播流一起取消；
+            // 断流判定改由 PumpWithIdleTimeoutAsync 的"空闲超时"负责。
+            Timeout = Timeout.InfiniteTimeSpan,
         };
     }
 
@@ -165,7 +186,22 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     }
 
     /// <inheritdoc />
-    public void ReleaseRelay(string localUrl) => _registry.ReleaseByLocalUrl(localUrl);
+    public void ReleaseRelay(string localUrl)
+    {
+        if (!string.IsNullOrWhiteSpace(localUrl))
+        {
+            // 释放播放列表时连同它上一次改写登记的子节点一起回收。
+            foreach (KeyValuePair<string, List<string>> entry in _playlistChildren)
+            {
+                if (entry.Value.Contains(localUrl, StringComparer.Ordinal))
+                {
+                    ReleasePlaylistChildren(entry.Key);
+                }
+            }
+        }
+
+        _registry.ReleaseByLocalUrl(localUrl);
+    }
 
     /// <inheritdoc />
     public Task<bool> PlayWithMpvAsync(string url, string? title, string? referer, CancellationToken cancellationToken)
@@ -432,11 +468,15 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
             return;
         }
 
+        string? kindValue = ExtractJsonString(body, "kind");
         RelayTarget target = new()
         {
             UpstreamUrl = upstream,
             Referer = ExtractJsonString(body, "referer"),
             ContentType = ExtractJsonString(body, "contentType"),
+            Kind = string.Equals(kindValue, PlaylistKindValue, StringComparison.OrdinalIgnoreCase)
+                ? RelayKind.HlsPlaylist
+                : RelayKind.Stream,
         };
         string localUrl = RegisterRelay(target);
         await WriteTextAsync(context, HttpStatusCode.OK, $"{{\"localUrl\":\"{localUrl}\"}}").ConfigureAwait(false);
@@ -444,6 +484,16 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
 
     private async Task StreamRelayAsync(HttpListenerContext context, RelayTarget target)
     {
+        // 中继响应必须带 CORS 头：页面源是 https://appassets.local，而中继在 http://127.0.0.1，
+        // 少了 Access-Control-Allow-Origin 时浏览器会直接以 "Failed to fetch" 拒绝，线路全部显示不可用。
+        ApplyCorsHeaders(context, includePrivateNetworkHeader: false);
+
+        if (target.Kind == RelayKind.HlsPlaylist)
+        {
+            await ServePlaylistAsync(context, target).ConfigureAwait(false);
+            return;
+        }
+
         using HttpRequestMessage request = new(HttpMethod.Get, target.UpstreamUrl);
         if (!string.IsNullOrWhiteSpace(target.Referer))
         {
@@ -472,10 +522,203 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
             context.Response.ContentLength64 = length;
         }
 
+        CopyOptionalHeader(response, context, "Accept-Ranges");
+        CopyOptionalHeader(response, context, "Content-Range");
+        CopyOptionalHeader(response, context, "Content-Encoding");
+
         await using Stream upstream = await response.Content.ReadAsStreamAsync(_shutdown.Token).ConfigureAwait(false);
+        await PumpWithIdleTimeoutAsync(upstream, context, target).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 拉取 HLS 播放列表并把其中的切片地址改写成本地中继地址。
+    /// </summary>
+    /// <param name="context">当前请求。</param>
+    /// <param name="target">播放列表中继目标。</param>
+    /// <remarks>
+    /// 只中继 m3u8 本身没用：播放列表里的切片地址如果仍指向 <c>http://</c> CDN，
+    /// 页面照样会因为混合内容被拦下，所以这里逐行改写（含 <c>#EXT-X-KEY</c>/<c>#EXT-X-MAP</c> 的 URI）。
+    /// </remarks>
+    private async Task ServePlaylistAsync(HttpListenerContext context, RelayTarget target)
+    {
+        using HttpRequestMessage request = new(HttpMethod.Get, target.UpstreamUrl);
+        if (!string.IsNullOrWhiteSpace(target.Referer))
+        {
+            request.Headers.TryAddWithoutValidation("Referer", target.Referer);
+        }
+
+        using HttpResponseMessage response = await _relayClient
+            .SendAsync(request, HttpCompletionOption.ResponseContentRead, _shutdown.Token)
+            .ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            context.Response.StatusCode = (int)response.StatusCode;
+            context.Response.ContentLength64 = 0;
+            return;
+        }
+
+        string playlist = await response.Content.ReadAsStringAsync(_shutdown.Token).ConfigureAwait(false);
+        string rewritten = RewritePlaylist(playlist, target);
+        byte[] payload = Encoding.UTF8.GetBytes(rewritten);
+
+        context.Response.StatusCode = (int)HttpStatusCode.OK;
+        context.Response.ContentType = HlsPlaylistContentType;
+        context.Response.ContentLength64 = payload.Length;
+        await _outputLock.WaitAsync().ConfigureAwait(false);
         try
         {
-            await upstream.CopyToAsync(context.Response.OutputStream, _shutdown.Token).ConfigureAwait(false);
+            await context.Response.OutputStream.WriteAsync(payload).ConfigureAwait(false);
+        }
+        finally
+        {
+            _outputLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// 改写播放列表：把每个切片/子播放列表地址注册成新的本地中继并替换。
+    /// </summary>
+    /// <param name="playlist">上游播放列表文本。</param>
+    /// <param name="target">播放列表中继目标。</param>
+    /// <returns>改写后的播放列表文本。</returns>
+    private string RewritePlaylist(string playlist, RelayTarget target)
+    {
+        ReleasePlaylistChildren(target.UpstreamUrl);
+
+        List<string> children = [];
+        StringBuilder builder = new(playlist.Length + PlaylistRewriteHeadroomBytes);
+        foreach (string rawLine in playlist.Split('\n'))
+        {
+            string line = rawLine.TrimEnd('\r');
+            if (line.Length == 0)
+            {
+                builder.Append('\n');
+                continue;
+            }
+
+            if (line[0] == '#')
+            {
+                builder.Append(RewritePlaylistTag(line, target, children)).Append('\n');
+                continue;
+            }
+
+            builder.Append(RegisterChild(ResolveChildUrl(target.UpstreamUrl, line), target, children)).Append('\n');
+        }
+
+        _playlistChildren[target.UpstreamUrl] = children;
+        return builder.ToString();
+    }
+
+    /// <summary>改写带 URI 属性的标签（密钥、初始化段、备用音视频轨）。</summary>
+    /// <param name="line">标签行。</param>
+    /// <param name="target">播放列表中继目标。</param>
+    /// <param name="children">本次改写登记的本地地址集合。</param>
+    /// <returns>改写后的标签行。</returns>
+    private string RewritePlaylistTag(string line, RelayTarget target, List<string> children)
+    {
+        const string AttributePrefix = "URI=\"";
+        int index = line.IndexOf(AttributePrefix, StringComparison.OrdinalIgnoreCase);
+        if (index < 0)
+        {
+            return line;
+        }
+
+        int valueStart = index + AttributePrefix.Length;
+        int valueEnd = line.IndexOf('"', valueStart);
+        if (valueEnd < 0)
+        {
+            return line;
+        }
+
+        string childUrl = ResolveChildUrl(target.UpstreamUrl, line[valueStart..valueEnd]);
+        string localUrl = RegisterChild(childUrl, target, children);
+        return string.Concat(line[..valueStart], localUrl, line[valueEnd..]);
+    }
+
+    /// <summary>把切片地址注册成本地中继地址，并记录到本次播放列表的子节点集合。</summary>
+    /// <param name="childUrl">切片或子播放列表的绝对地址。</param>
+    /// <param name="target">父中继目标。</param>
+    /// <param name="children">本次改写登记的本地地址集合。</param>
+    /// <returns>本地中继地址。</returns>
+    private string RegisterChild(string childUrl, RelayTarget target, List<string> children)
+    {
+        RelayKind kind = IsPlaylistUrl(childUrl) ? RelayKind.HlsPlaylist : RelayKind.Stream;
+        string localUrl = _registry.Register(new RelayTarget
+        {
+            UpstreamUrl = childUrl,
+            Referer = target.Referer,
+            Kind = kind,
+        });
+        children.Add(localUrl);
+        return localUrl;
+    }
+
+    /// <summary>释放某个播放列表上一次改写登记的子节点。</summary>
+    /// <param name="playlistUrl">播放列表上游地址。</param>
+    private void ReleasePlaylistChildren(string playlistUrl)
+    {
+        if (!_playlistChildren.TryRemove(playlistUrl, out List<string>? previous))
+        {
+            return;
+        }
+
+        foreach (string url in previous)
+        {
+            _registry.ReleaseByLocalUrl(url);
+        }
+    }
+
+    /// <summary>判断地址是否指向 HLS 播放列表。</summary>
+    /// <param name="url">地址。</param>
+    /// <returns>是播放列表返回 <see langword="true"/>。</returns>
+    private static bool IsPlaylistUrl(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out Uri? uri)
+        && uri.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>把播放列表里的相对地址解析为绝对地址。</summary>
+    /// <param name="playlistUrl">播放列表地址（作为基地址）。</param>
+    /// <param name="child">播放列表里的地址片段。</param>
+    /// <returns>绝对地址；无法解析时返回原片段。</returns>
+    private static string ResolveChildUrl(string playlistUrl, string child)
+    {
+        string trimmed = child.Trim();
+        return Uri.TryCreate(new Uri(playlistUrl), trimmed, out Uri? absolute) ? absolute.ToString() : trimmed;
+    }
+
+    /// <summary>
+    /// 以"空闲超时"方式把上游数据搬到客户端：只要持续有数据就不计时，
+    /// 连续 <see cref="IdleTimeoutSeconds"/> 秒没有新数据才判定断流。
+    /// </summary>
+    /// <param name="upstream">上游数据流。</param>
+    /// <param name="context">当前请求。</param>
+    /// <param name="target">中继目标。</param>
+    private async Task PumpWithIdleTimeoutAsync(Stream upstream, HttpListenerContext context, RelayTarget target)
+    {
+        byte[] buffer = new byte[RelayBufferBytes];
+        try
+        {
+            while (true)
+            {
+                using CancellationTokenSource idle = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
+                idle.CancelAfter(TimeSpan.FromSeconds(IdleTimeoutSeconds));
+                int read = await upstream.ReadAsync(buffer, idle.Token).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                await context.Response.OutputStream.WriteAsync(buffer.AsMemory(0, read), _shutdown.Token).ConfigureAwait(false);
+            }
+
+            await context.Response.OutputStream.FlushAsync(_shutdown.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!_shutdown.IsCancellationRequested)
+        {
+            _logger.Warn(_moduleName, "中继上游长时间无数据，已断开。", new Dictionary<string, object?>
+            {
+                ["host"] = TryGetHost(target.UpstreamUrl),
+            });
         }
         catch (HttpListenerException exception)
         {
@@ -485,6 +728,24 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
             });
         }
     }
+
+    /// <summary>复制上游响应头（不存在时跳过）。</summary>
+    /// <param name="response">上游响应。</param>
+    /// <param name="context">当前请求。</param>
+    /// <param name="name">头名。</param>
+    private static void CopyOptionalHeader(HttpResponseMessage response, HttpListenerContext context, string name)
+    {
+        if (response.Headers.TryGetValues(name, out IEnumerable<string>? values))
+        {
+            context.Response.Headers[name] = string.Join(", ", values);
+        }
+    }
+
+    /// <summary>取地址主机名（日志用，不含签名参数）。</summary>
+    /// <param name="url">地址。</param>
+    /// <returns>主机名；地址非法时返回 <see langword="null"/>。</returns>
+    private static string? TryGetHost(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out Uri? uri) ? uri.Host : null;
 
     private async Task WriteTextAsync(HttpListenerContext context, HttpStatusCode status, string body)
     {

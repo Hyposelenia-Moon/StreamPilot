@@ -36,6 +36,7 @@ public static class InputDialog
             WindowStartupLocation = owner is null ? WindowStartupLocation.CenterScreen : WindowStartupLocation.CenterOwner,
             ShowInTaskbar = false,
             Background = (System.Windows.Media.Brush)WpfApplication.Current.Resources["WindowBackgroundBrush"],
+            Icon = (System.Windows.Media.ImageSource)WpfApplication.Current.Resources["AppIcon"],
         };
 
         if (owner is not null)

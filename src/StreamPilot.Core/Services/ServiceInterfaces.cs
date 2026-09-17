@@ -135,4 +135,23 @@ public sealed record RelayTarget
 
     /// <summary>是否在客户端断开后立即取消上游请求。</summary>
     public bool CancelUpstreamOnDisconnect { get; init; } = true;
+
+    /// <summary>中继类型：字节流或 HLS 播放列表。</summary>
+    /// <remarks>
+    /// 播放列表必须逐行改写（切片地址换成本地中继地址），否则页面仍会直连 CDN，
+    /// 遇到 <c>http://</c> CDN 会被混合内容策略拦下。
+    /// </remarks>
+    public RelayKind Kind { get; init; } = RelayKind.Stream;
+}
+
+/// <summary>
+/// 中继类型。
+/// </summary>
+public enum RelayKind
+{
+    /// <summary>普通字节流（FLV / TS 切片）。</summary>
+    Stream,
+
+    /// <summary>HLS 播放列表（m3u8），需要改写内部地址后再返回。</summary>
+    HlsPlaylist,
 }

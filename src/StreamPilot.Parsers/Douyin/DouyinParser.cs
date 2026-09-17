@@ -1,5 +1,6 @@
 namespace StreamPilot.Parsers.Douyin;
 
+using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using StreamPilot.Core.Http;
@@ -67,9 +68,48 @@ internal sealed class DouyinParser : PlatformParserBase
         """\{\\"state\\":(.+?\}),\\"children\\":""",
         RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.CultureInvariant);
 
-    /// <summary>画质键名优先级（从高到低），FLV 与 HLS 各自独立选取。</summary>
-    private static readonly string[] QualityPreferenceOrder =
+    /// <summary>档位键：原画（最高档）。</summary>
+    private const string QualityKeyOrigin = "origin";
+
+    /// <summary>档位键：蓝光。</summary>
+    private const string QualityKeyUhd = "uhd";
+
+    /// <summary>档位键：超清。</summary>
+    private const string QualityKeyHd = "hd";
+
+    /// <summary>档位键：高清。</summary>
+    private const string QualityKeySd = "sd";
+
+    /// <summary>档位键：标清。</summary>
+    private const string QualityKeyLd = "ld";
+
+    /// <summary>档位键：纯音频流（平台声明的档位之一）。</summary>
+    private const string QualityKeyAudioOnly = "ao";
+
+    /// <summary>档位键：真原画（平台声明的档位之一）。</summary>
+    private const string QualityKeyRealOrigin = "real_origin";
+
+    /// <summary>码率单位判定阈值：不小于该值视为 bps（需换算为 kbps）。</summary>
+    private const int BitrateBpsThreshold = 1000;
+
+    /// <summary>1 kbps 对应的比特数。</summary>
+    private const int BitsPerKilobit = 1000;
+
+    /// <summary>已知拉流档位键（从高到低）：新档位键在前，老式分辨率键在后。</summary>
+    /// <remarks>
+    /// 两套键名在不同接口与不同年代共存：<c>origin/uhd/hd/sd/ld/ao/real_origin</c> 来自官方
+    /// <c>options.qualities[].sdk_key</c>，<c>FULL_HD1/HD1/SD1/SD2</c> 来自老式的
+    /// <c>flv_pull_url</c> 与 <c>hls_pull_url_map</c> 映射键；不在表内的键排在最后并保持响应中的顺序。
+    /// </remarks>
+    private static readonly string[] KnownQualityKeyOrder =
     [
+        QualityKeyOrigin,
+        QualityKeyUhd,
+        QualityKeyHd,
+        QualityKeySd,
+        QualityKeyLd,
+        QualityKeyAudioOnly,
+        QualityKeyRealOrigin,
         QualityNames.DouyinQualityFullHd1,
         QualityNames.DouyinQualityHd1,
         QualityNames.DouyinQualitySd1,
@@ -121,6 +161,30 @@ internal sealed class DouyinParser : PlatformParserBase
     /// <summary>data 字段名（reflow 接口的外层包装）。</summary>
     private const string DataField = "data";
 
+    /// <summary>options 字段名（档位声明的外层对象）。</summary>
+    private const string OptionsField = "options";
+
+    /// <summary>qualities 字段名（档位声明数组）。</summary>
+    private const string QualitiesField = "qualities";
+
+    /// <summary>sdk_key 字段名（档位声明里的档位键）。</summary>
+    private const string SdkKeyField = "sdk_key";
+
+    /// <summary>name 字段名（档位声明里的官方中文档位名）。</summary>
+    private const string QualityNameField = "name";
+
+    /// <summary>v_bit_rate 字段名（档位声明里的视频码率）。</summary>
+    private const string VideoBitRateField = "v_bit_rate";
+
+    /// <summary>pull_datas 字段名（双屏/多路场景的档位与地址来源）。</summary>
+    private const string PullDatasField = "pull_datas";
+
+    /// <summary>live_core_sdk_data 字段名（常规场景的档位与地址来源）。</summary>
+    private const string LiveCoreSdkDataField = "live_core_sdk_data";
+
+    /// <summary>pull_data 字段名（live_core_sdk_data 下的档位与地址对象）。</summary>
+    private const string PullDataField = "pull_data";
+
     private readonly HttpTextClient _http;
 
     /// <summary>初始化解析器。</summary>
@@ -145,11 +209,15 @@ internal sealed class DouyinParser : PlatformParserBase
     /// <inheritdoc />
     protected override async Task<ResolvedRoom> OnParseAsync(RoomQuery query, CancellationToken cancellationToken)
     {
+        // 用户自备 Cookie 只作用于本次解析的请求（播放地址与中继都不带它）。
+        using IDisposable cookieScope = _http.UseCookie(query.Cookie);
         string roomId = ResolveRoomId(query);
         StreamCandidateBuilder builder = new(Platform, Logger);
 
-        ResolvedRoom? room = await TryParseRoomPageAsync(roomId, builder, cancellationToken).ConfigureAwait(false);
-        room ??= await TryParseReflowAsync(roomId, builder, cancellationToken).ConfigureAwait(false);
+        ResolvedRoom? room = await TryParseRoomPageAsync(roomId, query.PreferredQualityKey, builder, cancellationToken)
+            .ConfigureAwait(false);
+        room ??= await TryParseReflowAsync(roomId, query.PreferredQualityKey, builder, cancellationToken)
+            .ConfigureAwait(false);
 
         if (room is null)
         {
@@ -206,11 +274,13 @@ internal sealed class DouyinParser : PlatformParserBase
     /// 走主路径：解析房间页内嵌状态并组装结果。
     /// </summary>
     /// <param name="roomId">房间号。</param>
+    /// <param name="preferredQualityKey">调用方指定的档位键；为空时取最高档。</param>
     /// <param name="builder">候选构造器。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>解析结果；页面结构不可用或没有可用地址时返回 <see langword="null"/> 以便回退 reflow。</returns>
     private async Task<ResolvedRoom?> TryParseRoomPageAsync(
         string roomId,
+        string? preferredQualityKey,
         StreamCandidateBuilder builder,
         CancellationToken cancellationToken)
     {
@@ -261,8 +331,16 @@ internal sealed class DouyinParser : PlatformParserBase
             throw Fail(ResolveFailure.NotLive, RoomStateOperation, ResolveMessages.NotLive);
         }
 
-        bool added = CollectCandidates(builder, room, RoomStateOperation, out string title, out string category);
-        return added ? CreateRoom(roomId, anchorName, title, category, builder) : null;
+        (IReadOnlyList<QualityOption> qualities, string? selectedQualityKey) =
+            BuildQualityOptions(room, preferredQualityKey);
+        bool added = CollectCandidates(
+            builder,
+            room,
+            RoomStateOperation,
+            selectedQualityKey,
+            out string title,
+            out string category);
+        return added ? CreateRoom(roomId, anchorName, title, category, builder, qualities, selectedQualityKey) : null;
     }
 
     /// <summary>从房间页 HTML 中抽取 roomStore 状态 JSON 文本。</summary>
@@ -327,11 +405,13 @@ internal sealed class DouyinParser : PlatformParserBase
     /// 走回退路径：解析 reflow 接口响应并组装结果。
     /// </summary>
     /// <param name="roomId">房间号。</param>
+    /// <param name="preferredQualityKey">调用方指定的档位键；为空时取最高档。</param>
     /// <param name="builder">候选构造器。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>解析结果；reflow 响应不可用时返回 <see langword="null"/>。</returns>
     private async Task<ResolvedRoom?> TryParseReflowAsync(
         string roomId,
+        string? preferredQualityKey,
         StreamCandidateBuilder builder,
         CancellationToken cancellationToken)
     {
@@ -371,21 +451,29 @@ internal sealed class DouyinParser : PlatformParserBase
             throw Fail(ResolveFailure.NotLive, ReflowOperation, ResolveMessages.NotLive);
         }
 
-        _ = CollectCandidates(builder, room, ReflowOperation, out string title, out string category);
-        return CreateRoom(roomId, anchorName, title, category, builder);
+        (IReadOnlyList<QualityOption> qualities, string? selectedQualityKey) =
+            BuildQualityOptions(room, preferredQualityKey);
+        _ = CollectCandidates(builder, room, ReflowOperation, selectedQualityKey, out string title, out string category);
+        return CreateRoom(roomId, anchorName, title, category, builder, qualities, selectedQualityKey);
     }
 
-    /// <summary>读取抖音 room 对象的状态、标题与分区，并按画质优先级加入候选。</summary>
+    /// <summary>读取抖音 room 对象的状态、标题与分区，并按选中的画质档位加入候选。</summary>
     /// <param name="builder">候选构造器。</param>
     /// <param name="room">抖音返回的 room 对象（页面与 reflow 结构一致）。</param>
     /// <param name="operation">操作名，用于失败分类与日志。</param>
+    /// <param name="selectedQualityKey">选中的档位键；为 <see langword="null"/> 时不加入任何候选。</param>
     /// <param name="title">直播间标题，缺失时为空字符串。</param>
     /// <param name="category">直播分区，缺失时为空字符串。</param>
     /// <returns>至少加入一个候选返回 <see langword="true"/>。</returns>
-    private bool CollectCandidates(
+    /// <remarks>
+    /// 档位与地址绑定：这里只加入选中档位的地址（FLV 在前、HLS 在后），
+    /// 不混入其它档位的地址，避免播放页选中的档位被别的档位顶掉。
+    /// </remarks>
+    internal bool CollectCandidates(
         StreamCandidateBuilder builder,
         JsonElement room,
         string operation,
+        string? selectedQualityKey,
         out string title,
         out string category)
     {
@@ -403,53 +491,90 @@ internal sealed class DouyinParser : PlatformParserBase
             throw Fail(ResolveFailure.NotLive, operation, ResolveMessages.NotLive);
         }
 
-        bool addedFlv = TryAddPreferredQuality(builder, GetPropertyOrUndefined(streamUrl, FlvPullUrlField), StreamFormat.FlvHttp);
-        bool addedHls = TryAddPreferredQuality(builder, GetPropertyOrUndefined(streamUrl, HlsPullUrlMapField), StreamFormat.HlsTs);
-        return addedFlv || addedHls;
+        return selectedQualityKey is not null && TryAddSelectedQuality(builder, streamUrl, selectedQualityKey);
     }
 
-    /// <summary>按画质优先级从"画质键名 → 地址"映射中挑选唯一的最佳地址并加入候选。</summary>
+    /// <summary>加入选中档位的播放地址：FLV 优先，其次 HLS。</summary>
     /// <param name="builder">候选构造器。</param>
-    /// <param name="urlMap">画质键名到地址的映射。</param>
-    /// <param name="format">候选的容器格式。</param>
-    /// <returns>成功加入返回 <see langword="true"/>；映射缺失或全部为空字符串时返回 <see langword="false"/>。</returns>
-    private static bool TryAddPreferredQuality(StreamCandidateBuilder builder, JsonElement urlMap, StreamFormat format)
+    /// <param name="streamUrl">抖音 room.stream_url 对象。</param>
+    /// <param name="selectedQualityKey">选中的档位键。</param>
+    /// <returns>成功加入至少一个候选返回 <see langword="true"/>。</returns>
+    /// <remarks>
+    /// 地址来源依次为 <c>flv_pull_url</c>、<c>stream_url</c> 上的直接档位键、<c>hls_pull_url_map</c>；
+    /// 选中档位没有可用地址时记 Warn 并返回 <see langword="false"/>（由调用方决定回退路径）。
+    /// </remarks>
+    private bool TryAddSelectedQuality(
+        StreamCandidateBuilder builder,
+        JsonElement streamUrl,
+        string selectedQualityKey)
     {
-        if (urlMap.ValueKind != JsonValueKind.Object)
+        StreamQuality quality = MapDouyinQuality(selectedQualityKey);
+        bool added = false;
+
+        string? flvUrl = ReadMappedQualityUrl(streamUrl, FlvPullUrlField, selectedQualityKey)
+            ?? ReadDirectQualityUrl(streamUrl, selectedQualityKey);
+        if (!string.IsNullOrWhiteSpace(flvUrl))
         {
-            return false;
-        }
-
-        foreach (string qualityName in QualityPreferenceOrder)
-        {
-            if (!urlMap.TryGetProperty(qualityName, out JsonElement urlElement)
-                || urlElement.ValueKind != JsonValueKind.String)
-            {
-                continue;
-            }
-
-            string? url = urlElement.GetString();
-            if (string.IsNullOrWhiteSpace(url))
-            {
-                continue;
-            }
-
-            bool added = builder.TryAdd(
-                url,
-                format,
+            added |= builder.TryAdd(
+                flvUrl,
+                StreamFormat.FlvHttp,
                 VideoCodec.Avc,
-                QualityNames.FromDouyinQualityName(qualityName),
+                quality,
                 expiresAt: null,
                 referer: RoomUrlReferer,
-                cdnHost: TryGetHost(url));
-
-            if (added)
-            {
-                return true;
-            }
+                cdnHost: TryGetHost(flvUrl));
         }
 
-        return false;
+        string? hlsUrl = ReadMappedQualityUrl(streamUrl, HlsPullUrlMapField, selectedQualityKey);
+        if (!string.IsNullOrWhiteSpace(hlsUrl))
+        {
+            added |= builder.TryAdd(
+                hlsUrl,
+                StreamFormat.HlsTs,
+                VideoCodec.Avc,
+                quality,
+                expiresAt: null,
+                referer: RoomUrlReferer,
+                cdnHost: TryGetHost(hlsUrl));
+        }
+
+        if (!added)
+        {
+            Logger.Warn(ModuleName, "抖音选中档位没有可用地址。", new Dictionary<string, object?>
+            {
+                ["operation"] = StreamUrlOperation,
+                ["qualityKey"] = selectedQualityKey,
+            });
+        }
+
+        return added;
+    }
+
+    /// <summary>把抖音的拉流档位键映射为内部画质档位。</summary>
+    /// <param name="qualityKey">拉流档位键（<c>origin</c>、<c>FULL_HD1</c> 等）。</param>
+    /// <returns>内部画质档位；无法判定时返回 <see cref="StreamQuality.Unknown"/>。</returns>
+    /// <remarks>
+    /// 老式分辨率键沿用 <see cref="QualityNames.FromDouyinQualityName"/> 的映射，
+    /// 新档位键只在内部做粗粒度近似（面向用户的档位名以 <see cref="QualityOption.Label"/> 为准）。
+    /// </remarks>
+    private static StreamQuality MapDouyinQuality(string qualityKey)
+    {
+        StreamQuality known = QualityNames.FromDouyinQualityName(qualityKey);
+        if (known != StreamQuality.Unknown)
+        {
+            return known;
+        }
+
+        return qualityKey switch
+        {
+            QualityKeyOrigin => StreamQuality.Hd1080HighFps,
+            QualityKeyRealOrigin => StreamQuality.Hd1080HighFps,
+            QualityKeyUhd => StreamQuality.Hd1080,
+            QualityKeyHd => StreamQuality.Hd1080,
+            QualityKeySd => StreamQuality.Hd720,
+            QualityKeyLd => StreamQuality.Sd480,
+            _ => StreamQuality.Unknown,
+        };
     }
 
     /// <summary>读取直播分区：优先二级分区标题，其次一级分区标题，都缺失时为空字符串。</summary>
@@ -468,13 +593,17 @@ internal sealed class DouyinParser : PlatformParserBase
     /// <param name="title">直播间标题。</param>
     /// <param name="category">直播分区。</param>
     /// <param name="builder">候选构造器。</param>
+    /// <param name="qualities">本次可选的画质档位。</param>
+    /// <param name="selectedQualityKey">候选实际使用的档位键。</param>
     /// <returns>解析结果。</returns>
     private ResolvedRoom CreateRoom(
         string roomId,
         string anchor,
         string title,
         string category,
-        StreamCandidateBuilder builder) => new()
+        StreamCandidateBuilder builder,
+        IReadOnlyList<QualityOption> qualities,
+        string? selectedQualityKey) => new()
         {
             Platform = Platform,
             RoomId = roomId,
@@ -483,7 +612,363 @@ internal sealed class DouyinParser : PlatformParserBase
             Category = category,
             Candidates = builder.Build(),
             ResolvedAt = DateTimeOffset.UtcNow,
+            Qualities = qualities,
+            SelectedQualityKey = selectedQualityKey,
         };
+
+    /// <summary>
+    /// 构造抖音的画质档位列表，并决定本次实际使用的档位。
+    /// </summary>
+    /// <param name="room">抖音返回的 room 对象（房间页与 reflow 结构一致）。</param>
+    /// <param name="preferredQualityKey">调用方指定的档位键；为空或 <c>best</c> 时取最高档。</param>
+    /// <returns>档位列表（从高到低）与选中的档位键；没有任何可用档位时为（空列表，<see langword="null"/>）。</returns>
+    /// <remarks>
+    /// 档位声明优先取 <c>stream_url</c> 下的 <c>options.qualities[]</c>（每项含 <c>sdk_key</c>/<c>name</c>/<c>v_bit_rate</c>），
+    /// 但只保留能在流地址里找到对应地址的档位；声明不可用或与地址键不同名时退回按
+    /// <c>flv_pull_url</c>、<c>hls_pull_url_map</c> 与 <c>stream_url</c> 上的档位键枚举。
+    /// 档位键无法命中时回退到最高档并记 Warn（不抛异常）。
+    /// </remarks>
+    internal (IReadOnlyList<QualityOption> Qualities, string? SelectedKey) BuildQualityOptions(
+        JsonElement room,
+        string? preferredQualityKey)
+    {
+        JsonElement streamUrl = GetPropertyOrUndefined(room, StreamUrlField);
+        List<DouyinQualityDeclaration> declared = ReadDeclaredQualities(streamUrl);
+        List<string> available = [];
+        foreach (DouyinQualityDeclaration declaration in declared)
+        {
+            if (HasQualityUrl(streamUrl, declaration.Key))
+            {
+                AddQualityKey(available, declaration.Key);
+            }
+        }
+
+        if (available.Count == 0)
+        {
+            available = ReadMappedQualityKeys(streamUrl);
+        }
+
+        if (available.Count == 0)
+        {
+            Logger.Warn(ModuleName, "抖音响应没有可用的画质档位。", new Dictionary<string, object?>
+            {
+                ["operation"] = StreamUrlOperation,
+            });
+
+            IReadOnlyList<QualityOption> empty = [];
+            return (empty, null);
+        }
+
+        List<string> ordered = available
+            .OrderByDescending(static key => RankQualityKey(key))
+            .ToList();
+        List<QualityOption> qualities = [];
+        foreach (string key in ordered)
+        {
+            DouyinQualityDeclaration? declaration = FindDeclaration(declared, key);
+            qualities.Add(new QualityOption
+            {
+                Key = key,
+                Label = declaration?.Name is { Length: > 0 } name ? name : DescribeQualityKey(key),
+                BitrateKbps = declaration?.BitrateKbps,
+                IsBest = qualities.Count == 0,
+            });
+        }
+
+        string? selected = MatchPreferredQuality(qualities, preferredQualityKey) ?? qualities[0].Key;
+        return (qualities, selected);
+    }
+
+    /// <summary>
+    /// 在档位列表中查找调用方指定的档位键。
+    /// </summary>
+    /// <param name="qualities">可用档位列表。</param>
+    /// <param name="preferredQualityKey">调用方指定的档位键。</param>
+    /// <returns>命中的档位键；未指定或无法命中时返回 <see langword="null"/>。</returns>
+    /// <remarks>无法命中时记 Warn 并使用最高档，而不是让解析失败。</remarks>
+    private string? MatchPreferredQuality(IReadOnlyList<QualityOption> qualities, string? preferredQualityKey)
+    {
+        if (string.IsNullOrWhiteSpace(preferredQualityKey)
+            || string.Equals(preferredQualityKey, QualityOption.BestFlag, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        foreach (QualityOption option in qualities)
+        {
+            if (string.Equals(option.Key, preferredQualityKey, StringComparison.OrdinalIgnoreCase))
+            {
+                return option.Key;
+            }
+        }
+
+        Logger.Warn(ModuleName, "抖音档位键无法命中，回退到最高档。", new Dictionary<string, object?>
+        {
+            ["operation"] = StreamUrlOperation,
+            ["preferredQualityKey"] = preferredQualityKey,
+            ["fallbackQualityKey"] = qualities[0].Key,
+        });
+
+        return null;
+    }
+
+    /// <summary>
+    /// 读取官方声明的档位列表（<c>options.qualities[]</c>）。
+    /// </summary>
+    /// <param name="streamUrl">抖音 room.stream_url 对象。</param>
+    /// <returns>档位声明列表（按键去重，保持响应顺序）；没有声明时为空列表。</returns>
+    /// <remarks>
+    /// 两条已知路径：双屏/多路场景的 <c>pull_datas[0].options.qualities</c>，
+    /// 与常规场景的 <c>live_core_sdk_data.pull_data.options.qualities</c>；两者都缺失时退回 <c>options.qualities</c>。
+    /// </remarks>
+    private static List<DouyinQualityDeclaration> ReadDeclaredQualities(JsonElement streamUrl)
+    {
+        JsonElement qualities = FindDeclaredQualitiesNode(streamUrl);
+        List<DouyinQualityDeclaration> declarations = [];
+        if (qualities.ValueKind != JsonValueKind.Array)
+        {
+            return declarations;
+        }
+
+        foreach (JsonElement item in qualities.EnumerateArray())
+        {
+            string? key = ReadString(item, SdkKeyField);
+            if (string.IsNullOrWhiteSpace(key) || FindDeclaration(declarations, key) is not null)
+            {
+                continue;
+            }
+
+            declarations.Add(new DouyinQualityDeclaration(
+                key,
+                ReadString(item, QualityNameField),
+                ReadBitrateKbps(item, VideoBitRateField)));
+        }
+
+        return declarations;
+    }
+
+    /// <summary>按优先级定位档位声明数组。</summary>
+    /// <param name="streamUrl">抖音 room.stream_url 对象。</param>
+    /// <returns>档位声明数组；均缺失时返回未定义元素。</returns>
+    private static JsonElement FindDeclaredQualitiesNode(JsonElement streamUrl)
+    {
+        JsonElement pullDatas = GetPropertyOrUndefined(streamUrl, PullDatasField);
+        if (pullDatas.ValueKind == JsonValueKind.Array && pullDatas.GetArrayLength() > 0)
+        {
+            JsonElement fromPullDatas = GetNestedProperty(pullDatas[0], OptionsField, QualitiesField);
+            if (fromPullDatas.ValueKind == JsonValueKind.Array && fromPullDatas.GetArrayLength() > 0)
+            {
+                return fromPullDatas;
+            }
+        }
+
+        JsonElement fromSdkData = GetNestedProperty(
+            streamUrl,
+            LiveCoreSdkDataField,
+            PullDataField,
+            OptionsField,
+            QualitiesField);
+        if (fromSdkData.ValueKind == JsonValueKind.Array && fromSdkData.GetArrayLength() > 0)
+        {
+            return fromSdkData;
+        }
+
+        return GetNestedProperty(streamUrl, OptionsField, QualitiesField);
+    }
+
+    /// <summary>
+    /// 从流地址映射的键中枚举档位键。
+    /// </summary>
+    /// <param name="streamUrl">抖音 room.stream_url 对象。</param>
+    /// <returns>档位键列表（保持响应中的出现顺序，已按键去重）。</returns>
+    private static List<string> ReadMappedQualityKeys(JsonElement streamUrl)
+    {
+        List<string> keys = [];
+        AddQualityKeysFromMap(streamUrl, FlvPullUrlField, keys);
+        AddQualityKeysFromMap(streamUrl, HlsPullUrlMapField, keys);
+        AddDirectQualityKeys(streamUrl, keys);
+        return keys;
+    }
+
+    /// <summary>收集"档位键 → 地址"映射里的档位键。</summary>
+    /// <param name="streamUrl">抖音 room.stream_url 对象。</param>
+    /// <param name="mapName">映射字段名。</param>
+    /// <param name="keys">已收集的档位键（原地追加）。</param>
+    private static void AddQualityKeysFromMap(JsonElement streamUrl, string mapName, List<string> keys)
+    {
+        JsonElement map = GetPropertyOrUndefined(streamUrl, mapName);
+        if (map.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        foreach (JsonProperty property in map.EnumerateObject())
+        {
+            if (property.Value.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(property.Value.GetString()))
+            {
+                AddQualityKey(keys, property.Name);
+            }
+        }
+    }
+
+    /// <summary>收集 <c>stream_url</c> 上直接给出的已知档位键。</summary>
+    /// <param name="streamUrl">抖音 room.stream_url 对象。</param>
+    /// <param name="keys">已收集的档位键（原地追加）。</param>
+    private static void AddDirectQualityKeys(JsonElement streamUrl, List<string> keys)
+    {
+        if (streamUrl.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        foreach (JsonProperty property in streamUrl.EnumerateObject())
+        {
+            if (IsKnownQualityKey(property.Name)
+                && property.Value.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(property.Value.GetString()))
+            {
+                AddQualityKey(keys, property.Name);
+            }
+        }
+    }
+
+    /// <summary>按键去重地追加档位键（忽略大小写）。</summary>
+    /// <param name="keys">已收集的档位键。</param>
+    /// <param name="qualityKey">待追加的档位键。</param>
+    private static void AddQualityKey(List<string> keys, string qualityKey)
+    {
+        foreach (string existing in keys)
+        {
+            if (string.Equals(existing, qualityKey, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+        }
+
+        keys.Add(qualityKey);
+    }
+
+    /// <summary>在档位声明中查找指定档位键。</summary>
+    /// <param name="declarations">档位声明列表。</param>
+    /// <param name="qualityKey">档位键。</param>
+    /// <returns>命中的声明；未命中时返回 <see langword="null"/>。</returns>
+    private static DouyinQualityDeclaration? FindDeclaration(
+        List<DouyinQualityDeclaration> declarations,
+        string qualityKey)
+    {
+        foreach (DouyinQualityDeclaration declaration in declarations)
+        {
+            if (string.Equals(declaration.Key, qualityKey, StringComparison.OrdinalIgnoreCase))
+            {
+                return declaration;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>判断档位在流地址里是否存在可用地址。</summary>
+    /// <param name="streamUrl">抖音 room.stream_url 对象。</param>
+    /// <param name="qualityKey">档位键。</param>
+    /// <returns>FLV、直接键或 HLS 任一来源有地址时返回 <see langword="true"/>。</returns>
+    private static bool HasQualityUrl(JsonElement streamUrl, string qualityKey) =>
+        !string.IsNullOrWhiteSpace(ReadMappedQualityUrl(streamUrl, FlvPullUrlField, qualityKey))
+        || !string.IsNullOrWhiteSpace(ReadDirectQualityUrl(streamUrl, qualityKey))
+        || !string.IsNullOrWhiteSpace(ReadMappedQualityUrl(streamUrl, HlsPullUrlMapField, qualityKey));
+
+    /// <summary>读取"档位键 → 地址"映射中的地址。</summary>
+    /// <param name="streamUrl">抖音 room.stream_url 对象。</param>
+    /// <param name="mapName">映射字段名。</param>
+    /// <param name="qualityKey">档位键。</param>
+    /// <returns>地址；映射缺失或该档位没有地址时返回 <see langword="null"/>。</returns>
+    private static string? ReadMappedQualityUrl(JsonElement streamUrl, string mapName, string qualityKey)
+    {
+        JsonElement map = GetPropertyOrUndefined(streamUrl, mapName);
+        return map.ValueKind == JsonValueKind.Object ? ReadString(map, qualityKey) : null;
+    }
+
+    /// <summary>读取 <c>stream_url</c> 上直接以档位键给出的地址。</summary>
+    /// <param name="streamUrl">抖音 room.stream_url 对象。</param>
+    /// <param name="qualityKey">档位键。</param>
+    /// <returns>地址；该键不是字符串时返回 <see langword="null"/>。</returns>
+    private static string? ReadDirectQualityUrl(JsonElement streamUrl, string qualityKey) =>
+        ReadString(streamUrl, qualityKey);
+
+    /// <summary>判断档位键是否属于已知的拉流档位。</summary>
+    /// <param name="qualityKey">档位键。</param>
+    /// <returns>属于已知档位返回 <see langword="true"/>。</returns>
+    private static bool IsKnownQualityKey(string qualityKey) => RankQualityKey(qualityKey) > 0;
+
+    /// <summary>计算档位排序权重：越靠前的已知档位权重越大，未知档位为 0。</summary>
+    /// <param name="qualityKey">档位键。</param>
+    /// <returns>排序权重。</returns>
+    private static int RankQualityKey(string qualityKey)
+    {
+        for (int index = 0; index < KnownQualityKeyOrder.Length; index++)
+        {
+            if (string.Equals(KnownQualityKeyOrder[index], qualityKey, StringComparison.OrdinalIgnoreCase))
+            {
+                return KnownQualityKeyOrder.Length - index;
+            }
+        }
+
+        return 0;
+    }
+
+    /// <summary>生成档位的显示名：优先响应给出的官方名称，缺失时用内置中文映射。</summary>
+    /// <param name="qualityKey">档位键。</param>
+    /// <returns>显示名；未知档位键返回键名本身。</returns>
+    private static string DescribeQualityKey(string qualityKey) => qualityKey switch
+    {
+        QualityKeyOrigin => "原画",
+        QualityKeyUhd => "蓝光",
+        QualityKeyHd => "超清",
+        QualityKeySd => "高清",
+        QualityKeyLd => "标清",
+        QualityKeyAudioOnly => "音频流",
+        QualityKeyRealOrigin => "真原画",
+        QualityNames.DouyinQualityFullHd1 => "高清",
+        QualityNames.DouyinQualityHd1 => "标清",
+        QualityNames.DouyinQualitySd1 => "流畅",
+        QualityNames.DouyinQualitySd2 => "流畅",
+        _ => qualityKey,
+    };
+
+    /// <summary>
+    /// 读取码率字段并归一化为 kbps。
+    /// </summary>
+    /// <param name="element">父元素。</param>
+    /// <param name="name">字段名。</param>
+    /// <returns>kbps 码率；字段缺失或不是正数时返回 <see langword="null"/>。</returns>
+    /// <remarks>
+    /// 抖音 <c>v_bit_rate</c> 的单位未经官方确认：不小于 <see cref="BitrateBpsThreshold"/> 时按 bps 换算，
+    /// 否则按 kbps 直接使用（两种取值都能得到合理的 kbps 数量级）。
+    /// </remarks>
+    private static int? ReadBitrateKbps(JsonElement element, string name)
+    {
+        int? raw = ReadInt32(element, name);
+        if (raw is null)
+        {
+            string? text = ReadString(element, name);
+            raw = int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed)
+                ? parsed
+                : null;
+        }
+
+        if (raw is not { } value || value <= 0)
+        {
+            return null;
+        }
+
+        return value >= BitrateBpsThreshold ? value / BitsPerKilobit : value;
+    }
+
+    /// <summary>官方档位声明。</summary>
+    /// <param name="Key">档位键（<c>sdk_key</c>）。</param>
+    /// <param name="Name">官方中文档位名；缺失时为 <see langword="null"/>。</param>
+    /// <param name="BitrateKbps">归一化后的码率（kbps）；缺失时为 <see langword="null"/>。</param>
+    private sealed record DouyinQualityDeclaration(string Key, string? Name, int? BitrateKbps);
 
     /// <summary>按路径逐层读取对象属性；任意一层缺失或不是对象时返回未定义元素。</summary>
     /// <param name="element">起始元素。</param>

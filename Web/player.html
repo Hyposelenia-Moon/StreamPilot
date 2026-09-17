@@ -173,11 +173,44 @@
       flex: 1 1 auto;
     }
 
+    /* 画质档位：与全屏按钮同高，仅在平台给出多档时显示 */
+    #qualityBox {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-right: 10px;
+      white-space: nowrap;
+    }
+
+    #qualityBox.hidden {
+      display: none;
+    }
+
+    #qualityBox .qualityLabel {
+      color: #5b6472;
+    }
+
+    #qualitySelect {
+      cursor: pointer;
+      border-radius: 6px;
+      padding: 4px 8px;
+      border: 1px solid #c7cdd6;
+      background: #ffffff;
+      color: #1f2329;
+      font-family: inherit;
+      font-size: inherit;
+      max-width: 220px;
+    }
+
+    #qualitySelect:hover {
+      border-color: #1b4fd8;
+    }
+
     #stage {
       position: relative;
       flex: 1 1 auto;
-      /* 空画面用浅色底，避免整块黑板；有画面后由视频内容覆盖 */
-      background: #eef0f4;
+      /* 空画面用极浅的竖向渐变，比一整块灰底更耐看；有画面后由视频内容覆盖 */
+      background: linear-gradient(180deg, #fbfcfd 0%, #e8ecf2 100%);
       min-height: 0;
     }
 
@@ -198,18 +231,49 @@
       z-index: 2;
       max-width: 82%;
       padding: 14px 18px;
-      border-radius: 10px;
-      background: rgba(255, 255, 255, 0.95);
-      border: 1px solid #e2e5ea;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.97);
+      border: 1px solid #e4e8ee;
+      box-shadow: 0 10px 26px rgba(31, 35, 41, 0.07);
       color: #1f2329;
       text-align: center;
       white-space: pre-wrap;
       pointer-events: none;
     }
 
+    /* 空态：图标 + 标题 + 一句操作提示，代替原来只有一行字的白条 */
     #hint.empty {
-      font-size: 15px;
-      padding: 26px 34px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      font-size: 16px;
+      font-weight: 600;
+      padding: 30px 44px;
+      border-radius: 16px;
+      box-shadow: 0 16px 40px rgba(31, 35, 41, 0.1);
+    }
+
+    #hint.empty::before {
+      content: '▶';
+      display: block;
+      width: 48px;
+      height: 48px;
+      line-height: 48px;
+      padding-left: 4px;
+      margin-bottom: 6px;
+      border-radius: 50%;
+      background: #eaf1fe;
+      color: #1b4fd8;
+      font-size: 18px;
+      box-sizing: border-box;
+    }
+
+    #hint.empty::after {
+      content: '解析房间后点「开始播放」';
+      font-size: 13px;
+      font-weight: 400;
+      color: #5b6472;
     }
 
     #hint[data-level="warn"] {
@@ -314,6 +378,10 @@
     <header>
       <span id="modeHint" class="hintText">等待直播源</span>
       <span class="spacer"></span>
+      <label id="qualityBox" class="hidden" for="qualitySelect">
+        <span class="qualityLabel">画质</span>
+        <select id="qualitySelect"></select>
+      </label>
       <button type="button" id="fsBtn" title="全屏（双击画面同样可切换）">全屏</button>
     </header>
 
@@ -372,6 +440,8 @@
         volDisplay: document.getElementById('volDisplay'),
         modeHint: document.getElementById('modeHint'),
         fsBtn: document.getElementById('fsBtn'),
+        qualityBox: document.getElementById('qualityBox'),
+        qualitySelect: document.getElementById('qualitySelect'),
         toggleLog: document.getElementById('toggleLog'),
         stage: document.getElementById('stage'),
       };
@@ -392,6 +462,7 @@
         telemetryTimer: null,
         refreshRequested: false,
         capabilities: { hevc: false, avc: false },
+        qualityKey: '',
       };
 
       const hevcMseSupported = Boolean(window.MediaSource)
@@ -907,7 +978,7 @@
         destroyPlayer();
         state.currentStreamUrl = '';
         updateModeHint();
-        setHintLocked('所有候选线路均不可用，正在请主程序重新解析…\n' + reason, 'error', 10000);
+        setHintLocked('播放失败：所有线路都连不上（可能未开播、地区受限或网络问题）。\n正在请主程序重新解析…\n' + reason, 'error', 10000);
         report(outbound.REFRESH_NEEDED, reason, run, run.currentCandidate);
       }
 
@@ -1198,6 +1269,37 @@
           const hidden = elements.log.classList.toggle('hidden');
           elements.toggleLog.textContent = hidden ? '显示日志' : '隐藏日志';
         });
+
+        elements.qualitySelect.addEventListener('change', function onQualityChange() {
+          const key = elements.qualitySelect.value;
+          if (!key || key === state.qualityKey) {
+            return;
+          }
+
+          state.qualityKey = key;
+          report(outbound.QUALITY, '切换画质：' + (elements.qualitySelect.selectedOptions[0]?.textContent || key), state.run, state.run?.currentCandidate, { key: key });
+        });
+      }
+
+      /**
+       * 渲染画质下拉：平台只给一档时隐藏整个控件。
+       * @param {object} payload 宿主下发的 play 消息。
+       */
+      function renderQualities(payload) {
+        const normalized = core.normalizeQualities(payload?.qualities, payload?.selectedQualityKey);
+        state.qualityKey = normalized.selectedKey;
+        elements.qualitySelect.replaceChildren();
+        for (const item of normalized.items) {
+          const option = document.createElement('option');
+          option.value = item.key;
+          option.textContent = item.label;
+          option.selected = item.selected;
+          elements.qualitySelect.appendChild(option);
+        }
+
+        const multiple = normalized.items.length > 1;
+        elements.qualityBox.classList.toggle('hidden', !multiple);
+        elements.qualitySelect.disabled = !multiple;
       }
 
       /** 处理来自宿主的消息。 */
@@ -1208,6 +1310,7 @@
 
         switch (payload.type) {
           case core.INBOUND_MESSAGE_TYPES.PLAY:
+            renderQualities(payload);
             void handlePlay(payload);
             break;
           case core.INBOUND_MESSAGE_TYPES.CHASE:

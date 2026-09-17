@@ -137,6 +137,22 @@ PlatformParserBase (Core.Parsers)
 - **斗鱼/YY/Bigo**：CDN host 取 URL `Host`，画质 `Unknown`（除斗鱼 `rate` 参数已知时映射）。
 - 所有 URL 的合法性在使用前校验：`Uri.TryCreate` + scheme 必须为 `http`/`https`/`rtmp`，非法候选直接丢弃并记 `Warn`。
 
+### 6.1 画质档位（`QualityOption`）
+
+`StreamQuality` 只是"粗档位枚举"，不足以表达各平台官方档位（B站 杜比/4K/HDR、虎牙 蓝光20M/2K HDR、抖音 原画…）。因此在 Core 增加：
+
+- `QualityOption { Key, Label, BitrateKbps?, IsBest }`：`Key` 由平台解释（B站 `qn` 数值、虎牙码率、斗鱼 `rate`、抖音拉流键），`Label` 是**面向用户的官方档位名**；
+- `RoomQuery.PreferredQualityKey`：调用方（UI）指定的档位；为空表示"平台最高档"；
+- `ResolvedRoom.Qualities` / `SelectedQualityKey`：本次可选的档位列表与实际生效档位；
+- `PlaybackPlan.Qualities` / `SelectedQualityKey`：随播放计划下发给页面，页面渲染画质下拉；用户改档时页面回 `quality` 消息，宿主按新档位重新解析并重新下发计划。
+
+约束：
+
+1. **档位键与地址通常绑定**：换档必须重新请求平台接口（虎牙可以复用签名后追加 `ratio`，斗鱼/B站必须重取），因此不允许在候选列表里混入多档位地址；
+2. 解析器对未知键必须**回退到最高档**并记 `Warn`，而不是失败；
+3. 档位名以平台返回的名称为准，平台没给名字时才使用内置中文映射（避免自造档位名误导用户）；
+4. 未确认语义的档位（例如 YY `gear`）只在列表里放一项"默认（平台给定）"，不在文档或 UI 中宣称它等于某个画质。
+
 ### 7. URL 有效期校验（`CLAUDE.md` 硬性要求）
 
 - `CandidateValidity.EnsureUsable(candidate, now)`：若 `ExpiresAt` 已过 → 抛 `ResolveException(NetworkError, "候选流地址已过期")`；无法判定有效期时允许使用，但在 `PlaybackCoordinator` 中以"首帧/探测失败即切换候选"兜底。

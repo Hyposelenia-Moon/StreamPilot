@@ -58,4 +58,10 @@ public sealed record PlaybackPlan
 
     /// <summary>提示信息，可能为 <see langword="null"/>。</summary>
     public string? Hint { get; init; }
+
+    /// <summary>当前房间可选的画质档位（播放页据此渲染下拉框）。</summary>
+    public IReadOnlyList<QualityOption> Qualities { get; init; } = [];
+
+    /// <summary>当前候选使用的画质档位键，可为 <see langword="null"/>（平台单档）。</summary>
+    public string? SelectedQualityKey { get; init; }
 }

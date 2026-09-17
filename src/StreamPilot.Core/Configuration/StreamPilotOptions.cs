@@ -114,10 +114,44 @@ public sealed record NetworkOptions
 }
 
 /// <summary>平台凭据设置。</summary>
+/// <remarks>
+/// Cookie 只用于"解析"请求（换取最高画质与多档位），播放地址本身不带登录态、
+/// 播放过程中也不会把 Cookie 发给 CDN，因此主播看不到这位观众；
+/// 所有 Cookie 只写入本机配置文件，日志一律脱敏。
+/// </remarks>
 public sealed record PlatformOptions
 {
     /// <summary>B站 Cookie（可留空，留空时匿名解析）。</summary>
     public string BilibiliCookie { get; init; } = string.Empty;
+
+    /// <summary>抖音 Cookie（可留空）。</summary>
+    public string DouyinCookie { get; init; } = string.Empty;
+
+    /// <summary>虎牙 Cookie（可留空；部分房间的最高码率需要登录态）。</summary>
+    public string HuyaCookie { get; init; } = string.Empty;
+
+    /// <summary>斗鱼 Cookie（可留空）。</summary>
+    public string DouyuCookie { get; init; } = string.Empty;
+
+    /// <summary>YY Cookie（可留空）。</summary>
+    public string YyCookie { get; init; } = string.Empty;
+
+    /// <summary>Bigo Cookie（可留空）。</summary>
+    public string BigoCookie { get; init; } = string.Empty;
+
+    /// <summary>按平台取对应的 Cookie。</summary>
+    /// <param name="platform">平台标识。</param>
+    /// <returns>Cookie 文本；未配置时为空字符串。</returns>
+    public string ForPlatform(PlatformId platform) => platform switch
+    {
+        PlatformId.Bilibili => BilibiliCookie,
+        PlatformId.Douyin => DouyinCookie,
+        PlatformId.Huya => HuyaCookie,
+        PlatformId.Douyu => DouyuCookie,
+        PlatformId.Yy => YyCookie,
+        PlatformId.Bigo => BigoCookie,
+        _ => string.Empty,
+    };
 }
 
 /// <summary>日志设置。</summary>

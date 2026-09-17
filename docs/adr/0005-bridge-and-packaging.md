@@ -35,16 +35,43 @@
 |---|---|---|---|
 | `GET` | `/health` | 存活探测 | 返回 `{"status":"ok","version":"x.y.z","port":N}` |
 | `GET` | `/play?url=<enc>&title=<enc>` | 用 mpv 播放指定 URL | 校验 `url` scheme 为 `http/https/rtmp`；启动失败返回 500；成功 200 `ok` |
-| `GET` | `/relay/register`（POST body） | 注册一个待中继的上游 URL，返回本地 URL | 用于浏览器直接播放需要 `Referer`/Cookie 的流（B站 FLV、抖音 FLV）；返回 `http://127.0.0.1:{port}/relay/{token}` |
-| `GET` | `/relay/{token}` | 中继上游流 | 透传 `Range`/`Content-Type`/`Content-Length`，注入上游 `Referer`/`UA`；支持 `HEAD`；客户端断开即取消上游请求 |
+| `GET` | `/relay/register`（POST body） | 注册一个待中继的上游 URL，返回本地 URL | 用于浏览器直接播放需要 `Referer`/Cookie 的流；body 可带 `kind: "hls"` 表示播放列表；返回 `http://127.0.0.1:{port}/relay/{token}` |
+| `GET` | `/relay/{token}` | 中继上游流 | 透传 `Range`/`Content-Type`/`Content-Length`/`Accept-Ranges`/`Content-Range`，注入上游 `Referer`；客户端断开即取消上游请求 |
 | `OPTIONS` | 任意 | CORS 预检 | 返回 204 + CORS 头；**仅此处**携带 `Access-Control-Allow-Private-Network: true` |
 | `GET` | `/web/*` | 播放页与静态资源 | 仅当未使用 WebView2 虚拟主机映射时的回退路径（用于外部浏览器调试） |
 
-- 响应头（所有响应）：`Access-Control-Allow-Origin: *`（仅回环地址，风险可接受）、`Access-Control-Allow-Methods: GET, POST, HEAD, OPTIONS`、`Access-Control-Allow-Headers: *`、`Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges`、`Cache-Control: no-store`。
+- 响应头（所有响应，**含中继响应**）：`Access-Control-Allow-Origin: *`（仅回环地址，风险可接受）、`Access-Control-Allow-Methods: GET, POST, HEAD, OPTIONS`、`Access-Control-Allow-Headers: *`、`Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges`、`Cache-Control: no-store`。
 - **修复参考项目缺陷**：`Access-Control-Allow-Private-Network` 只在 `OPTIONS` 且请求头包含 `Access-Control-Request-Private-Network: true` 时返回。
 - 中继 token：32 字节 `RandomNumberGenerator` → Base64Url；内存字典 `token → RelayTarget`，上限 64 条，10 分钟未访问淘汰；**不落盘**（避免把签名 URL 持久化）。
 - 所有处理器都必须 try/catch 并返回结构化错误（`{"error":"..."}`），**禁止吞异常**：捕获后记录 `Error` 日志并把摘要返回给调用方。
 - 关闭流程：`HttpListener.Stop()` + 取消所有进行中的中继 `CancellationTokenSource`，`Dispose` 幂等。
+
+#### 2.1 为什么"所有 Web 候选都走本地中继"
+
+播放页的源是 `https://appassets.local`，而多数平台只给 `http://` 的 FLV/HLS 地址，且要求 `Referer`：
+
+1. `http://` 流在 `https://` 页面里属于**混合内容**，Chromium 直接拦掉（表现就是 `Failed to fetch`）；
+2. 平台 CDN 不返回 CORS 头，页面 `fetch(mode:'cors')` 探测同样失败；
+3. 部分 CDN 校验 `Referer`，直连会 403。
+
+因此 `PlaybackCoordinator` 把**每一个**可播候选都注册成本地中继地址（回环地址被视为"可信来源"，不受混合内容限制），
+由桥接服务在服务端携带 `Referer` 拉流并补上 CORS 头。代价是多一跳回环转发（带宽开销可忽略）。
+
+#### 2.2 HLS 播放列表重写（`kind: "hls"`）
+
+只中继 m3u8 本身没用：播放列表里的切片地址仍指向 `http://` CDN，页面照样被拦。
+因此中继对 `RelayKind.HlsPlaylist` 的请求会：
+
+1. 拉取上游播放列表（带 `Referer`）；
+2. 把每个切片/子播放列表行改写成本地中继地址（`.m3u8` 结尾的子项按播放列表递归注册）；
+3. 改写 `#EXT-X-KEY` / `#EXT-X-MAP` 等标签里的 `URI="..."` 属性；
+4. 返回 `application/vnd.apple.mpegurl`；
+5. 每次刷新播放列表时释放上一轮登记的子节点（直播播放列表会周期性重取，避免 token 堆积）。
+
+#### 2.3 长连接超时
+
+中继是长连接，`HttpClient.Timeout` 必须为 `Timeout.InfiniteTimeSpan`（否则默认超时会在 30 秒左右把直播流一起取消），
+断流判定改由"空闲超时"负责：只要持续有数据就不计时，连续 30 秒没有新数据才断开并记 `Warn`；建连超时单独设为 10 秒。
 
 ### 3. Web 播放宿主：WebView2 虚拟主机 + 消息桥
 

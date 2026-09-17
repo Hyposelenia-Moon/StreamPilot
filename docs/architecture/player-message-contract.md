@@ -24,6 +24,11 @@
   "mode": "extreme",
   "extremeTargetMs": 250,
   "title": "直播间标题",
+  "selectedQualityKey": "20000",
+  "qualities": [
+    { "key": "20000", "label": "4K 原画", "bitrateKbps": 20000, "isBest": true },
+    { "key": "10000", "label": "原画（1080P 高帧率）", "bitrateKbps": null, "isBest": false }
+  ],
   "candidates": [
     {
       "sourceIndex": 0,
@@ -45,6 +50,12 @@
 | `mode` | ✅ | `extreme`（极限追帧）或 `stable`（稳定缓冲） |
 | `extremeTargetMs` | ✅ | 仅 150 / 200 / 250 有效，其他值页面回落为 200 ms |
 | `title` | ➖ | 用于 mpv 窗口标题 |
+| `qualities` | ➖ | 平台可选画质档位；≤1 项时页面隐藏画质下拉 |
+| `qualities[].key` | ✅ | 平台档位键（B站 qn、虎牙码率、斗鱼 rate、抖音拉流键…），页面原样回传 |
+| `qualities[].label` | ✅ | 档位显示名（尽量与官方直播间一致） |
+| `qualities[].bitrateKbps` | ➖ | 码率（kbps），有则在下拉里显示 |
+| `qualities[].isBest` | ➖ | 是否最高档 |
+| `selectedQualityKey` | ➖ | 当前候选对应的档位键；页面据此选中下拉项 |
 | `candidates[].url` | ✅ | 页面可直接读取的地址（必要时为本地中继地址） |
 | `candidates[].sourceIndex` | ✅ | 源索引，用于诊断与去重 |
 | `candidates[].format` | ✅ | `flv` / `ts` / `hls` / `fmp4`；`fmp4|ts|hls` 走 hls.js，其余走 mpegts.js |
@@ -128,6 +139,7 @@
 | `error` | 终止性问题（含 HEVC 不受支持） | `errorMessage` |
 | `reconnecting` | 断流后重连 | `reconnectCount` |
 | `refresh-needed` | 所有候选不可用，请宿主重新解析 | — |
+| `quality` | 用户在下拉里换了画质档位 | `key`（档位键）；宿主据此按该档位重新解析并重新下发 `play` |
 
 宿主对 `sessionId` 做**过期校验**：`sessionId` 与当前活动会话不一致时忽略该消息并记 Debug 日志
 （`Ignored message from stale playback session`）。
@@ -140,7 +152,7 @@
 
 ```js
 core.INBOUND_MESSAGE_TYPES  // play / chase / stop
-core.OUTBOUND_MESSAGE_TYPES // ready / checking / probe-result / ... / refresh-needed
+core.OUTBOUND_MESSAGE_TYPES // ready / checking / probe-result / ... / quality
 ```
 
 宿主侧的对应常量集中在 `ShellViewModel` 的私有 `const string` 字段中。

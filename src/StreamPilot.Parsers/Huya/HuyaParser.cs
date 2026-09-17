@@ -61,6 +61,12 @@ internal sealed class HuyaParser : PlatformParserBase
     /// <summary>Content-Type 头名。</summary>
     private const string HeaderContentType = "Content-Type";
 
+    /// <summary>档位参数名（虎牙用码率指定线路档位，签名不覆盖该参数）。</summary>
+    private const string BitRateParameterName = "ratio=";
+
+    /// <summary>追加档位参数时的分隔符。</summary>
+    private const string BitRateParameterSeparator = "&";
+
     /// <summary>输入校验阶段的操作名。</summary>
     private const string ValidateOperation = "validate";
 
@@ -247,6 +253,21 @@ internal sealed class HuyaParser : PlatformParserBase
     /// <summary>JSON 字段 iBitRate。</summary>
     private const string JsonBitRate = "iBitRate";
 
+    /// <summary>JSON 字段 bitRateInfo（内容是一段 JSON 字符串，声明可选档位）。</summary>
+    private const string JsonBitRateInfo = "bitRateInfo";
+
+    /// <summary>JSON 字段 sDisplayName（官方档位名）。</summary>
+    private const string JsonDisplayName = "sDisplayName";
+
+    /// <summary>JSON 字段 flv。</summary>
+    private const string JsonStreamFlv = "flv";
+
+    /// <summary>JSON 字段 hls。</summary>
+    private const string JsonStreamHls = "hls";
+
+    /// <summary>JSON 字段 rateArray（每个格式下声明的档位）。</summary>
+    private const string JsonRateArray = "rateArray";
+
     /// <summary>房间页结构变化时的失败描述。</summary>
     private const string RoomPageParseFailedDetail = "虎牙房间页结构已变化，无法提取直播信息。";
 
@@ -314,6 +335,8 @@ internal sealed class HuyaParser : PlatformParserBase
     /// <exception cref="ResolveException">输入非法、未开播、轮播、房间不存在或响应结构变化时抛出。</exception>
     protected override async Task<ResolvedRoom> OnParseAsync(RoomQuery query, CancellationToken cancellationToken)
     {
+        // 用户自备 Cookie 只作用于本次解析的请求（播放地址与中继都不带它）。
+        using IDisposable cookieScope = _http.UseCookie(query.Cookie);
         string? roomIdOrShortId = string.IsNullOrWhiteSpace(query.RoomId)
             ? TryExtractRoomIdFromUrl(query.RoomUrl)
             : query.RoomId;
@@ -351,13 +374,18 @@ internal sealed class HuyaParser : PlatformParserBase
 
         JsonElement lines = ReadStreamLines(data);
         string uid = await FetchAnonymousUidAsync(cancellationToken).ConfigureAwait(false);
-        IReadOnlyList<StreamCandidate> candidates = BuildCandidates(lines, uid);
+
+        // 虎牙把每个码率作为一条独立线路返回（各自带流名），因此先枚举档位，再只取选中的那一条。
+        (IReadOnlyList<QualityOption> qualities, int? selectedBitRate) =
+            BuildQualityOptions(data, query.PreferredQualityKey);
+        IReadOnlyList<StreamCandidate> candidates = BuildCandidates(lines, uid, selectedBitRate);
 
         Logger.Info(ModuleName, "虎牙解析成功。", new Dictionary<string, object?>
         {
             ["roomId"] = profileRoom,
             ["liveStatus"] = liveStatus,
             ["candidates"] = candidates.Count,
+            ["quality"] = selectedBitRate,
         });
 
         return new ResolvedRoom
@@ -369,8 +397,195 @@ internal sealed class HuyaParser : PlatformParserBase
             Category = category,
             Candidates = candidates,
             ResolvedAt = DateTimeOffset.UtcNow,
+            Qualities = qualities,
+            SelectedQualityKey = selectedBitRate?.ToString(CultureInfo.InvariantCulture),
         };
     }
+
+    /// <summary>
+    /// 枚举虎牙可选码率档位，并决定本次实际使用的档位。
+    /// </summary>
+    /// <param name="data">profileRoom 响应的 data 节点。</param>
+    /// <param name="preferredKey">调用方指定的档位键（码率数值）；为空或无效时取最高档。</param>
+    /// <returns>档位列表（从高到低）与选中的码率。</returns>
+    /// <remarks>
+    /// 虎牙的档位**不在线路对象里**（线路只有 CDN 维度），而是由
+    /// <c>data.bitRateInfo</c>（JSON 字符串）或 <c>data.stream.flv/hls.rateArray[]</c> 声明：
+    /// 每项含官方档位名 <c>sDisplayName</c> 与码率 <c>iBitRate</c>。
+    /// <c>-1</c> 是"真原画"、<c>0</c> 是"原画/平台自选"，都排在高码率之前，而不是当成最小档。
+    /// 档位通过地址上的 <c>&amp;ratio={iBitRate}</c> 生效（正码率才追加）。
+    /// </remarks>
+    internal static (IReadOnlyList<QualityOption> Qualities, int? SelectedBitRate) BuildQualityOptions(
+        JsonElement data,
+        string? preferredKey)
+    {
+        List<(int BitRate, string Label)> rates = ReadDeclaredRates(data);
+        rates.Sort(static (left, right) => RankBitRate(right.BitRate).CompareTo(RankBitRate(left.BitRate)));
+
+        List<QualityOption> options = [];
+        List<int> known = [];
+        foreach ((int bitRate, string label) in rates)
+        {
+            if (known.Contains(bitRate))
+            {
+                continue;
+            }
+
+            known.Add(bitRate);
+            options.Add(new QualityOption
+            {
+                Key = bitRate.ToString(CultureInfo.InvariantCulture),
+                Label = label.Length > 0 ? label : DescribeBitRate(bitRate),
+                BitrateKbps = bitRate > 0 ? bitRate / 1000 : null,
+                IsBest = options.Count == 0,
+            });
+        }
+
+        int? requested = int.TryParse(preferredKey, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed)
+            ? parsed
+            : null;
+        int? selected = requested is { } want && known.Contains(want)
+            ? want
+            : known.Count > 0 ? known[0] : requested;
+
+        return (options, selected);
+    }
+
+    /// <summary>读取平台声明的码率档位（bitRateInfo 优先，其次是 flv/hls 的 rateArray）。</summary>
+    /// <param name="data">profileRoom 响应的 data 节点。</param>
+    /// <returns>（码率，官方档位名）列表；平台未声明时为空。</returns>
+    private static List<(int BitRate, string Label)> ReadDeclaredRates(JsonElement data)
+    {
+        List<(int BitRate, string Label)> rates = [];
+        ReadRatesFromBitRateInfo(data, rates);
+        if (rates.Count > 0)
+        {
+            return rates;
+        }
+
+        if (TryGetProperty(data, JsonStream, out JsonElement stream) && stream.ValueKind == JsonValueKind.Object)
+        {
+            ReadRatesFromArray(stream, JsonStreamFlv, rates);
+            ReadRatesFromArray(stream, JsonStreamHls, rates);
+        }
+
+        return rates;
+    }
+
+    /// <summary>解析 bitRateInfo（该字段是"JSON 字符串"，需要二次解析）。</summary>
+    /// <param name="data">profileRoom 响应的 data 节点。</param>
+    /// <param name="rates">收集结果的列表。</param>
+    /// <remarks>实测该字段位于 <c>data.liveData.bitRateInfo</c>，个别响应也可能直接挂在 <c>data</c> 上，两处都尝试。</remarks>
+    private static void ReadRatesFromBitRateInfo(JsonElement data, List<(int BitRate, string Label)> rates)
+    {
+        if (TryReadBitRateInfo(data, rates))
+        {
+            return;
+        }
+
+        JsonElement liveData = ReadOptionalObject(data, JsonLiveData);
+        if (liveData.ValueKind == JsonValueKind.Object)
+        {
+            _ = TryReadBitRateInfo(liveData, rates);
+        }
+    }
+
+    /// <summary>从指定节点的 bitRateInfo 字符串读取档位。</summary>
+    /// <param name="parent">父节点。</param>
+    /// <param name="rates">收集结果的列表。</param>
+    /// <returns>读到至少一项返回 <see langword="true"/>。</returns>
+    private static bool TryReadBitRateInfo(JsonElement parent, List<(int BitRate, string Label)> rates)
+    {
+        if (!TryGetProperty(parent, JsonBitRateInfo, out JsonElement info) || info.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        string? json = info.GetString();
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return false;
+        }
+
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+
+            ReadRatesFromElements(document.RootElement, rates);
+            return rates.Count > 0;
+        }
+        catch (JsonException)
+        {
+            // 平台偶尔给出非法片段：忽略该通道，继续尝试 rateArray。
+            return false;
+        }
+    }
+
+    /// <summary>从 stream.flv / stream.hls 的 rateArray 读取档位。</summary>
+    /// <param name="stream">data.stream 节点。</param>
+    /// <param name="formatName">flv 或 hls。</param>
+    /// <param name="rates">收集结果的列表。</param>
+    private static void ReadRatesFromArray(JsonElement stream, string formatName, List<(int BitRate, string Label)> rates)
+    {
+        if (!TryGetProperty(stream, formatName, out JsonElement format) || format.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        if (TryGetProperty(format, JsonRateArray, out JsonElement array) && array.ValueKind == JsonValueKind.Array)
+        {
+            ReadRatesFromElements(array, rates);
+        }
+    }
+
+    /// <summary>从档位数组元素里读取 (iBitRate, sDisplayName)。</summary>
+    /// <param name="array">档位数组。</param>
+    /// <param name="rates">收集结果的列表。</param>
+    private static void ReadRatesFromElements(JsonElement array, List<(int BitRate, string Label)> rates)
+    {
+        foreach (JsonElement item in array.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object || ReadOptionalInt32(item, JsonBitRate) is not { } bitRate)
+            {
+                continue;
+            }
+
+            string label = ReadOptionalString(item, JsonDisplayName) ?? string.Empty;
+            rates.Add((bitRate, label));
+        }
+    }
+
+    /// <summary>码率排序权重：真原画（-1）最高，其次"平台自选/原画"（0），再按码率数值。</summary>
+    /// <param name="bitRate">码率。</param>
+    /// <returns>排序权重。</returns>
+    private static int RankBitRate(int bitRate) => bitRate switch
+    {
+        < 0 => int.MaxValue,
+        0 => int.MaxValue - 1,
+        _ => bitRate,
+    };
+
+    /// <summary>生成码率档位的显示名。</summary>
+    /// <param name="bitRate">码率（虎牙 iBitRate）。</param>
+    /// <returns>显示名。</returns>
+    private static string DescribeBitRate(int bitRate) => bitRate switch
+    {
+        20000 => "蓝光20M",
+        14100 => "2K HDR",
+        10000 => "蓝光10M",
+        8000 => "蓝光8M",
+        4200 => "HDR（10M）",
+        4000 => "蓝光4M",
+        -1 => "真原画",
+        0 => "原画",
+        _ => bitRate >= 1000
+            ? (bitRate / 1000).ToString(CultureInfo.InvariantCulture) + "M 码率"
+            : bitRate.ToString(CultureInfo.InvariantCulture) + "K 码率",
+    };
 
     /// <summary>
     /// 抓取房间页并从内联直播信息中取出真实数字房间号。
@@ -574,9 +789,14 @@ internal sealed class HuyaParser : PlatformParserBase
     /// </summary>
     /// <param name="lines">线路数组元素。</param>
     /// <param name="uid">匿名登录返回的 uid。</param>
+    /// <param name="selectedBitRate">选中档位的码率（写进地址的 ratio）；<c>null</c>/<c>0</c>/<c>-1</c> 不追加。</param>
     /// <returns>候选流列表。</returns>
+    /// <remarks>
+    /// 线路数组是 **CDN 维度**（同一档位的多个 CDN），不是档位维度，因此这里不做过滤，
+    /// 档位由地址上的 <c>ratio</c> 参数决定。
+    /// </remarks>
     /// <exception cref="ResolveException">所有线路都失败时抛出。</exception>
-    private IReadOnlyList<StreamCandidate> BuildCandidates(JsonElement lines, string uid)
+    private IReadOnlyList<StreamCandidate> BuildCandidates(JsonElement lines, string uid, int? selectedBitRate)
     {
         StreamCandidateBuilder builder = new(Platform, Logger);
         foreach (JsonElement line in lines.EnumerateArray())
@@ -588,7 +808,7 @@ internal sealed class HuyaParser : PlatformParserBase
 
             try
             {
-                AddCandidatesForLine(builder, line, uid);
+                AddCandidatesForLine(builder, line, uid, selectedBitRate);
             }
             catch (ResolveException exception)
             {
@@ -615,7 +835,8 @@ internal sealed class HuyaParser : PlatformParserBase
     /// <param name="builder">候选构造器。</param>
     /// <param name="line">线路 JSON 对象。</param>
     /// <param name="uid">匿名登录返回的 uid。</param>
-    private void AddCandidatesForLine(StreamCandidateBuilder builder, JsonElement line, string uid)
+    /// <param name="selectedBitRate">选中档位的码率（写入地址的 ratio）。</param>
+    private void AddCandidatesForLine(StreamCandidateBuilder builder, JsonElement line, string uid, int? selectedBitRate)
     {
         string streamName = ReadOptionalString(line, JsonStreamName) ?? string.Empty;
         if (streamName.Length == 0)
@@ -627,7 +848,9 @@ internal sealed class HuyaParser : PlatformParserBase
             return;
         }
 
-        StreamQuality quality = MapQuality(ReadOptionalInt32(line, JsonBitRate));
+        // 线路对象只有 CDN 维度、没有码率字段，档位来自调用方选中的声明档位。
+        StreamQuality quality = MapQuality(selectedBitRate);
+        int? bitRate = selectedBitRate;
 
         AddFormatCandidate(
             builder,
@@ -637,7 +860,8 @@ internal sealed class HuyaParser : PlatformParserBase
             streamName: streamName,
             uid: uid,
             quality: quality,
-            format: StreamFormat.FlvHttp);
+            format: StreamFormat.FlvHttp,
+            bitRate: bitRate);
 
         AddFormatCandidate(
             builder,
@@ -647,7 +871,8 @@ internal sealed class HuyaParser : PlatformParserBase
             streamName: streamName,
             uid: uid,
             quality: quality,
-            format: StreamFormat.HlsTs);
+            format: StreamFormat.HlsTs,
+            bitRate: bitRate);
     }
 
     /// <summary>
@@ -661,6 +886,7 @@ internal sealed class HuyaParser : PlatformParserBase
     /// <param name="uid">匿名登录返回的 uid。</param>
     /// <param name="quality">画质档位。</param>
     /// <param name="format">容器/传输格式。</param>
+    /// <param name="bitRate">该线路的码率（kbps）；<c>null</c> 或 <c>&lt;=0</c> 时不追加 ratio。</param>
     /// <exception cref="ResolveException">签名参数缺失或 fm 解码失败时抛出。</exception>
     private void AddFormatCandidate(
         StreamCandidateBuilder builder,
@@ -670,7 +896,8 @@ internal sealed class HuyaParser : PlatformParserBase
         string streamName,
         string uid,
         StreamQuality quality,
-        StreamFormat format)
+        StreamFormat format,
+        int? bitRate)
     {
         if (string.IsNullOrWhiteSpace(baseUrl)
             || string.IsNullOrWhiteSpace(anticode)
@@ -690,7 +917,14 @@ internal sealed class HuyaParser : PlatformParserBase
         }
 
         string signedAnticode = BuildAnticode(anticode, streamName, uid);
-        string url = $"{baseUrl}/{streamName}.{suffix}?{signedAnticode}";
+
+        // 正码率需要显式带 ratio 才是该档位；-1（真原画）与 0（原画）不带 ratio。
+        // 签名串里偶尔已带 ratio，重复追加会被 CDN 判为参数冲突，这里先判重。
+        bool hasRatio = signedAnticode.Contains(BitRateParameterName, StringComparison.OrdinalIgnoreCase);
+        string query = bitRate is > 0 && !hasRatio
+            ? string.Concat(signedAnticode, BitRateParameterSeparator, BitRateParameterName, bitRate.Value.ToString(CultureInfo.InvariantCulture))
+            : signedAnticode;
+        string url = $"{baseUrl}/{streamName}.{suffix}?{query}";
         builder.TryAdd(
             url,
             format,
@@ -836,6 +1070,17 @@ internal sealed class HuyaParser : PlatformParserBase
         if (bitRate is null)
         {
             return StreamQuality.Unknown;
+        }
+
+        // -1 是"真原画"哨兵值，不是最小码率。
+        if (bitRate < 0)
+        {
+            return StreamQuality.Hd1080HighFps;
+        }
+
+        if (bitRate == 0)
+        {
+            return StreamQuality.Hd1080;
         }
 
         if (bitRate >= HighFrameRate1080BitRateThreshold)

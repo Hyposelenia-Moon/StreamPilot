@@ -65,6 +65,12 @@ internal sealed class BigoParser : PlatformParserBase
     /// <summary>无法从输入确定房间号时的提示。</summary>
     private const string MissingRoomIdMessage = "无法从输入中确定 Bigo 直播间房间号。";
 
+    /// <summary>唯一档位的键：Bigo 只返回一条 HLS 地址，没有可选档位。</summary>
+    private const string DefaultQualityKey = "default";
+
+    /// <summary>唯一档位的显示名。</summary>
+    private const string DefaultQualityLabel = "默认（平台自带 HLS）";
+
     private readonly HttpTextClient _http;
 
     /// <summary>初始化解析器。</summary>
@@ -89,6 +95,8 @@ internal sealed class BigoParser : PlatformParserBase
     /// <inheritdoc />
     protected override async Task<ResolvedRoom> OnParseAsync(RoomQuery query, CancellationToken cancellationToken)
     {
+        // 用户自备 Cookie 只作用于本次解析的请求（播放地址与中继都不带它）。
+        using IDisposable cookieScope = _http.UseCookie(query.Cookie);
         string roomId = ResolveRoomId(query);
         using JsonDocument document = await FetchStudioInfoAsync(roomId, cancellationToken).ConfigureAwait(false);
 
@@ -100,6 +108,8 @@ internal sealed class BigoParser : PlatformParserBase
 
         StreamCandidateBuilder builder = new(Platform, Logger);
         CollectCandidates(builder, data, out string title, out string anchor);
+        (IReadOnlyList<QualityOption> qualities, string? selectedQualityKey) =
+            BuildQualityOptions(query.PreferredQualityKey);
 
         return new ResolvedRoom
         {
@@ -110,7 +120,36 @@ internal sealed class BigoParser : PlatformParserBase
             Category = string.Empty,
             Candidates = builder.Build(),
             ResolvedAt = DateTimeOffset.UtcNow,
+            Qualities = qualities,
+            SelectedQualityKey = selectedQualityKey,
         };
+    }
+
+    /// <summary>
+    /// 构造 Bigo 的画质档位列表。
+    /// </summary>
+    /// <param name="preferredQualityKey">调用方指定的档位键；Bigo 没有可选档位，该参数只用于日志。</param>
+    /// <returns>档位列表（固定一项）与本次生效的档位键。</returns>
+    /// <remarks>
+    /// 工作室接口只返回单个 <c>hls_src</c>，既没有档位表也没有码率字段，
+    /// 因此这里只暴露一项"默认"档，并把调用方指定的档位键忽略掉（记 Debug 日志，不抛异常）。
+    /// </remarks>
+    internal (IReadOnlyList<QualityOption> Qualities, string? SelectedKey) BuildQualityOptions(
+        string? preferredQualityKey)
+    {
+        if (!string.IsNullOrWhiteSpace(preferredQualityKey)
+            && !string.Equals(preferredQualityKey, DefaultQualityKey, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(preferredQualityKey, QualityOption.BestFlag, StringComparison.OrdinalIgnoreCase))
+        {
+            Logger.Debug(ModuleName, "Bigo 只提供一路 HLS，已忽略调用方指定的档位键。", new Dictionary<string, object?>
+            {
+                ["preferredQualityKey"] = preferredQualityKey,
+            });
+        }
+
+        IReadOnlyList<QualityOption> qualities =
+            [new QualityOption { Key = DefaultQualityKey, Label = DefaultQualityLabel, IsBest = true }];
+        return (qualities, DefaultQualityKey);
     }
 
     /// <summary>解析输入中的房间号：优先使用房间号，其次从直播间链接提取。</summary>

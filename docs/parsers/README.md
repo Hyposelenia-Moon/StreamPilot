@@ -22,6 +22,31 @@ public interface IPlatformParser
 `StreamCandidate` 的五个硬性字段：`Url`、`Format`、`CdnHost`、`Codec`、`SourceIndex`。
 URL 指纹由 `StreamCandidateBuilder` 统一生成，解析器不得自行拼接日志用的 URL。
 
+## 画质档位契约（`QualityOption`）
+
+除候选流外，解析器还要在 `ResolvedRoom.Qualities` 里给出**平台官方画质档位**，并按
+`RoomQuery.PreferredQualityKey` 取对应档位（为空 = 平台最高档）：
+
+- `QualityOption.Key` 由平台自己解释（B站 `qn` 数值、虎牙码率、斗鱼 `rate`、抖音拉流键、YY `gear`、Bigo `default`）；
+- `QualityOption.Label` 必须是**面向用户的档位名**（官方叫什么就写什么，例如「蓝光20M」「4K 原画」）；
+- `BitrateKbps` 平台给了就填，没给留 `null`（不要编造）；
+- 用户传入的键不在可用列表里时**回退最高档 + Warn 日志**，不允许因此失败；
+- 档位与地址通常绑定（B站 qn、斗鱼 rate 必须重新请求接口；虎牙可在签名后追加 `ratio`），
+  因此候选列表里**不允许混入多个档位的地址**；
+- 语义未经证实的档位（例如 YY `gear`）只放一项"默认（平台给定）"，不得宣称它等于某档画质。
+
+详见 [ADR 0003](../adr/0003-parser-contract.md) 第 6.1 节。
+
+## 用户自备 Cookie（`RoomQuery.Cookie`）
+
+- 用户在「设置 → 高级 → 账号与 Cookie」里按平台填写，宿主调用解析时放进 `RoomQuery.Cookie`；
+- 解析器在 `OnParseAsync` 开头用 `using IDisposable cookieScope = _http.UseCookie(query.Cookie);`
+  让**本次解析的所有请求**带上该 Cookie（`HttpTextClient` 用 `AsyncLocal` 限定作用域，并发解析互不干扰；
+  解析器显式设置的 `Cookie` 头优先，不会出现重复头）；
+- Cookie **只用于解析请求**：播放地址本身不带登录态，本地中继客户端 `UseCookies = false`，
+  因此 CDN 与平台都收不到用户的登录态；
+- 日志只记 Cookie 指纹/键名（`SensitiveData.RedactCookie`），永不写原文。
+
 ## 失败分类
 
 | 分类 | 触发条件示例 |

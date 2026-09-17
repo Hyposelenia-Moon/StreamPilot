@@ -29,6 +29,26 @@ public sealed record ResolvedRoom
     /// <summary>平台提供的直播间封面地址，可能为 <see langword="null"/>。</summary>
     public string? CoverUrl { get; init; }
 
+    /// <summary>本房间当前可选的画质档位（按从高到低排列）；平台不区分档位时为空。</summary>
+    public IReadOnlyList<QualityOption> Qualities { get; init; } = [];
+
+    /// <summary>本次候选使用的画质档位键；未指定或平台单档时为 <see langword="null"/>。</summary>
+    public string? SelectedQualityKey { get; init; }
+
+    /// <summary>
+    /// 把候选列表换成另一组候选，并记录新的画质档位（供解析器切换档位时使用）。
+    /// </summary>
+    /// <param name="candidates">新的候选列表。</param>
+    /// <param name="selectedQualityKey">新的档位键。</param>
+    /// <returns>替换后的房间对象。</returns>
+    public ResolvedRoom WithCandidates(IReadOnlyList<StreamCandidate> candidates, string? selectedQualityKey) =>
+        this with
+        {
+            Candidates = candidates,
+            SelectedQualityKey = selectedQualityKey,
+            ResolvedAt = DateTimeOffset.UtcNow,
+        };
+
     /// <summary>返回第一个可用于 Web 播放的候选。</summary>
     /// <returns>找到时返回候选，否则返回 <see langword="null"/>。</returns>
     public StreamCandidate? FirstWebPlayableOrDefault()

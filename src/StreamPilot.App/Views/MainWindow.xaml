@@ -5,6 +5,7 @@
         Height="840" Width="1480"
         MinHeight="600" MinWidth="1320"
         Background="{StaticResource WindowBackgroundBrush}"
+        Icon="pack://application:,,,/Assets/streampilot.ico"
         FontFamily="{StaticResource UiFontFamily}"
         FontSize="13"
         UseLayoutRounding="True"
@@ -133,7 +134,11 @@
             <TextBlock Text="当前直播" Style="{StaticResource SectionTitle}" Margin="0,14,0,4" />
             <Border Style="{StaticResource CardPanel}">
               <StackPanel>
-                <TextBlock Text="{Binding RoomAnchor, StringFormat=主播：{0}}" TextWrapping="Wrap" />
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="直播状态：" />
+                  <TextBlock Text="{Binding LiveStatus}" FontWeight="SemiBold" />
+                </StackPanel>
+                <TextBlock Text="{Binding RoomAnchor, StringFormat=主播：{0}}" TextWrapping="Wrap" Margin="0,2,0,0" />
                 <TextBlock Text="{Binding RoomTitle, StringFormat=标题：{0}}" TextWrapping="Wrap" Margin="0,2,0,0" />
                 <TextBlock Text="{Binding RoomCategory, StringFormat=分区：{0}}" TextWrapping="Wrap" Margin="0,2,0,0" />
                 <TextBlock Text="{Binding StatusMessage, StringFormat=状态：{0}}" TextWrapping="Wrap" Margin="0,2,0,0"
@@ -148,8 +153,8 @@
             <ListBox ItemsSource="{Binding CandidateSummaries}" Height="84" />
 
             <!-- ===== 录制 ===== -->
-            <TextBlock Text="原始流录制" Style="{StaticResource SectionTitle}" Margin="0,14,0,4" />
-            <TextBlock Text="不转码直写原始 FLV / TS；按大小或时长自动分片，断流自动重连，并写入元数据。"
+            <TextBlock Text="直播回放录制" Style="{StaticResource SectionTitle}" Margin="0,14,0,4" />
+            <TextBlock Text="把正在直播的原始画面原样存到本地：不转码、不压缩；文件太大或录太久会自动分段；主播断流会自动重连；每个文件都记录主播名、房间号、标题与开播时间。"
                        Style="{StaticResource MutedText}" TextWrapping="Wrap" />
 
             <StackPanel Orientation="Horizontal" Margin="0,10,0,0">

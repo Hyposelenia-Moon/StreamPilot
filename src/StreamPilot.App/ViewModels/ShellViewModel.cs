@@ -55,6 +55,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>页面退出全屏的消息类型。</summary>
     private const string PlayerFullscreenExitType = "fullscreen-exit";
 
+    /// <summary>页面请求切换画质的消息类型。</summary>
+    private const string PlayerQualityType = "quality";
+
     /// <summary>宿主告知桥接地址的消息类型。</summary>
     private const string HostBridgeInfoType = "bridge-info";
 
@@ -81,6 +84,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     private string _roomTitle = "-";
     private string _roomAnchor = "-";
     private string _roomCategory = "-";
+    private string _liveStatus = ResolveMessages.LiveStatusUnknown;
     private string _recordingSummary = "未录制";
     private string _playerTelemetry = "-";
     private ResolvedRoom? _currentRoom;
@@ -89,6 +93,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>为 <see langword="true"/> 时抑制"切换预设即解析"（刷新列表时使用）。</summary>
     private bool _suppressPresetAutoApply;
+
+    /// <summary>用户选择的画质档位键；为空表示取平台最高档。</summary>
+    private string? _preferredQualityKey;
 
     /// <summary>初始化视图模型。</summary>
     /// <param name="dependencies">组合根注入的依赖。</param>
@@ -281,6 +288,8 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
             if (SetField(ref _selectedPlatformOption, value))
             {
+                // 换平台后旧的档位键没有意义，回到"平台最高档"。
+                _preferredQualityKey = null;
                 OnPropertyChanged(nameof(SelectedPlatform));
                 UpdateRoomUrlHint();
             }
@@ -386,6 +395,13 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     {
         get => _roomCategory;
         private set => SetField(ref _roomCategory, value);
+    }
+
+    /// <summary>直播状态词（直播中 / 未开播 / 轮播中 / 未知）。</summary>
+    public string LiveStatus
+    {
+        get => _liveStatus;
+        private set => SetField(ref _liveStatus, value);
     }
 
     /// <summary>录制状态摘要。</summary>
@@ -497,6 +513,10 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                     FullscreenChanged?.Invoke(this, false);
                     break;
 
+                case PlayerQualityType:
+                    _ = ApplyQualityAsync(ReadQualityKey(root));
+                    break;
+
                 default:
                     if (message.Length > 0)
                     {
@@ -535,12 +555,13 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             if (!outcome.Success || outcome.Room is null)
             {
                 _currentRoom = null;
-                StatusMessage = outcome.Message;
+                StatusMessage = ResolveMessages.DescribeFailure(outcome.Failure);
                 RoomTitle = "-";
                 RoomAnchor = "-";
                 RoomCategory = "-";
+                LiveStatus = ResolveMessages.DescribeLiveStatus(outcome.Failure);
                 CandidateSummaries.Clear();
-                AppendLog("解析失败：" + outcome.Message);
+                AppendLog(StatusMessage);
                 RaiseCommandStates();
                 return;
             }
@@ -549,8 +570,10 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             RoomTitle = outcome.Room.Title;
             RoomAnchor = outcome.Room.Anchor;
             RoomCategory = string.IsNullOrWhiteSpace(outcome.Room.Category) ? "-" : outcome.Room.Category;
-            StatusMessage = $"解析成功：共 {outcome.Room.Candidates.Count} 条线路。";
-            AppendLog($"解析成功：{outcome.Room.Anchor} / {outcome.Room.Title}");
+            LiveStatus = ResolveMessages.LiveStatusLive;
+            StatusMessage = $"解析成功：{outcome.Room.Anchor} / {outcome.Room.Title}"
+                + $"（状态：{LiveStatus}，共 {outcome.Room.Candidates.Count} 条线路）";
+            AppendLog(StatusMessage);
 
             CandidateSummaries.Clear();
             foreach (StreamCandidate candidate in outcome.Room.Candidates)
@@ -614,6 +637,8 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                 extremeTargetMs = plan.ExtremeTargetMs,
                 title = plan.Room.Title,
                 candidates = plan.Candidates,
+                qualities = plan.Qualities,
+                selectedQualityKey = plan.SelectedQualityKey,
             });
 
             if (plan.HasUnsupportedCodec)
@@ -756,12 +781,16 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         bool looksLikeUrl = input.Contains("://", StringComparison.Ordinal)
             || input.Contains('/', StringComparison.Ordinal);
 
-        return looksLikeUrl
+        RoomQuery query = looksLikeUrl
             ? RoomQuery.FromUrl(SelectedPlatform, input)
-            : RoomQuery.FromRoomId(SelectedPlatform, input) with
-            {
-                BilibiliCookie = _options.Platforms.BilibiliCookie,
-            };
+            : RoomQuery.FromRoomId(SelectedPlatform, input);
+
+        // Cookie 只参与解析（换最高画质），播放地址本身不带登录态。
+        return query with
+        {
+            Cookie = _options.Platforms.ForPlatform(SelectedPlatform),
+            PreferredQualityKey = _preferredQualityKey,
+        };
     }
 
     private void StopPlayback()
@@ -771,6 +800,43 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         SendToPlayer(new { type = HostStopType });
         StatusMessage = "已停止播放。";
         AppendLog("已停止播放");
+    }
+
+    /// <summary>
+    /// 播放页切换画质档位：记住档位键，按该档位重新解析并重新下发播放计划。
+    /// </summary>
+    /// <param name="qualityKey">档位键；<see langword="null"/> 表示平台最高档。</param>
+    /// <returns>异步任务。</returns>
+    private async Task ApplyQualityAsync(string? qualityKey)
+    {
+        if (_currentRoom is null || string.Equals(qualityKey, _preferredQualityKey, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _preferredQualityKey = qualityKey;
+        AppendLog("切换画质：" + (qualityKey ?? QualityOption.BestFlag));
+        await ResolveAsync().ConfigureAwait(true);
+        if (_currentRoom is not null)
+        {
+            await PlayAsync().ConfigureAwait(true);
+        }
+    }
+
+    /// <summary>读取播放页传来的画质档位键。</summary>
+    /// <param name="root">消息根元素。</param>
+    /// <returns>档位键；缺省或"最高档"时返回 <see langword="null"/>。</returns>
+    private static string? ReadQualityKey(JsonElement root)
+    {
+        if (!root.TryGetProperty("key", out JsonElement element) || element.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        string? key = element.GetString();
+        return string.IsNullOrWhiteSpace(key) || string.Equals(key, QualityOption.BestFlag, StringComparison.OrdinalIgnoreCase)
+            ? null
+            : key;
     }
 
     private void SetTarget(object? parameter)

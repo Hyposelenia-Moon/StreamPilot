@@ -31,6 +31,11 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private bool _autoPlayOnResolve = true;
     private bool _autoLaunchMpv;
     private string _bilibiliCookie = string.Empty;
+    private string _douyinCookie = string.Empty;
+    private string _huyaCookie = string.Empty;
+    private string _douyuCookie = string.Empty;
+    private string _yyCookie = string.Empty;
+    private string _bigoCookie = string.Empty;
     private string _recordingDirectory = string.Empty;
     private int _segmentMaxMinutes = 30;
     private int _segmentMaxMegabytes = 1024;
@@ -158,6 +163,41 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         set => SetField(ref _bilibiliCookie, value ?? string.Empty);
     }
 
+    /// <summary>抖音 Cookie（可留空）。</summary>
+    public string DouyinCookie
+    {
+        get => _douyinCookie;
+        set => SetField(ref _douyinCookie, value ?? string.Empty);
+    }
+
+    /// <summary>虎牙 Cookie（可留空；部分房间的最高码率需要登录态）。</summary>
+    public string HuyaCookie
+    {
+        get => _huyaCookie;
+        set => SetField(ref _huyaCookie, value ?? string.Empty);
+    }
+
+    /// <summary>斗鱼 Cookie（可留空）。</summary>
+    public string DouyuCookie
+    {
+        get => _douyuCookie;
+        set => SetField(ref _douyuCookie, value ?? string.Empty);
+    }
+
+    /// <summary>YY Cookie（可留空）。</summary>
+    public string YyCookie
+    {
+        get => _yyCookie;
+        set => SetField(ref _yyCookie, value ?? string.Empty);
+    }
+
+    /// <summary>Bigo Cookie（可留空）。</summary>
+    public string BigoCookie
+    {
+        get => _bigoCookie;
+        set => SetField(ref _bigoCookie, value ?? string.Empty);
+    }
+
     /// <summary>录制输出根目录。</summary>
     public string RecordingDirectory
     {
@@ -275,6 +315,11 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         AutoPlayOnResolve = options.Playback.AutoPlayOnResolve;
         AutoLaunchMpv = options.Playback.AutoLaunchMpv;
         BilibiliCookie = options.Platforms.BilibiliCookie;
+        DouyinCookie = options.Platforms.DouyinCookie;
+        HuyaCookie = options.Platforms.HuyaCookie;
+        DouyuCookie = options.Platforms.DouyuCookie;
+        YyCookie = options.Platforms.YyCookie;
+        BigoCookie = options.Platforms.BigoCookie;
 
         RecordingDirectory = options.Recording.OutputDirectory;
         SegmentPolicyOptions segment = options.Recording.Segment.Normalize();
@@ -353,6 +398,11 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             Platforms = baseOptions.Platforms with
             {
                 BilibiliCookie = BilibiliCookie.Trim(),
+                DouyinCookie = DouyinCookie.Trim(),
+                HuyaCookie = HuyaCookie.Trim(),
+                DouyuCookie = DouyuCookie.Trim(),
+                YyCookie = YyCookie.Trim(),
+                BigoCookie = BigoCookie.Trim(),
             },
             Bridge = baseOptions.Bridge with
             {

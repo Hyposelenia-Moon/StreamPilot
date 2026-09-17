@@ -5,10 +5,16 @@ using System.Windows.Input;
 /// <summary>
 /// 无参数同步命令。
 /// </summary>
+/// <remarks>
+/// <see cref="CanExecuteChanged"/> 同时挂到 <see cref="CommandManager.RequerySuggested"/> 上：
+/// WPF 只在收到该事件时重新查询可用性，而"房间号输入框从空到有内容"这类变化不会主动通知命令，
+/// 只靠手动 RaiseCanExecuteChanged 会让按钮一直灰着（点不动）。
+/// </remarks>
 public sealed class RelayCommand : ICommand
 {
     private readonly Action<object?> _execute;
     private readonly Func<object?, bool>? _canExecute;
+    private EventHandler? _canExecuteChanged;
 
     /// <summary>初始化命令。</summary>
     /// <param name="execute">执行逻辑。</param>
@@ -21,7 +27,20 @@ public sealed class RelayCommand : ICommand
     }
 
     /// <inheritdoc />
-    public event EventHandler? CanExecuteChanged;
+    public event EventHandler? CanExecuteChanged
+    {
+        add
+        {
+            _canExecuteChanged += value;
+            CommandManager.RequerySuggested += value;
+        }
+
+        remove
+        {
+            _canExecuteChanged -= value;
+            CommandManager.RequerySuggested -= value;
+        }
+    }
 
     /// <inheritdoc />
     public bool CanExecute(object? parameter) => _canExecute?.Invoke(parameter) ?? true;
@@ -30,7 +49,11 @@ public sealed class RelayCommand : ICommand
     public void Execute(object? parameter) => _execute(parameter);
 
     /// <summary>通知可用性变化。</summary>
-    public void RaiseCanExecuteChanged() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
+    public void RaiseCanExecuteChanged()
+    {
+        _canExecuteChanged?.Invoke(this, EventArgs.Empty);
+        CommandManager.InvalidateRequerySuggested();
+    }
 }
 
 /// <summary>
@@ -39,12 +62,14 @@ public sealed class RelayCommand : ICommand
 /// <remarks>
 /// 刻意不使用 <c>async void</c>：这里用 <see cref="Task"/> 串起来的 async 方法是
 /// 唯一允许的 fire-and-forget 形式，并且异常一定会被处理器捕获（禁止吞异常）。
+/// 可用性刷新同样挂到 <see cref="CommandManager.RequerySuggested"/>，理由见 <see cref="RelayCommand"/>。
 /// </remarks>
 public sealed class AsyncRelayCommand : ICommand
 {
     private readonly Func<object?, Task> _execute;
     private readonly Func<Exception, Task> _onError;
     private readonly Func<object?, bool>? _canExecute;
+    private EventHandler? _canExecuteChanged;
     private bool _isRunning;
 
     /// <summary>初始化命令。</summary>
@@ -61,7 +86,20 @@ public sealed class AsyncRelayCommand : ICommand
     }
 
     /// <inheritdoc />
-    public event EventHandler? CanExecuteChanged;
+    public event EventHandler? CanExecuteChanged
+    {
+        add
+        {
+            _canExecuteChanged += value;
+            CommandManager.RequerySuggested += value;
+        }
+
+        remove
+        {
+            _canExecuteChanged -= value;
+            CommandManager.RequerySuggested -= value;
+        }
+    }
 
     /// <inheritdoc />
     public bool CanExecute(object? parameter) => !_isRunning && (_canExecute?.Invoke(parameter) ?? true);
@@ -70,7 +108,11 @@ public sealed class AsyncRelayCommand : ICommand
     public void Execute(object? parameter) => _ = RunAsync(parameter);
 
     /// <summary>通知可用性变化。</summary>
-    public void RaiseCanExecuteChanged() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
+    public void RaiseCanExecuteChanged()
+    {
+        _canExecuteChanged?.Invoke(this, EventArgs.Empty);
+        CommandManager.InvalidateRequerySuggested();
+    }
 
     private async Task RunAsync(object? parameter)
     {
