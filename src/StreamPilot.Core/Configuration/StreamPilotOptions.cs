@@ -18,6 +18,12 @@ public sealed record StreamPilotOptions
     /// <summary>上次使用的平台（用于启动时预选）。</summary>
     public PlatformId LastPlatform { get; init; } = PlatformId.Bilibili;
 
+    /// <summary>用户指定的默认平台：仅当输入无法从链接域名识别平台时使用。</summary>
+    /// <remarks>
+    /// 旧配置文件里没有该字段，反序列化时保持默认值（哔哩哔哩），因此天然向后兼容。
+    /// </remarks>
+    public PlatformId DefaultPlatform { get; init; } = PlatformId.Bilibili;
+
     /// <summary>上次输入的房间号/链接。</summary>
     public string LastRoomInput { get; init; } = string.Empty;
 

@@ -390,4 +390,179 @@ public sealed class PlatformParserTests
     private static DouyuParser CreateDouyuParser() =>
         new(new HttpTextClient(new HttpClientFactory(new NetworkOptions(), NullStructuredLogger.Instance), NullStructuredLogger.Instance),
             NullStructuredLogger.Instance);
+
+    /// <summary>
+    /// 抖音：状态 JSON 被整体转义进 JS 字符串字面量（React Flight）时，
+    /// 大括号配对扫描必须切出合法 JSON，并正确处理 <c>\"</c>、<c>\\uXXXX</c> 与值里的大括号。
+    /// </summary>
+    [TestMethod("抖音：转义进 JS 字符串的 roomStore 也能切出合法 JSON")]
+    public void DouyinExtractsRoomStoreFromEscapedJavaScriptString()
+    {
+        const string Html = """<html><body><script>self.__pace_f.push([1,"{\"state\":{\"roomStore\":{\"roomInfo\":{\"anchor\":{\"nickname\":\"\\u4e2d\\u6587\"},\"room\":{\"title\":\"a{b}c\"}}}},\"children\":[]}"])</script></body></html>""";
+
+        using JsonDocument? document = CreateDouyinParser().ExtractRoomStoreDocument(Html);
+
+        Assert.NotNull(document, "转义形态的 roomStore 必须能切出 JSON");
+        JsonElement roomInfo = document!.RootElement.GetProperty("roomStore").GetProperty("roomInfo");
+        Assert.Equal("中文", roomInfo.GetProperty("anchor").GetProperty("nickname").GetString() ?? string.Empty);
+        Assert.Equal("a{b}c", roomInfo.GetProperty("room").GetProperty("title").GetString() ?? string.Empty, "字符串值里的大括号不能影响配对");
+    }
+
+    /// <summary>抖音：RENDER_DATA 脚本块里的百分号编码 JSON 必须先解码再扫描。</summary>
+    [TestMethod("抖音：RENDER_DATA 百分号编码 JSON 可解析")]
+    public void DouyinExtractsRoomStoreFromPercentEncodedRenderData()
+    {
+        const string Html = """<html><body><script id="RENDER_DATA" type="application/json">%7B%22roomStore%22%3A%7B%22roomInfo%22%3A%7B%22anchor%22%3A%7B%22nickname%22%3A%22A%22%7D%2C%22room%22%3A%7B%22title%22%3A%22T%22%7D%7D%7D%7D</script></body></html>""";
+
+        using JsonDocument? document = CreateDouyinParser().ExtractRoomStoreDocument(Html);
+
+        Assert.NotNull(document, "解码后的 RENDER_DATA 必须能切出 JSON");
+        JsonElement roomInfo = document!.RootElement.GetProperty("roomStore").GetProperty("roomInfo");
+        Assert.Equal("A", roomInfo.GetProperty("anchor").GetProperty("nickname").GetString() ?? string.Empty);
+        Assert.Equal("T", roomInfo.GetProperty("room").GetProperty("title").GetString() ?? string.Empty);
+    }
+
+    /// <summary>抖音：只是恰好出现 <c>roomStore</c> 字样的片段（字符串值）必须被跳过，继续找真正的状态对象。</summary>
+    [TestMethod("抖音：跳过只是出现 roomStore 字样的干扰片段")]
+    public void DouyinSkipsDecoyRoomStoreOccurrence()
+    {
+        const string Html = """<script>var x = "\"roomStore\""; var y = {"roomStore":{"roomInfo":{"anchor":{"nickname":"B"}}}};</script>""";
+
+        using JsonDocument? document = CreateDouyinParser().ExtractRoomStoreDocument(Html);
+
+        Assert.NotNull(document, "第二个 roomStore 才是真正的状态对象");
+        JsonElement roomInfo = document!.RootElement.GetProperty("roomStore").GetProperty("roomInfo");
+        Assert.Equal("B", roomInfo.GetProperty("anchor").GetProperty("nickname").GetString() ?? string.Empty);
+    }
+
+    /// <summary>抖音：页面既可能是未转义写法，也可能是 <c>\"sec_uid\"</c> 转义写法，两种都要取到。</summary>
+    [TestMethod("抖音：sec_uid 同时兼容未转义与转义写法")]
+    public void DouyinExtractsAnchorSecUidFromBothForms()
+    {
+        const string SecUid = "MS4wLjABAAAAabcdefghijklmnop";
+        const string RawHtml = """<script>{"sec_uid":"MS4wLjABAAAAabcdefghijklmnop","web_rid":"123"}</script>""";
+        const string EscapedHtml = """<script>self.__pace_f.push([1,"{\"sec_uid\":\"MS4wLjABAAAAabcdefghijklmnop\",\"web_rid\":\"123\"}"])</script>""";
+
+        Assert.Equal(SecUid, DouyinParser.ExtractAnchorSecUid(RawHtml) ?? string.Empty);
+        Assert.Equal(SecUid, DouyinParser.ExtractAnchorSecUid(EscapedHtml) ?? string.Empty);
+        Assert.Null(DouyinParser.ExtractAnchorSecUid("<html><body>没有主播标识</body></html>"));
+    }
+
+    /// <summary>
+    /// 抖音：reflow 备用接口必须带上参考实现里的公开参数（<c>version_code</c>/<c>app_id</c>/
+    /// <c>sec_user_id</c>），否则平台返回 status_code=10011（Request params error）。
+    /// </summary>
+    [TestMethod("抖音：reflow 地址补齐公开参数且不含签名")]
+    public void DouyinBuildsReflowUrlWithPublicParameters()
+    {
+        const string WithSecUid = "https://webcast.amemv.com/webcast/room/reflow/info/?type_id=0&live_id=1&room_id=123456"
+            + "&sec_user_id=MS4wLjABAAAAabcdefghijklmnop&version_code=99.99.99&app_id=1128";
+        const string WithoutSecUid = "https://webcast.amemv.com/webcast/room/reflow/info/?type_id=0&live_id=1&room_id=123456"
+            + "&version_code=99.99.99&app_id=1128";
+
+        string url = DouyinParser.BuildReflowUrl("123456", "MS4wLjABAAAAabcdefghijklmnop");
+
+        Assert.Equal(WithSecUid, url, "已知 sec_uid 时必须带上该参数");
+        Assert.Equal(WithoutSecUid, DouyinParser.BuildReflowUrl("123456", null), "无 sec_uid 时必须省略该参数");
+        Assert.DoesNotContain("a_bogus", url, "不得实现平台签名");
+        Assert.DoesNotContain("ms_token", url, "不得实现平台签名");
+        Assert.DoesNotContain("__ac_signature", url, "不得实现平台签名");
+    }
+
+    /// <summary>抖音：reflow 的 status_code 非 0 必须归类为"平台拒绝"，并把状态码与平台消息写进 detail。</summary>
+    [TestMethod("抖音：reflow 非 0 status_code 归类为平台拒绝")]
+    public void DouyinClassifiesReflowRejectionAsRejected()
+    {
+        DouyinParser parser = CreateDouyinParser();
+
+        using JsonDocument rejected = JsonDocument.Parse(
+            """{ "data": { "message": "Request params error" }, "status_code": 10011 }""");
+        ResolveException exception = Assert.Throws<ResolveException>(
+            () => parser.EnsureReflowAccepted(rejected.RootElement, "123456"));
+
+        Assert.Equal(ResolveFailure.Rejected, exception.Failure);
+        Assert.Contains("10011", exception.Message, "detail 必须带 status_code");
+        Assert.Contains("Request params error", exception.Message, "detail 必须带平台 message");
+
+        using JsonDocument rejectedAsText = JsonDocument.Parse(
+            """{ "data": { "message": "Request params error" }, "status_code": "10011" }""");
+        Assert.Equal(
+            ResolveFailure.Rejected,
+            Assert.Throws<ResolveException>(
+                () => parser.EnsureReflowAccepted(rejectedAsText.RootElement, "123456")).Failure,
+            "status_code 写成字符串时同样要识别为拒绝");
+
+        using JsonDocument accepted = JsonDocument.Parse("""{ "status_code": 0, "data": { "data": { "room": {} } } }""");
+        parser.EnsureReflowAccepted(accepted.RootElement, "123456");
+    }
+
+    /// <summary>抖音：已结束（status=4）与缺少 stream_url 都必须归类为"未开播"，而不是解析错误。</summary>
+    [TestMethod("抖音：已结束与缺少 stream_url 归类为未开播")]
+    public void DouyinClassifiesOfflineRooms()
+    {
+        DouyinParser parser = CreateDouyinParser();
+        StreamCandidateBuilder builder = new(PlatformId.Douyin);
+
+        using JsonDocument ended = JsonDocument.Parse(
+            """{ "status": 4, "stream_url": { "flv_pull_url": { "origin": "https://cdn.example/o.flv" } } }""");
+        ResolveException endedException = Assert.Throws<ResolveException>(
+            () => parser.CollectCandidates(builder, ended.RootElement, "room-state", "origin", out _, out _));
+        Assert.Equal(ResolveFailure.NotLive, endedException.Failure);
+        Assert.Contains("status=4", endedException.Message, "detail 必须带 room.status");
+
+        using JsonDocument noStream = JsonDocument.Parse("""{ "status": 2, "title": "T" }""");
+        ResolveException noStreamException = Assert.Throws<ResolveException>(
+            () => parser.CollectCandidates(builder, noStream.RootElement, "reflow-info", "origin", out _, out _));
+        Assert.Equal(ResolveFailure.NotLive, noStreamException.Failure);
+        Assert.Contains("stream_url", noStreamException.Message, "detail 必须说明缺 stream_url");
+    }
+
+    /// <summary>抖音：官方档位顺序固定为 原画 → 蓝光 → 超清 → 高清 → 标清，中文档位名与之一致。</summary>
+    [TestMethod("抖音：官方档位顺序与中文档位名")]
+    public void DouyinOrdersOfficialQualities()
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            """
+            { "stream_url": {
+                "flv_pull_url": {
+                  "ld": "https://cdn.example/ld.flv",
+                  "sd": "https://cdn.example/sd.flv",
+                  "hd": "https://cdn.example/hd.flv",
+                  "uhd": "https://cdn.example/uhd.flv",
+                  "origin": "https://cdn.example/origin.flv" } } }
+            """);
+
+        (IReadOnlyList<QualityOption> qualities, string? selected) =
+            CreateDouyinParser().BuildQualityOptions(document.RootElement, preferredQualityKey: null);
+
+        Assert.Equal(5, qualities.Count);
+        Assert.Equal("origin", qualities[0].Key);
+        Assert.Equal("原画", qualities[0].Label);
+        Assert.True(qualities[0].IsBest);
+        Assert.Equal("uhd", qualities[1].Key);
+        Assert.Equal("蓝光", qualities[1].Label);
+        Assert.Equal("hd", qualities[2].Key);
+        Assert.Equal("超清", qualities[2].Label);
+        Assert.Equal("sd", qualities[3].Key);
+        Assert.Equal("高清", qualities[3].Label);
+        Assert.Equal("ld", qualities[4].Key);
+        Assert.Equal("标清", qualities[4].Label);
+        Assert.Equal("origin", selected, "未指定档位时取最高档");
+    }
+
+    /// <summary>抖音：纯音频档 <c>ao</c> 不能排在有视频档的直播间前面被当成最高档。</summary>
+    [TestMethod("抖音：纯音频档不盖过视频档")]
+    public void DouyinKeepsVideoQualityAboveAudioOnly()
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            """{ "stream_url": { "flv_pull_url": { "ao": "https://cdn.example/ao.flv", "hd": "https://cdn.example/hd.flv" } } }""");
+
+        (IReadOnlyList<QualityOption> qualities, string? selected) =
+            CreateDouyinParser().BuildQualityOptions(document.RootElement, preferredQualityKey: null);
+
+        Assert.Equal(2, qualities.Count);
+        Assert.Equal("hd", qualities[0].Key, "有视频档时视频档在前");
+        Assert.Equal("hd", selected);
+        Assert.Equal("ao", qualities[1].Key);
+    }
 }

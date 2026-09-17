@@ -103,12 +103,12 @@
     }
 
     #modeHint {
+      flex: 1 1 auto;
+      min-width: 0;
       color: #5b6472;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      max-width: 40%;
-      margin-right: 6px;
     }
 
     button,
@@ -173,12 +173,14 @@
       flex: 1 1 auto;
     }
 
-    /* 画质档位：与全屏按钮同高，仅在平台给出多档时显示 */
+    /*
+      画质档位与全屏放在画面下方（footer）：
+      贴着画面的按钮比页头更容易点到，也避免页头在窄窗口里挤成一团。
+    */
     #qualityBox {
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      margin-right: 10px;
       white-space: nowrap;
     }
 
@@ -188,22 +190,38 @@
 
     #qualityBox .qualityLabel {
       color: #5b6472;
+      font-size: 15px;
     }
 
     #qualitySelect {
       cursor: pointer;
-      border-radius: 6px;
-      padding: 4px 8px;
+      border-radius: 8px;
+      height: 36px;
+      padding: 0 10px;
       border: 1px solid #c7cdd6;
       background: #ffffff;
       color: #1f2329;
       font-family: inherit;
-      font-size: inherit;
+      font-size: 15px;
       max-width: 220px;
     }
 
     #qualitySelect:hover {
       border-color: #1b4fd8;
+    }
+
+    #fsBtn {
+      padding: 10px 18px;
+      font-size: 15px;
+      border-radius: 8px;
+    }
+
+    #toggleLog {
+      padding: 10px 14px;
+      font-size: 14px;
+      border-radius: 8px;
+      /* 换行到第二行时也靠右，和上一行的音量行分开 */
+      margin-left: auto;
     }
 
     #stage {
@@ -269,8 +287,9 @@
       box-sizing: border-box;
     }
 
+    /* 空态副文案由脚本写入 data-action（文案本体在 player-core.js，与测试同源） */
     #hint.empty::after {
-      content: '解析房间后点「开始播放」';
+      content: attr(data-action);
       font-size: 13px;
       font-weight: 400;
       color: #5b6472;
@@ -314,10 +333,16 @@
     #controls {
       display: flex;
       align-items: center;
-      gap: 8px;
-      padding: 6px 10px;
+      gap: 10px;
+      row-gap: 8px;
+      padding: 8px 10px;
+      /* 窄窗口时换行而不是把控件压扁 */
       flex-wrap: wrap;
       color: #1f2329;
+    }
+
+    .controlLabel {
+      color: #6b7280;
     }
 
     #statusLine {
@@ -361,42 +386,38 @@
       min-width: 46px;
       text-align: right;
     }
-
-    #toggleLog {
-      margin-left: auto;
-    }
   </style>
 </head>
 
 <body>
   <div id="root">
     <!--
-      播放页只保留"观看相关"的控件（模式提示、全屏、音量、可选的日志面板）。
+      播放页只保留"观看相关"的控件（模式提示、画质、全屏、音量、可选的日志面板）。
       追帧档位与播放控制（解析 / 开始播放 / 追帧 / mpv 播放）统一放在主界面左侧面板，
       避免同一个设置或动作在多处各有一份。
+      页头只留模式提示：它常驻显示"当前档位 + 播放状态"，值得占据整行。
     -->
     <header>
       <span id="modeHint" class="hintText">等待直播源</span>
-      <span class="spacer"></span>
-      <label id="qualityBox" class="hidden" for="qualitySelect">
-        <span class="qualityLabel">画质</span>
-        <select id="qualitySelect"></select>
-      </label>
-      <button type="button" id="fsBtn" title="全屏（双击画面同样可切换）">全屏</button>
     </header>
 
     <div id="stage">
-      <video id="video" playsinline muted></video>
+      <video id="video" playsinline></video>
       <div id="hint" class="empty" data-level="info">等待直播源</div>
-      <div id="volDisplay" class="hidden">音量：0%</div>
+      <div id="volDisplay" class="hidden">音量：30%</div>
     </div>
 
     <footer>
       <div id="controls">
-        <span style="color: #6b7280">音量</span>
-        <input id="volume" type="range" min="0" max="100" step="1" value="70" style="width: 140px" />
-        <span id="volumeLabel">70%</span>
+        <span class="controlLabel">音量</span>
+        <input id="volume" type="range" min="0" max="100" step="1" value="30" />
+        <span id="volumeLabel">30%</span>
         <span class="spacer"></span>
+        <label id="qualityBox" class="hidden" for="qualitySelect">
+          <span class="qualityLabel">画质</span>
+          <select id="qualitySelect"></select>
+        </label>
+        <button type="button" id="fsBtn" title="全屏（双击画面同样可切换）">全屏</button>
         <button type="button" id="toggleLog">显示日志</button>
       </div>
       <div id="statusLine">未连接</div>
@@ -454,8 +475,11 @@
         currentReferer: '',
         bridgeBaseAddress: '',
         roomTitle: '',
-        lastVolume: 70,
-        muteToggleVolume: 70,
+        lastVolume: core.INITIAL_VOLUME_PERCENT,
+        muteToggleVolume: core.INITIAL_VOLUME_PERCENT,
+        // 自动播放被策略拦截时置位：此时点画面是"接着播"，而不是切换静音。
+        autoplayBlocked: false,
+        autoplayStartedAt: 0,
         hintLockUntil: 0,
         eventSequence: 0,
         probeControllers: [],
@@ -535,6 +559,18 @@
         elements.hint.classList.remove('hidden');
       }
 
+      /**
+       * 回到空态提示。文案取 player-core 的常量，
+       * 避免"页面写一套、测试测另一套"。
+       */
+      function showEmptyState() {
+        elements.hint.textContent = core.EMPTY_HINT_TITLE;
+        elements.hint.dataset.action = core.EMPTY_HINT_ACTION;
+        elements.hint.dataset.level = 'info';
+        elements.hint.classList.remove('hidden');
+        elements.hint.classList.add('empty');
+      }
+
       /** 设置提示并锁定指定时长（毫秒）。 */
       function setHintLocked(message, level, lockMs) {
         setHint(message, level);
@@ -550,15 +586,9 @@
         elements.status.textContent = message;
       }
 
-      /** 更新顶部模式提示（档位与当前线路）。 */
+      /** 更新顶部模式提示（档位 + 播放状态；候选主机名不上界面）。 */
       function updateModeHint() {
-        const run = state.run;
-        if (!run || !run.currentCandidate) {
-          elements.modeHint.textContent = '等待直播源';
-          return;
-        }
-
-        elements.modeHint.textContent = core.modeLabel(run) + ' · ' + run.currentCandidate.host;
+        elements.modeHint.textContent = core.formatModeHint(state.run);
       }
 
       /** 销毁当前播放器并释放资源。 */
@@ -755,7 +785,8 @@
           return;
         }
 
-        elements.video.muted = true;
+        state.autoplayBlocked = false;
+        // 不再预先静音：首帧起来后用户应当直接听到声音（音量由 applyVolume 决定）。
         if ('preservesPitch' in elements.video) {
           elements.video.preservesPitch = true;
         }
@@ -795,18 +826,22 @@
             return;
           }
 
-          run.playbackStarted = true;
-          run.lastPlaybackPosition = elements.video.currentTime;
-          run.lastPlaybackProgressAt = Date.now();
-          run.currentCandidateStartedAt = Date.now();
-          const firstFrameMs = Math.round(performance.now() - startedAt);
-          elements.hint.classList.add('hidden');
-          setStatus('播放中 · ' + core.modeLabel(run) + ' · ' + candidate.host);
-          appendLog('ok', '首帧 ' + firstFrameMs + ' ms（' + candidate.host + '）');
-          report(outbound.STATUS, '播放已开始', run, candidate, { firstFrameMs: firstFrameMs, mode: run.mode });
-          startTelemetry(run);
+          markPlaybackStarted(run, candidate, startedAt);
         } catch (error) {
           if (!isActive(run)) {
+            return;
+          }
+
+          /*
+            自动播放策略拦截不是线路问题：这时候切候选只会把可用线路白白烧完，
+            所以停在原地等用户点一下画面（点击处理器会接着播放）。
+          */
+          if (core.isAutoplayBlocked(error)) {
+            state.autoplayBlocked = true;
+            state.autoplayStartedAt = startedAt;
+            appendLog('warn', '自动播放被策略拦截，等待用户点击画面');
+            report(outbound.WARNING, core.AUTOPLAY_BLOCKED_HINT, run, candidate, { errorName: error.name });
+            setHint(core.AUTOPLAY_BLOCKED_HINT, 'warn');
             return;
           }
 
@@ -821,6 +856,46 @@
             recoverAfterInterruption(run, candidate, '播放启动异常');
           }
         }
+      }
+
+      /** 首帧就绪：统一处理状态、界面、日志与上报。 */
+      function markPlaybackStarted(run, candidate, startedAt) {
+        run.playbackStarted = true;
+        run.everPlayed = true;
+        state.autoplayBlocked = false;
+        run.lastPlaybackPosition = elements.video.currentTime;
+        run.lastPlaybackProgressAt = Date.now();
+        run.currentCandidateStartedAt = Date.now();
+        const firstFrameMs = Math.round(performance.now() - startedAt);
+        elements.hint.classList.add('hidden');
+        updateModeHint();
+        setStatus(core.formatPlaybackStatusText(run));
+        appendLog('ok', '首帧 ' + firstFrameMs + ' ms（' + candidate.host + '）');
+        report(outbound.STATUS, '播放已开始', run, candidate, { firstFrameMs: firstFrameMs, mode: run.mode });
+        startTelemetry(run);
+      }
+
+      /** 用户点击画面后接着播放被自动播放策略拦住的流。 */
+      function resumeBlockedPlayback() {
+        const run = state.run;
+        const candidate = run ? run.currentCandidate : null;
+        if (!isActive(run) || !candidate) {
+          state.autoplayBlocked = false;
+          return;
+        }
+
+        const startedAt = state.autoplayStartedAt || performance.now();
+        state.autoplayBlocked = false;
+        elements.video.play().then(function onStarted() {
+          if (!isActive(run)) {
+            return;
+          }
+
+          markPlaybackStarted(run, candidate, startedAt);
+        }).catch(function onFailed(error) {
+          appendLog('error', '点击后仍无法播放：' + (error && error.message ? error.message : error));
+          setHintLocked('仍无法开始播放，请回主界面重新点「开始播放」。', 'warn', 8000);
+        });
       }
 
       /** 绑定播放器事件。 */
@@ -1106,6 +1181,7 @@
           recovering: false,
           reconnecting: false,
           playbackStarted: false,
+          everPlayed: false,
           refreshRequested: false,
           currentCandidate: null,
           currentCandidateStartedAt: 0,
@@ -1161,17 +1237,18 @@
 
         destroyPlayer();
         state.currentStreamUrl = '';
+        state.autoplayBlocked = false;
+        state.autoplayStartedAt = 0;
         updateModeHint();
-        setHint('等待直播源');
-        elements.hint.classList.add('empty');
+        showEmptyState();
         setStatus('未连接');
       }
 
-      /** 更新音量显示。 */
+      /** 更新音量：界面与视频元素用同一份夹取后的百分比。 */
       function applyVolume(value, remember) {
-        const percent = Math.max(0, Math.min(100, Number(value) || 0));
-        elements.video.volume = percent / 100;
-        elements.video.muted = percent === 0;
+        const percent = core.clampVolumePercent(value);
+        elements.video.volume = core.volumePercentToGain(percent);
+        elements.video.muted = core.shouldMuteAtVolume(percent);
         elements.volume.value = String(percent);
         elements.volumeLabel.textContent = percent + '%';
         elements.volDisplay.textContent = '音量：' + percent + '%';
@@ -1200,6 +1277,12 @@
         }, { passive: false });
 
         elements.video.addEventListener('click', function onVideoClick() {
+          // 被自动播放策略拦住时，点画面是"开始播放"；否则沿用点画面切换静音。
+          if (state.autoplayBlocked) {
+            resumeBlockedPlayback();
+            return;
+          }
+
           const next = elements.video.muted ? state.lastVolume : 0;
           applyVolume(next, false);
         });
@@ -1248,7 +1331,12 @@
 
         document.addEventListener('fullscreenchange', function onFullscreenChange() {
           const fullscreen = Boolean(document.fullscreenElement);
-          elements.hint.classList.toggle('hidden', fullscreen && state.run && state.run.playbackStarted);
+          updateModeHint();
+          /*
+            提示的可见性只由"是否已经在播"决定：过去这里在退出全屏时无条件取消隐藏，
+            于是被藏起来的空态文案（等待直播源）又盖回画面，看起来像直播源丢了。
+          */
+          elements.hint.classList.toggle('hidden', core.shouldHideHint(state.run));
           elements.volDisplay.classList.add('hidden');
           document.body.style.cursor = fullscreen ? 'none' : 'default';
           elements.fsBtn.textContent = fullscreen ? '退出全屏' : '全屏';
@@ -1354,7 +1442,8 @@
       }
 
       bindControls();
-      applyVolume(70, true);
+      applyVolume(core.INITIAL_VOLUME_PERCENT, true);
+      showEmptyState();
       updateModeHint();
 
       if (hostChannel) {

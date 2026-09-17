@@ -122,6 +122,36 @@ const LIVE_SYNC_MAX_MARGIN_SECONDS = 0.14;
 /** HLS 候选的格式字符串集合。 */
 const HLS_FORMAT_NAMES = Object.freeze(['fmp4', 'ts', 'hls']);
 
+/** 音量百分比刻度：100% 对应 HTMLMediaElement.volume = 1.0。 */
+const VOLUME_PERCENT_SCALE = 100;
+
+/** 音量百分比上限。 */
+const MAX_VOLUME_PERCENT = VOLUME_PERCENT_SCALE;
+
+/** 音量百分比下限（0 等价于静音）。 */
+const MIN_VOLUME_PERCENT = 0;
+
+/** 初始音量（百分比）。70% 在大多数直播间偏响，改为 30% 起步。 */
+const INITIAL_VOLUME_PERCENT = 30;
+
+/** 空态提示标题。 */
+const EMPTY_HINT_TITLE = '等待直播源';
+
+/** 空态提示里的操作指引：真正要点的按钮在主界面左侧面板，不在播放页内。 */
+const EMPTY_HINT_ACTION = '在左侧点「开始播放」即可观看';
+
+/** 自动播放被浏览器策略拦截时的提示（需要用户先与页面交互一次）。 */
+const AUTOPLAY_BLOCKED_HINT = '浏览器暂时拦住了自动播放，点一下画面即可开始播放。';
+
+/** 模式提示：没有活动会话。 */
+const MODE_HINT_IDLE = '等待直播源';
+
+/** 模式提示：已选中候选但首帧还没出来。 */
+const MODE_HINT_CONNECTING = '连接中';
+
+/** 模式提示：画面已经在播。 */
+const MODE_HINT_PLAYING = '播放中';
+
 /** 页面消息类型：宿主 → 页面。 */
 const INBOUND_MESSAGE_TYPES = Object.freeze({
   PLAY: 'play',
@@ -368,6 +398,86 @@ function modeLabel(plan) {
 }
 
 /**
+ * 把任意输入夹取为合法的音量百分比。
+ * @param {*} value 原始值（滑块字符串、宿主 volume 消息、滚轮累加结果）。
+ * @returns {number} 0–100 的整数；非法输入按 0 处理（静音比"猜一个音量"更可预期）。
+ */
+function clampVolumePercent(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return MIN_VOLUME_PERCENT;
+  }
+
+  return Math.max(MIN_VOLUME_PERCENT, Math.min(MAX_VOLUME_PERCENT, Math.round(numeric)));
+}
+
+/**
+ * 把音量百分比换算成 HTMLMediaElement.volume 需要的增益。
+ * @param {*} percent 音量百分比。
+ * @returns {number} 0–1 的增益。
+ */
+function volumePercentToGain(percent) {
+  return clampVolumePercent(percent) / VOLUME_PERCENT_SCALE;
+}
+
+/**
+ * 判断该音量下是否必须静音。
+ * @param {*} percent 音量百分比。
+ * @returns {boolean} 0% 返回 true。
+ */
+function shouldMuteAtVolume(percent) {
+  return clampVolumePercent(percent) === MIN_VOLUME_PERCENT;
+}
+
+/**
+ * 判断播放失败是否由自动播放策略引起（需要用户手势才能出声）。
+ * @param {*} error play() 抛出的错误。
+ * @returns {boolean} 属于自动播放拦截返回 true。
+ */
+function isAutoplayBlocked(error) {
+  return Boolean(error) && error.name === 'NotAllowedError';
+}
+
+/**
+ * 顶部模式提示文案：只包含档位与播放状态。
+ *
+ * 候选主机名（CDN 节点）不在这里出现：它对观看没有意义，
+ * 用户会把它读成"页面在报一个地址"。
+ * @param {{mode?:string,extremeTargetMs?:number,playbackStarted?:boolean,currentCandidate?:object}} run 运行对象。
+ * @returns {string} 中文提示。
+ */
+function formatModeHint(run) {
+  if (!run || !run.currentCandidate) {
+    return MODE_HINT_IDLE;
+  }
+
+  return modeLabel(run) + ' · ' + (run.playbackStarted ? MODE_HINT_PLAYING : MODE_HINT_CONNECTING);
+}
+
+/**
+ * 底部状态行在播放开始后的文案（同样不含候选主机名）。
+ * @param {{mode?:string,extremeTargetMs?:number}} run 运行对象。
+ * @returns {string} 中文状态。
+ */
+function formatPlaybackStatusText(run) {
+  return MODE_HINT_PLAYING + ' · ' + modeLabel(run);
+}
+
+/**
+ * 判断居中提示是否应当保持隐藏。
+ *
+ * 只看"这次会话是否出过画面"，与全屏状态无关：退出全屏曾经无条件取消隐藏，
+ * 把藏起来的空态文案（等待直播源）又盖回画面，看起来像直播源丢了。
+ * 用"出过画面"而不是"正在播放"，是因为换线路的瞬间 playbackStarted 会被清零，
+ * 那时更不该弹出空态。
+ * @param {{everPlayed?:boolean}} run 运行对象。
+ * @returns {boolean} 应当隐藏返回 true。
+ */
+function shouldHideHint(run) {
+  return Boolean(run && run.everPlayed);
+}
+
+/**
  * 根据宿主下发的 play 消息构造规范化的播放计划。
  * @param {object} payload 宿主消息。
  * @param {boolean} canPlayFlv mpegts.js 是否可用。
@@ -528,6 +638,16 @@ const StreamPilotPlayerCore = {
   TELEMETRY_INTERVAL_MS,
   TELEMETRY_REPORT_INTERVAL_MS,
   RECONNECT_COUNTER_RESET_MS,
+  VOLUME_PERCENT_SCALE,
+  MIN_VOLUME_PERCENT,
+  MAX_VOLUME_PERCENT,
+  INITIAL_VOLUME_PERCENT,
+  EMPTY_HINT_TITLE,
+  EMPTY_HINT_ACTION,
+  AUTOPLAY_BLOCKED_HINT,
+  MODE_HINT_IDLE,
+  MODE_HINT_CONNECTING,
+  MODE_HINT_PLAYING,
   INBOUND_MESSAGE_TYPES,
   OUTBOUND_MESSAGE_TYPES,
   normalizeExtremeTargetSeconds,
@@ -543,6 +663,13 @@ const StreamPilotPlayerCore = {
   looksStarved,
   getStartupTimeoutMs,
   modeLabel,
+  clampVolumePercent,
+  volumePercentToGain,
+  shouldMuteAtVolume,
+  isAutoplayBlocked,
+  formatModeHint,
+  formatPlaybackStatusText,
+  shouldHideHint,
   buildPlaybackPlan,
   normalizeQualities,
   applyExtremeTarget,

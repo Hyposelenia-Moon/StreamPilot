@@ -8,7 +8,7 @@
         Icon="pack://application:,,,/Assets/streampilot.ico"
         TextElement.Foreground="{StaticResource TextBrush}"
         FontFamily="{StaticResource UiFontFamily}"
-        FontSize="13"
+        FontSize="14"
         UseLayoutRounding="True"
         WindowStartupLocation="CenterOwner"
         ShowInTaskbar="False"
@@ -25,6 +25,24 @@
         <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="4,10,4,4">
           <StackPanel>
             <Border Style="{StaticResource CardPanel}">
+              <StackPanel>
+                <TextBlock Text="默认平台" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
+                <TextBlock Text="主界面已取消平台下拉：解析时按输入链接的域名自动识别；只有房间号无法识别域名时才用这里的默认平台。"
+                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,0,0,8" />
+                <ComboBox Width="220" HorizontalAlignment="Left"
+                          ItemsSource="{Binding DefaultPlatformChoices}"
+                          SelectedItem="{Binding SelectedDefaultPlatform, Mode=TwoWay}"
+                          AutomationProperties.AutomationId="DefaultPlatformCombo">
+                  <ComboBox.ItemTemplate>
+                    <DataTemplate>
+                      <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource TextBrush}" />
+                    </DataTemplate>
+                  </ComboBox.ItemTemplate>
+                </ComboBox>
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
               <StackPanel>
                 <TextBlock Text="mpv 外挂播放" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
                 <TextBlock Text="mpv 可执行文件路径" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
@@ -64,7 +82,7 @@
                   <TextBlock Grid.Column="1" Text="{Binding Volume, StringFormat={}{0}%}" Style="{StaticResource MutedText}"
                              MinWidth="46" TextAlignment="Right" Margin="8,0,0,0" />
                 </Grid>
-                <TextBlock Text="低延迟追帧档位只在主界面选择，这里不再重复设置。"
+                <TextBlock Text="追帧档位（150 / 200 / 250 ms）在播放页底部随时切换，这里不再重复设置；程序会记住你在播放页选的档位。"
                            Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,6,0,0" />
               </StackPanel>
             </Border>
@@ -244,7 +262,7 @@
                   <Button Grid.Column="1" Content="清空" Command="{Binding ClearLogLinesCommand}" Margin="0" />
                 </Grid>
                 <ListBox x:Name="LogList" ItemsSource="{Binding LogLines}" Height="170" Margin="0,6,0,0"
-                         FontFamily="Consolas" FontSize="12"
+                         FontFamily="Consolas" FontSize="13"
                          ScrollViewer.HorizontalScrollBarVisibility="Disabled" />
               </StackPanel>
             </Border>

@@ -54,18 +54,18 @@
       <Style TargetType="TextBlock">
         <Setter Property="VerticalAlignment" Value="Center" />
         <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
-        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontSize" Value="14" />
       </Style>
 
       <Style x:Key="MutedText" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
         <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
-        <Setter Property="FontSize" Value="12" />
+        <Setter Property="FontSize" Value="13" />
       </Style>
 
       <Style x:Key="SectionTitle" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
         <Setter Property="FontWeight" Value="SemiBold" />
-        <Setter Property="FontSize" Value="14" />
+        <Setter Property="FontSize" Value="15" />
         <Setter Property="Margin" Value="0,14,0,6" />
       </Style>
 
@@ -89,11 +89,11 @@
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrushStrong}" />
         <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="Padding" Value="12,5" />
+        <Setter Property="Padding" Value="14,7" />
         <Setter Property="Margin" Value="0,0,6,0" />
-        <Setter Property="MinHeight" Value="30" />
+        <Setter Property="MinHeight" Value="34" />
         <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
-        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontSize" Value="14" />
         <!-- MinWidth 取 0：按钮宽度跟随文字，避免窄窗时文字被省略号截断 -->
         <Setter Property="MinWidth" Value="0" />
         <Setter Property="Cursor" Value="Hand" />
@@ -176,10 +176,10 @@
         <Setter Property="CaretBrush" Value="{StaticResource TextBrush}" />
         <Setter Property="SelectionBrush" Value="{StaticResource AccentBrush}" />
         <Setter Property="Padding" Value="8,5" />
-        <Setter Property="MinHeight" Value="30" />
+        <Setter Property="MinHeight" Value="34" />
         <Setter Property="VerticalContentAlignment" Value="Center" />
         <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
-        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontSize" Value="14" />
       </Style>
 
       <!-- 下拉框：必须自带模板，否则选中项文字会使用系统主题的深色前景 -->
@@ -200,9 +200,9 @@
         <Setter Property="Background" Value="{StaticResource ControlBackgroundBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrushStrong}" />
         <Setter Property="Padding" Value="8,4" />
-        <Setter Property="MinHeight" Value="30" />
+        <Setter Property="MinHeight" Value="34" />
         <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
-        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontSize" Value="14" />
         <Setter Property="Template">
           <Setter.Value>
             <ControlTemplate TargetType="ComboBox">
@@ -311,52 +311,7 @@
         <Setter Property="VerticalAlignment" Value="Center" />
         <Setter Property="Margin" Value="0,0,12,0" />
         <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
-        <Setter Property="FontSize" Value="13" />
-      </Style>
-
-      <!--
-        分段式单选项：用于「低延迟追帧」这类少量互斥档位。
-        去掉圆点、改成胶囊按钮，选中时填充主色，目标是"一眼看出当前档位"。
-      -->
-      <Style x:Key="SegmentRadio" TargetType="RadioButton">
-        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-        <Setter Property="Padding" Value="14,6" />
-        <Setter Property="Margin" Value="0,0,8,0" />
-        <Setter Property="MinWidth" Value="76" />
-        <Setter Property="Cursor" Value="Hand" />
-        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
-        <Setter Property="FontSize" Value="13" />
-        <Setter Property="Template">
-          <Setter.Value>
-            <ControlTemplate TargetType="RadioButton">
-              <Border x:Name="Root"
-                      Background="{StaticResource ControlBackgroundBrush}"
-                      BorderBrush="{StaticResource BorderBrushStrong}"
-                      BorderThickness="1"
-                      CornerRadius="6"
-                      SnapsToDevicePixels="True">
-                <ContentPresenter Margin="{TemplateBinding Padding}"
-                                  HorizontalAlignment="Center"
-                                  VerticalAlignment="Center"
-                                  RecognizesAccessKey="True" />
-              </Border>
-              <ControlTemplate.Triggers>
-                <Trigger Property="IsMouseOver" Value="True">
-                  <Setter TargetName="Root" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
-                </Trigger>
-                <Trigger Property="IsChecked" Value="True">
-                  <Setter TargetName="Root" Property="Background" Value="{StaticResource AccentStrongBrush}" />
-                  <Setter TargetName="Root" Property="BorderBrush" Value="{StaticResource AccentStrongBrush}" />
-                  <Setter Property="Foreground" Value="#FFFFFF" />
-                </Trigger>
-                <Trigger Property="IsEnabled" Value="False">
-                  <Setter TargetName="Root" Property="Opacity" Value="0.45" />
-                  <Setter Property="Cursor" Value="Arrow" />
-                </Trigger>
-              </ControlTemplate.Triggers>
-            </ControlTemplate>
-          </Setter.Value>
-        </Setter>
+        <Setter Property="FontSize" Value="14" />
       </Style>
 
       <!-- 复选项 -->
@@ -364,7 +319,7 @@
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
         <Setter Property="VerticalAlignment" Value="Center" />
         <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
-        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontSize" Value="14" />
       </Style>
 
       <!-- 页签控件与页签：页签文字必须显式指定浅色 -->
@@ -378,7 +333,7 @@
         <Setter Property="Background" Value="Transparent" />
         <Setter Property="Padding" Value="14,7" />
         <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
-        <Setter Property="FontSize" Value="13.5" />
+        <Setter Property="FontSize" Value="14.5" />
         <Setter Property="Template">
           <Setter.Value>
             <ControlTemplate TargetType="TabItem">
@@ -412,7 +367,7 @@
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
         <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
-        <Setter Property="FontSize" Value="12.5" />
+        <Setter Property="FontSize" Value="13.5" />
       </Style>
 
       <Style TargetType="ListBoxItem">

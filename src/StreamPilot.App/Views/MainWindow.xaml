@@ -8,7 +8,7 @@
         Icon="pack://application:,,,/Assets/streampilot.ico"
         TextElement.Foreground="{StaticResource TextBrush}"
         FontFamily="{StaticResource UiFontFamily}"
-        FontSize="13"
+        FontSize="14"
         UseLayoutRounding="True"
         TextOptions.TextFormattingMode="Ideal"
         WindowStartupLocation="CenterScreen">
@@ -30,70 +30,154 @@
           <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <!-- 预设栏：选中即填入平台与房间号并自动解析；右侧齿轮打开独立设置窗口 -->
-        <Border Grid.Row="0" Padding="14,10" BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="0,0,0,1">
+        <!-- 顶栏：只保留设置入口；平台选择已取消（解析时按链接域名自动识别） -->
+        <Border Grid.Row="0" Padding="14,8" BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="0,0,0,1">
           <Grid>
             <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="Auto" />
               <ColumnDefinition Width="*" />
               <ColumnDefinition Width="Auto" />
-              <ColumnDefinition Width="Auto" />
-              <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="预设" Style="{StaticResource MutedText}" Margin="0,0,8,0" />
-            <Grid Grid.Column="1">
-              <ComboBox x:Name="PresetCombo"
-                        ItemsSource="{Binding Presets}"
-                        SelectedItem="{Binding SelectedPreset, Mode=TwoWay}"
-                        ToolTip="选择预设后自动填入平台与房间号并开始解析">
-                <ComboBox.ItemTemplate>
-                  <DataTemplate>
-                    <TextBlock Text="{Binding Name}" Foreground="{StaticResource TextBrush}" />
-                  </DataTemplate>
-                </ComboBox.ItemTemplate>
-              </ComboBox>
-              <TextBlock Text="（暂无预设，可点右侧保存）"
-                         IsHitTestVisible="False"
-                         Margin="10,0,0,0"
-                         HorizontalAlignment="Left">
-                <TextBlock.Style>
-                  <Style TargetType="TextBlock" BasedOn="{StaticResource MutedText}">
-                    <Setter Property="Visibility" Value="Collapsed" />
-                    <Style.Triggers>
-                      <DataTrigger Binding="{Binding Presets.Count}" Value="0">
-                        <Setter Property="Visibility" Value="Visible" />
-                      </DataTrigger>
-                    </Style.Triggers>
-                  </Style>
-                </TextBlock.Style>
-              </TextBlock>
-            </Grid>
-            <Button Grid.Column="2" Content="＋ 新增预设" Command="{Binding SavePresetCommand}" ToolTip="把当前平台与房间号存进下拉，下次一键打开" Margin="8,0,0,0" />
-            <Button Grid.Column="3" Content="删除" Command="{Binding DeleteSelectedPresetCommand}" ToolTip="删除下拉中选中的预设" />
-            <Button Grid.Column="4" Content="⚙" Command="{Binding OpenSettingsCommand}"
-                    ToolTip="打开设置窗口" MinWidth="36" Padding="8,4" Margin="0" FontSize="14"
-                    AutomationProperties.AutomationId="OpenSettingsButton" />
+            <TextBlock Grid.Column="0" Text="StreamPilot 控制台" FontWeight="SemiBold" />
+            <Button Grid.Column="1" Content="⚙ 设置" Command="{Binding OpenSettingsCommand}"
+                    ToolTip="打开设置窗口（默认平台、Cookie、录制、日志等）"
+                    Padding="12,7" Margin="0" AutomationProperties.AutomationId="OpenSettingsButton" />
           </Grid>
         </Border>
 
-        <!-- 单页控制面板：房间与播放 + 录制（不再分页签，减少点击层级） -->
+        <!-- 单页控制面板：预设 → 直播源 → 播放控制 → 状态 → 录制 -->
         <ScrollViewer Grid.Row="1" x:Name="ControlTabs" VerticalScrollBarVisibility="Auto" Padding="14,12,14,18">
           <StackPanel>
-            <!-- ===== 房间 ===== -->
+            <!-- ===== 预设（独立成区，位于「直播源」上方） ===== -->
             <Border Style="{StaticResource CardPanel}">
+              <Grid>
+                <Grid.RowDefinitions>
+                  <RowDefinition Height="Auto" />
+                  <RowDefinition Height="Auto" />
+                  <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Grid.Column="0" Text="预设" Style="{StaticResource SectionTitle}" Margin="0,0,0,0" />
+                  <Button Grid.Column="1" Command="{Binding RefreshPresetStatusCommand}" Margin="0"
+                          ToolTip="重新检测所有预设是否开播（并发 2 个，单个超时 10 秒）">
+                    <TextBlock>
+                      <TextBlock.Style>
+                        <Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+                          <Setter Property="Text" Value="刷新状态" />
+                          <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsCheckingPresets}" Value="True">
+                              <Setter Property="Text" Value="检查中…" />
+                            </DataTrigger>
+                          </Style.Triggers>
+                        </Style>
+                      </TextBlock.Style>
+                    </TextBlock>
+                  </Button>
+                </Grid>
+
+                <TextBlock Grid.Row="1" Text="{Binding PresetSummary}" Style="{StaticResource MutedText}"
+                           TextWrapping="Wrap" Margin="0,6,0,8" />
+
+                <StackPanel Grid.Row="2">
+                  <!-- 空列表占位：不占用任何解析请求，只提示怎么加第一个预设 -->
+                  <TextBlock Text="点「新增预设」把当前房间存下来，这里会显示开播状态。"
+                             TextWrapping="Wrap" Margin="0,0,0,4">
+                    <TextBlock.Style>
+                      <Style TargetType="TextBlock" BasedOn="{StaticResource MutedText}">
+                        <Setter Property="Visibility" Value="Collapsed" />
+                        <Style.Triggers>
+                          <DataTrigger Binding="{Binding HasPresets}" Value="False">
+                            <Setter Property="Visibility" Value="Visible" />
+                          </DataTrigger>
+                        </Style.Triggers>
+                      </Style>
+                    </TextBlock.Style>
+                  </TextBlock>
+
+                  <ListBox ItemsSource="{Binding PresetItems}"
+                           MaxHeight="240"
+                           Background="Transparent"
+                           BorderThickness="0"
+                           ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <ListBox.ItemContainerStyle>
+                      <Style TargetType="ListBoxItem">
+                        <Setter Property="Padding" Value="0" />
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                        <Setter Property="Template">
+                          <Setter.Value>
+                            <ControlTemplate TargetType="ListBoxItem">
+                              <Border x:Name="RowRoot" Background="Transparent" CornerRadius="6" Padding="2">
+                                <ContentPresenter />
+                              </Border>
+                              <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                  <Setter TargetName="RowRoot" Property="Background" Value="{StaticResource ControlHoverBrush}" />
+                                </Trigger>
+                                <Trigger Property="IsSelected" Value="True">
+                                  <Setter TargetName="RowRoot" Property="Background" Value="{StaticResource SelectionBackgroundBrush}" />
+                                </Trigger>
+                              </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                          </Setter.Value>
+                        </Setter>
+                      </Style>
+                    </ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate>
+                      <DataTemplate>
+                        <Grid Margin="0,2">
+                          <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                          </Grid.ColumnDefinitions>
+
+                          <!-- 平台徽标：自绘圆角小方块 + 平台简称，不依赖任何图片资源 -->
+                          <Border Grid.Column="0" Width="30" Height="30" CornerRadius="7"
+                                  Background="{Binding BadgeBrush}" Margin="0,0,8,0">
+                            <TextBlock Text="{Binding BadgeText}" Foreground="#FFFFFF" FontWeight="SemiBold"
+                                       FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                          </Border>
+
+                          <Button Grid.Column="1"
+                                  Command="{Binding ApplyCommand}"
+                                  CommandParameter="{Binding}"
+                                  ToolTip="{Binding ToolTipText}"
+                                  HorizontalContentAlignment="Left"
+                                  Padding="0"
+                                  Margin="0"
+                                  Background="Transparent"
+                                  BorderThickness="0">
+                            <TextBlock Text="{Binding DisplayText}" TextTrimming="CharacterEllipsis" />
+                          </Button>
+
+                          <Button Grid.Column="2"
+                                  Content="删除"
+                                  Command="{Binding DataContext.DeletePresetCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                  CommandParameter="{Binding}"
+                                  ToolTip="删除这个预设"
+                                  Padding="10,5"
+                                  Margin="6,0,0,0" />
+                        </Grid>
+                      </DataTemplate>
+                    </ListBox.ItemTemplate>
+                  </ListBox>
+                </StackPanel>
+              </Grid>
+            </Border>
+
+            <!-- ===== 直播源 ===== -->
+            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
               <StackPanel>
                 <TextBlock Text="直播源" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
 
-                <TextBlock Text="平台" Style="{StaticResource MutedText}" Margin="0,0,0,4" />
-                <ComboBox ItemsSource="{Binding Platforms}"
-                          SelectedItem="{Binding SelectedPlatformOption, Mode=TwoWay}"
-                          AutomationProperties.AutomationId="PlatformCombo">
-                  <ComboBox.ItemTemplate>
-                    <DataTemplate>
-                      <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource TextBrush}" />
-                    </DataTemplate>
-                  </ComboBox.ItemTemplate>
-                </ComboBox>
+                <!-- 平台不可选：解析时按输入链接的域名自动识别，识别不出时用设置里的默认平台 -->
+                <TextBlock Text="{Binding PlatformStatusText}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                <TextBlock Text="{Binding PlatformHintText}" Style="{StaticResource MutedText}"
+                           TextWrapping="Wrap" Margin="0,4,0,0" />
 
                 <TextBlock Text="房间号 / 直播间链接" Style="{StaticResource MutedText}" Margin="0,10,0,4" />
                 <TextBox Text="{Binding RoomInput, UpdateSourceTrigger=PropertyChanged}" />
@@ -101,29 +185,23 @@
 
                 <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                   <Button Content="解析房间" Command="{Binding ResolveCommand}" Style="{StaticResource PrimaryButton}" />
-                  <Button Content="开始播放" Command="{Binding PlayCommand}" />
+                  <Button Content="开始播放" Command="{Binding PlayCommand}" Style="{StaticResource PrimaryButton}" />
                   <Button Content="mpv 播放" Command="{Binding MpvCommand}" Margin="0" />
                 </StackPanel>
+
+                <Button Content="＋ 新增预设" Command="{Binding SavePresetCommand}"
+                        Style="{StaticResource PrimaryButton}" Margin="0,8,0,0"
+                        HorizontalAlignment="Left"
+                        ToolTip="把当前平台与房间号存进上方预设区，下次一键打开" />
               </StackPanel>
             </Border>
 
-            <!-- ===== 播放 ===== -->
+            <!-- ===== 播放控制（档位入口在播放页底部，这里不再重复提供） ===== -->
             <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
               <StackPanel>
-                <TextBlock Text="低延迟追帧" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
-                <StackPanel Orientation="Horizontal">
-                  <RadioButton Content="150 ms" GroupName="ExtremeTarget" Style="{StaticResource SegmentRadio}"
-                               IsChecked="{Binding IsTarget150, Mode=OneWay}"
-                               Command="{Binding SetTargetCommand}" CommandParameter="150" />
-                  <RadioButton Content="200 ms" GroupName="ExtremeTarget" Style="{StaticResource SegmentRadio}"
-                               IsChecked="{Binding IsTarget200, Mode=OneWay}"
-                               Command="{Binding SetTargetCommand}" CommandParameter="200" />
-                  <RadioButton Content="250 ms" GroupName="ExtremeTarget" Style="{StaticResource SegmentRadio}"
-                               IsChecked="{Binding IsTarget250, Mode=OneWay}"
-                               Command="{Binding SetTargetCommand}" CommandParameter="250" Margin="0" />
-                </StackPanel>
-                <TextBlock Text="数值越小延迟越低；网络抖动明显时选 250 ms 更稳。" Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,6,0,0" />
-
+                <TextBlock Text="播放控制" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
+                <TextBlock Text="追帧档位（150 / 200 / 250 ms）在播放页底部切换，这里只做追帧与停止。"
+                           Style="{StaticResource MutedText}" TextWrapping="Wrap" />
                 <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                   <Button Content="追帧" Command="{Binding ChaseCommand}" />
                   <Button Content="停止播放" Command="{Binding StopCommand}" Margin="0" />
@@ -146,12 +224,10 @@
                            Foreground="{StaticResource AccentBrush}" />
                 <TextBlock Text="{Binding PlayerTelemetry}" Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,2,0,0" />
                 <TextBlock Text="{Binding BridgeStatus}" Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,2,0,0" />
+                <!-- 线路只报数量，不暴露任何 CDN 主机名与完整地址 -->
+                <TextBlock Text="{Binding CandidateLineSummary}" Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,6,0,0" />
               </StackPanel>
             </Border>
-
-            <!-- ===== 候选线路 ===== -->
-            <TextBlock Text="候选线路" Style="{StaticResource MutedText}" Margin="0,12,0,4" />
-            <ListBox ItemsSource="{Binding CandidateSummaries}" Height="84" />
 
             <!-- ===== 录制 ===== -->
             <TextBlock Text="直播回放录制" Style="{StaticResource SectionTitle}" Margin="0,14,0,4" />

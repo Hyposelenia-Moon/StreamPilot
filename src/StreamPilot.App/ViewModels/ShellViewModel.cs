@@ -50,8 +50,28 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>宿主要求页面停止的消息类型。</summary>
     private const string HostStopType = "stop";
 
-    /// <summary>宿主要求页面热切换追帧档位的消息类型。</summary>
-    private const string HostTargetType = "target";
+    /// <summary>
+    /// 追帧档位消息类型（双向同名）：档位入口只在播放页底部，宿主要求热切换的同名消息由播放页处理。
+    /// </summary>
+    private const string TargetType = "target";
+
+    /// <summary>预设开播检查的最大并发数（避免同时打满平台接口）。</summary>
+    private const int PresetCheckConcurrency = 2;
+
+    /// <summary>播放页档位消息里的目标延迟字段名。</summary>
+    private const string TargetFieldName = "extremeTargetMs";
+
+    /// <summary>手动追帧时要求播放页保留的缓冲秒数（越小延迟越低）。</summary>
+    private const double ChaseKeepSeconds = 0.08;
+
+    /// <summary>单个预设开播检查的超时时间。</summary>
+    private static readonly TimeSpan PresetCheckTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>自动识别平台失败时的提示（界面与状态栏共用）。</summary>
+    private const string PlatformDetectionHint = "无法自动识别平台：请在链接中包含平台域名，或在设置里指定默认平台。";
+
+    /// <summary>无法从链接识别平台时，界面不再给出房间号链接示例。</summary>
+    private const string PlatformUrlHint = "支持房间号或链接；粘贴完整直播间链接可自动识别平台。";
     /// <summary>页面进入全屏的消息类型。</summary>
     private const string PlayerFullscreenEnterType = "fullscreen-enter";
 
@@ -77,7 +97,18 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     private StreamPilotOptions _options;
     private PlatformOption _selectedPlatformOption = null!;
-    private RoomPreset? _selectedPreset;
+
+    /// <summary>最近一次解析实际使用的平台；识别不出时为 <see cref="PlatformId.Unknown"/>。</summary>
+    private PlatformId _effectivePlatform = PlatformId.Unknown;
+
+    /// <summary>点击某个预设后是否从输入框自动识别过平台（用于界面提示）。</summary>
+    private bool _isPlatformDetectedFromInput;
+
+    private bool _isCheckingPresets;
+    private CancellationTokenSource? _presetCheckCancellation;
+
+    /// <summary>已订阅状态变化的预设项（重建列表时逐个退订，避免事件悬挂）。</summary>
+    private readonly List<PresetItemViewModel> _presetItemSubscriptions = [];
     private string _roomInput = string.Empty;
     private int _extremeTargetMs;
     private int _volume;
@@ -90,12 +121,11 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     private string _liveStatus = ResolveMessages.LiveStatusUnknown;
     private string _recordingSummary = "未录制";
     private string _playerTelemetry = "-";
+    private string _candidateLineSummary = "候选线路：-";
+    private string _presetSummary = "暂无预设，可用下方「新增预设」把当前直播间存起来。";
     private ResolvedRoom? _currentRoom;
     private IRecordingSession? _recordingSession;
     private int _activeSessionId;
-
-    /// <summary>为 <see langword="true"/> 时抑制"切换预设即解析"（刷新列表时使用）。</summary>
-    private bool _suppressPresetAutoApply;
 
     /// <summary>用户选择的画质档位键；为空表示取平台最高档。</summary>
     private string? _preferredQualityKey;
@@ -120,54 +150,39 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         _extremeTargetMs = NormalizeTarget(_options.Playback.ExtremeTargetMs);
         _volume = Math.Clamp(_options.Playback.Volume, 0, 100);
 
-        Platforms =
-        [
-            new PlatformOption(PlatformId.Bilibili, "哔哩哔哩", "https://live.bilibili.com/"),
-            new PlatformOption(PlatformId.Douyin, "抖音", "https://live.douyin.com/"),
-            new PlatformOption(PlatformId.Huya, "虎牙", "https://www.huya.com/"),
-            new PlatformOption(PlatformId.Douyu, "斗鱼", "https://www.douyu.com/"),
-            new PlatformOption(PlatformId.Yy, "YY", "https://www.yy.com/"),
-            new PlatformOption(PlatformId.Bigo, "Bigo Live", "https://www.bigo.tv/"),
-        ];
+        Platforms = PlatformOption.All;
 
-        // 按上次使用的平台预选；找不到时回落到第一个，避免 SelectedItem 绑定拿不到实例。
-        PlatformId initialPlatform = _options.LastPlatform == PlatformId.Unknown ? PlatformId.Bilibili : _options.LastPlatform;
-        _selectedPlatformOption = Platforms.FirstOrDefault(option => option.Id == initialPlatform) ?? Platforms[0];
-
-        foreach (RoomPreset preset in _presetStore.Items)
-        {
-            Presets.Add(preset);
-        }
-
-        // 启动时只回填选中项，不触发解析：用户点"解析房间"或切换预设才发请求。
-        _suppressPresetAutoApply = true;
-        try
-        {
-            SelectedPreset = Presets.Count > 0 ? Presets[0] : null;
-        }
-        finally
-        {
-            _suppressPresetAutoApply = false;
-        }
-
-        UpdateRoomUrlHint();
+        // 按配置的默认平台预选；找不到时回落到第一个，避免 SelectedItem 绑定拿不到实例。
+        PlatformId initialPlatform = _options.DefaultPlatform == PlatformId.Unknown
+            ? PlatformId.Bilibili
+            : _options.DefaultPlatform;
+        _selectedPlatformOption = PlatformOption.Find(initialPlatform) ?? Platforms[0];
 
         ResolveCommand = new AsyncRelayCommand(_ => ResolveAsync(), HandleCommandErrorAsync, _ => !IsBusy);
         PlayCommand = new AsyncRelayCommand(_ => PlayAsync(), HandleCommandErrorAsync, _ => _currentRoom is not null && !IsBusy);
         StopCommand = new RelayCommand(_ => StopPlayback(), _ => _isPlayerReady);
-        ChaseCommand = new RelayCommand(_ => SendToPlayer(new { type = HostChaseType, keepSeconds = 0.08 }), _ => _isPlayerReady);
+        ChaseCommand = new RelayCommand(_ => SendToPlayer(new { type = HostChaseType, keepSeconds = ChaseKeepSeconds }), _ => _isPlayerReady);
         MpvCommand = new AsyncRelayCommand(_ => PlayWithMpvAsync(), HandleCommandErrorAsync, _ => _currentRoom is not null);
         StartRecordingCommand = new AsyncRelayCommand(_ => StartRecordingAsync(), HandleCommandErrorAsync, _ => _currentRoom is not null && _recordingSession is null);
         StopRecordingCommand = new AsyncRelayCommand(_ => StopRecordingAsync(), HandleCommandErrorAsync, _ => _recordingSession is not null);
-        SetTargetCommand = new RelayCommand(parameter => SetTarget(parameter), parameter => parameter is not null);
         OpenRecordingFolderCommand = new RelayCommand(_ => OpenRecordingFolder());
         OpenLogFolderCommand = new RelayCommand(_ => OpenFolder(AppPaths.LogDirectory));
         OpenSettingsCommand = new RelayCommand(_ => OpenSettings());
-        DeleteSelectedPresetCommand = new AsyncRelayCommand(_ => DeleteSelectedPresetAsync(), HandleCommandErrorAsync, _ => SelectedPreset is not null);
+        ApplyPresetCommand = new AsyncRelayCommand(parameter => ApplyPresetAsync(parameter as PresetItemViewModel), HandleCommandErrorAsync);
+        DeletePresetCommand = new AsyncRelayCommand(parameter => DeletePresetAsync(parameter as PresetItemViewModel), HandleCommandErrorAsync, parameter => parameter is PresetItemViewModel);
 
         // 保存预设刻意**始终可点**：按钮灰着没有任何解释，用户会以为"预设加不了"。
         // 点进去再校验并给出明确提示，比禁用按钮更容易理解。
         SavePresetCommand = new AsyncRelayCommand(_ => SavePresetAsync(), HandleCommandErrorAsync);
+
+        // 状态刷新按钮在检查期间禁用，避免并发堆积。
+        RefreshPresetStatusCommand = new AsyncRelayCommand(_ => RefreshPresetStatusAsync(), HandleCommandErrorAsync, _ => !_isCheckingPresets);
+
+        // 全部命令就绪后再建预设项（预设项持有 ApplyPresetCommand），最后触发一次后台检测。
+        RefreshPresetItems();
+
+        // 启动后立即在后台检测一遍所有预设是否开播；不等待、不阻塞 UI。
+        _ = RefreshPresetStatusAsync();
     }
 
     /// <summary>视图模型依赖集合（由组合根构造）。</summary>
@@ -214,9 +229,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>日志行（供界面展示最近事件）。</summary>
     public ObservableCollection<string> LogLines { get; } = [];
 
-    /// <summary>已解析的候选摘要。</summary>
-    public ObservableCollection<string> CandidateSummaries { get; } = [];
-
     /// <summary>解析命令。</summary>
     public ICommand ResolveCommand { get; }
 
@@ -238,9 +250,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>停止录制命令。</summary>
     public ICommand StopRecordingCommand { get; }
 
-    /// <summary>选择追帧档位命令（参数为毫秒字符串）。</summary>
-    public ICommand SetTargetCommand { get; }
-
     /// <summary>打开录制目录命令。</summary>
     public ICommand OpenRecordingFolderCommand { get; }
 
@@ -253,33 +262,26 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>把当前平台与房间号保存为预设。</summary>
     public ICommand SavePresetCommand { get; }
 
-    /// <summary>删除下拉中选中的预设。</summary>
-    public ICommand DeleteSelectedPresetCommand { get; }
+    /// <summary>点击预设：填入平台与房间号并自动解析（参数为 <see cref="PresetItemViewModel"/>）。</summary>
+    public ICommand ApplyPresetCommand { get; }
 
-    /// <summary>预设列表（下拉可选、可删除）。</summary>
-    public ObservableCollection<RoomPreset> Presets { get; } = [];
+    /// <summary>删除指定预设（参数为 <see cref="PresetItemViewModel"/>）。</summary>
+    public ICommand DeletePresetCommand { get; }
 
-    /// <summary>当前选中的预设；切换时自动填入平台与房间号并开始解析。</summary>
-    public RoomPreset? SelectedPreset
-    {
-        get => _selectedPreset;
-        set
-        {
-            if (!SetField(ref _selectedPreset, value))
-            {
-                return;
-            }
+    /// <summary>手动重新检测全部预设的开播状态。</summary>
+    public ICommand RefreshPresetStatusCommand { get; }
 
-            OnPropertyChanged(nameof(HasSelectedPreset));
-            if (value is not null && !_suppressPresetAutoApply)
-            {
-                _ = ApplyPresetAsync(value);
-            }
-        }
-    }
+    /// <summary>主界面预设列表（每项自带平台徽标、状态词与点击命令）。</summary>
+    public ObservableCollection<PresetItemViewModel> PresetItems { get; } = [];
 
-    /// <summary>是否存在选中预设（用于按钮可用性判断）。</summary>
-    public bool HasSelectedPreset => _selectedPreset is not null;
+    /// <summary>是否存在预设（供空列表占位文本使用）。</summary>
+    public bool HasPresets => PresetItems.Count > 0;
+
+    /// <summary>预设列表摘要文本。</summary>
+    public string PresetSummary => _presetSummary;
+
+    /// <summary>是否正在检测预设开播状态。</summary>
+    public bool IsCheckingPresets => _isCheckingPresets;
 
     /// <summary>当前选中的平台选项（下拉直接绑定对象，避免 SelectedValue 更新时序问题）。</summary>
     public PlatformOption SelectedPlatformOption
@@ -297,18 +299,59 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                 // 换平台后旧的档位键没有意义，回到"平台最高档"。
                 _preferredQualityKey = null;
                 OnPropertyChanged(nameof(SelectedPlatform));
-                UpdateRoomUrlHint();
             }
         }
     }
 
-    /// <summary>当前选中的平台标识。</summary>
+    /// <summary>当前选中的平台标识（界面已不再提供平台下拉，仅作为"上次使用的平台"）。</summary>
     public PlatformId SelectedPlatform => _selectedPlatformOption.Id;
 
-    /// <summary>当前平台的链接前缀提示。</summary>
-    public string RoomUrlHint => "支持房间号或链接，例如：" + _selectedPlatformOption.UrlPrefix;
+    /// <summary>最近一次解析实际使用的平台；未解析或识别失败时为 <see cref="PlatformId.Unknown"/>。</summary>
+    public PlatformId EffectivePlatform => _effectivePlatform;
 
-    private void UpdateRoomUrlHint() => OnPropertyChanged(nameof(RoomUrlHint));
+    /// <summary>平台状态显示文本，例如"平台：自动识别（当前 虎牙）"。</summary>
+    public string PlatformStatusText => _effectivePlatform == PlatformId.Unknown
+        ? "平台：尚未识别（解析时按链接域名自动识别）"
+        : "平台：自动识别（当前 " + ResolvePlatformName(_effectivePlatform) + "）";
+
+    /// <summary>平台识别说明文本。</summary>
+    public string PlatformHintText
+    {
+        get
+        {
+            if (_effectivePlatform != PlatformId.Unknown)
+            {
+                return _isPlatformDetectedFromInput
+                    ? "已按链接域名识别；换平台直接粘贴对应平台的直播间链接即可。"
+                    : "链接里没有平台域名，已使用默认平台；可在设置里更改默认平台。";
+            }
+
+            return PlatformDetectionHint;
+        }
+    }
+
+    /// <summary>房间输入框下方的提示：平台在解析时按链接域名识别，因此这里不再给出固定示例。</summary>
+    public string RoomUrlHint => PlatformUrlHint;
+
+    /// <summary>候选线路摘要（只显示数量，不含任何 host 或 URL）。</summary>
+    public string CandidateLineSummary
+    {
+        get => _candidateLineSummary;
+        private set => SetField(ref _candidateLineSummary, value);
+    }
+
+    private void RaisePlatformChanged()
+    {
+        OnPropertyChanged(nameof(EffectivePlatform));
+        OnPropertyChanged(nameof(PlatformStatusText));
+        OnPropertyChanged(nameof(PlatformHintText));
+    }
+
+    private static string ResolvePlatformName(PlatformId platform)
+    {
+        PlatformOption? option = PlatformOption.Find(platform);
+        return option is null ? platform.ToString() : option.DisplayName;
+    }
 
     /// <summary>房间号或链接输入。</summary>
     public string RoomInput
@@ -316,31 +359,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         get => _roomInput;
         set => SetField(ref _roomInput, value);
     }
-
-    /// <summary>极限追帧目标延迟（毫秒），仅允许 150/200/250。</summary>
-    public int ExtremeTargetMs
-    {
-        get => _extremeTargetMs;
-        set
-        {
-            int normalized = NormalizeTarget(value);
-            if (SetField(ref _extremeTargetMs, normalized))
-            {
-                OnPropertyChanged(nameof(IsTarget150));
-                OnPropertyChanged(nameof(IsTarget200));
-                OnPropertyChanged(nameof(IsTarget250));
-            }
-        }
-    }
-
-    /// <summary>是否选中 150ms 档。</summary>
-    public bool IsTarget150 => _extremeTargetMs == PlaybackRequest.ExtremeTargetsMs[0];
-
-    /// <summary>是否选中 200ms 档。</summary>
-    public bool IsTarget200 => _extremeTargetMs == PlaybackRequest.ExtremeTargetsMs[1];
-
-    /// <summary>是否选中 250ms 档。</summary>
-    public bool IsTarget250 => _extremeTargetMs == PlaybackRequest.ExtremeTargetsMs[2];
 
     /// <summary>播放音量（0-100）。</summary>
     public int Volume
@@ -529,6 +547,14 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                     _ = ApplyQualityAsync(ReadQualityKey(root));
                     break;
 
+                case TargetType:
+                    if (ReadTargetMs(root) is int targetMs)
+                    {
+                        ApplyPlayerTarget(targetMs);
+                    }
+
+                    break;
+
                 default:
                     if (message.Length > 0)
                     {
@@ -559,8 +585,24 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         IsBusy = true;
         try
         {
-            ApplyPlatformFromInput();
-            RoomQuery query = BuildQuery();
+            PlatformId? autoDetected = DetectPlatformFromInput();
+            PlatformId effective = autoDetected ?? _options.DefaultPlatform;
+            if (effective == PlatformId.Unknown)
+            {
+                _effectivePlatform = PlatformId.Unknown;
+                RaisePlatformChanged();
+                StatusMessage = PlatformDetectionHint;
+                AppendLog("解析取消：" + PlatformDetectionHint);
+                return;
+            }
+
+            ApplyPlatform(effective, autoDetected is not null);
+            RoomQuery? query = BuildQuery(effective);
+            if (query is null)
+            {
+                return;
+            }
+
             StatusMessage = "正在解析…";
             AppendLog("开始解析：" + _roomInput);
 
@@ -573,7 +615,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                 RoomAnchor = "-";
                 RoomCategory = "-";
                 LiveStatus = ResolveMessages.DescribeLiveStatus(outcome.Failure);
-                CandidateSummaries.Clear();
+                CandidateLineSummary = BuildCandidateSummary(0, 0);
                 AppendLog(StatusMessage);
                 RaiseCommandStates();
                 return;
@@ -588,19 +630,15 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                 + $"（状态：{LiveStatus}，共 {outcome.Room.Candidates.Count} 条线路）";
             AppendLog(StatusMessage);
 
-            CandidateSummaries.Clear();
-            foreach (StreamCandidate candidate in outcome.Room.Candidates)
-            {
-                CandidateSummaries.Add(
-                    $"#{candidate.SourceIndex} {candidate.CdnHost} · {candidate.Format} · {ResolveMessages.ForCodec(candidate.Codec)} · {ResolveMessages.ForQuality(candidate.Quality)}");
-            }
+            // 界面只展示条数，不展示 host 与完整地址。
+            CandidateLineSummary = BuildCandidateSummary(
+                outcome.Room.Candidates.Count,
+                CountUsableCandidates(outcome.Room));
 
             PersistLastInput();
 
-            if (_options.Playback.AutoLaunchMpv)
-            {
-                await PlayWithMpvAsync().ConfigureAwait(true);
-            }
+            // 自动开始播放（是否播放由设置里的开关决定；mpv 外挂播放同属"开始播放"）。
+            await PlayAsync().ConfigureAwait(true);
         }
         finally
         {
@@ -618,6 +656,21 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         if (_currentRoom is null)
         {
             StatusMessage = "请先解析直播间。";
+            return;
+        }
+
+        // 解析成功后由本方法统一决定"是否开始播放"，设置里的自动播放开关在这里生效。
+        if (!_options.Playback.AutoPlayOnResolve)
+        {
+            StatusMessage = "已解析完成；设置里已关闭「解析成功后自动播放」，点「开始播放」即可观看。";
+            return;
+        }
+
+        // mpv 外挂优先：它不依赖播放页；启动成功就不再往页面下发候选线路。
+        if (_options.Playback.AutoLaunchMpv && await PlayWithMpvCoreAsync(updateStatus: false).ConfigureAwait(true))
+        {
+            StatusMessage = "已用 mpv 外挂播放。";
+            AppendLog(StatusMessage);
             return;
         }
 
@@ -640,6 +693,14 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
             PlaybackPlan plan = await _playback.PrepareAsync(request, CancellationToken.None).ConfigureAwait(true);
             _activeSessionId = plan.SessionId;
+
+            // 档位入口在播放页底部，播放计划里的目标值即"当前档位"，记下来供下次播放沿用。
+            if (plan.ExtremeTargetMs != _extremeTargetMs)
+            {
+                _extremeTargetMs = NormalizeTarget(plan.ExtremeTargetMs);
+                PersistPlaybackSettings();
+            }
+
             StatusMessage = plan.Hint ?? $"已下发 {plan.Candidates.Count} 条候选线路（{plan.Mode} {plan.ExtremeTargetMs}ms）。";
 
             SendToPlayer(new
@@ -672,7 +733,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 使用 mpv 外挂播放当前房间的第一个可播放候选。
+    /// 用户点「mpv 播放」：用 mpv 外挂播放当前房间的第一个可播放候选。
     /// </summary>
     /// <returns>异步任务。</returns>
     public async Task PlayWithMpvAsync()
@@ -681,6 +742,26 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         {
             StatusMessage = "请先解析直播间。";
             return;
+        }
+
+        await PlayWithMpvCoreAsync(updateStatus: true).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// 调用桥接服务用 mpv 播放当前房间的第一个候选。
+    /// </summary>
+    /// <param name="updateStatus">是否直接改写状态提示（自动播放路径由调用方统一改写）。</param>
+    /// <returns>mpv 已成功启动返回 <see langword="true"/>。</returns>
+    private async Task<bool> PlayWithMpvCoreAsync(bool updateStatus)
+    {
+        if (_currentRoom is null)
+        {
+            if (updateStatus)
+            {
+                StatusMessage = "请先解析直播间。";
+            }
+
+            return false;
         }
 
         StreamCandidate? candidate = null;
@@ -692,18 +773,27 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
         if (candidate is null)
         {
-            StatusMessage = "没有可用线路。";
-            return;
+            if (updateStatus)
+            {
+                StatusMessage = "没有可用线路。";
+            }
+
+            return false;
         }
 
         bool started = await _bridge
             .PlayWithMpvAsync(candidate.Url, _currentRoom.Anchor + " · " + _currentRoom.Title, candidate.HttpReferer, CancellationToken.None)
             .ConfigureAwait(true);
 
-        StatusMessage = started
-            ? "已用 mpv 外挂播放。"
-            : "未找到 mpv，请把 mpv.exe 放到 tools 目录或在设置中指定路径。";
-        AppendLog(StatusMessage);
+        if (updateStatus)
+        {
+            StatusMessage = started
+                ? "已用 mpv 外挂播放。"
+                : "未找到 mpv，请把 mpv.exe 放到 tools 目录或在设置中指定路径。";
+            AppendLog(StatusMessage);
+        }
+
+        return started;
     }
 
     /// <summary>
@@ -789,25 +879,25 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 根据输入链接的域名自动切换平台（链接与当前所选平台不一致时）。
+    /// 根据输入链接的域名识别平台。
     /// </summary>
     /// <remarks>
-    /// 用户经常直接粘贴别家平台的链接而忘了换平台，旧行为会直接报"域名不属于当前平台"。
-    /// 这里在解析前按域名纠正一次，并在日志里说明。
+    /// 用户经常直接粘贴别家平台的链接，因此主界面不再提供平台下拉，
+    /// 统一按链接域名识别；房间号无法从域名识别时由调用方回落到默认平台。
     /// </remarks>
-    private void ApplyPlatformFromInput()
+    /// <returns>识别出的平台；链接为空、不是链接或域名不匹配时返回 <see langword="null"/>。</returns>
+    private PlatformId? DetectPlatformFromInput()
     {
         string input = _roomInput.Trim();
         if (!input.Contains("://", StringComparison.Ordinal)
             || !Uri.TryCreate(input, UriKind.Absolute, out Uri? uri))
         {
-            return;
+            return null;
         }
 
         foreach (PlatformOption option in Platforms)
         {
-            if (option.Id == SelectedPlatform
-                || !Uri.TryCreate(option.UrlPrefix, UriKind.Absolute, out Uri? baseUri))
+            if (!Uri.TryCreate(option.UrlPrefix, UriKind.Absolute, out Uri? baseUri))
             {
                 continue;
             }
@@ -816,28 +906,106 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                 || uri.Host.EndsWith("." + baseUri.Host, StringComparison.OrdinalIgnoreCase);
             if (sameHost)
             {
-                SelectedPlatformOption = option;
-                AppendLog("已根据链接自动切换到" + option.DisplayName + "平台。");
-                return;
+                return option.Id;
             }
         }
+
+        return null;
     }
-    private RoomQuery BuildQuery()
+
+    /// <summary>切换当前平台并刷新界面提示。</summary>
+    /// <param name="platform">生效的平台。</param>
+    /// <param name="detectedFromInput">是否来自链接域名识别。</param>
+    private void ApplyPlatform(PlatformId platform, bool detectedFromInput)
+    {
+        PlatformOption? option = PlatformOption.Find(platform);
+        if (option is not null && option.Id != _selectedPlatformOption.Id)
+        {
+            SelectedPlatformOption = option;
+            AppendLog("已根据链接自动切换到" + option.DisplayName + "平台。");
+        }
+
+        if (_effectivePlatform == platform && _isPlatformDetectedFromInput == detectedFromInput)
+        {
+            return;
+        }
+
+        _effectivePlatform = platform;
+        _isPlatformDetectedFromInput = detectedFromInput;
+        RaisePlatformChanged();
+    }
+
+    /// <summary>按指定平台构造解析请求。</summary>
+    /// <param name="platform">生效的平台。</param>
+    /// <returns>解析请求；输入为空时返回 <see langword="null"/>。</returns>
+    private RoomQuery? BuildQuery(PlatformId platform)
     {
         string input = _roomInput.Trim();
+        if (input.Length == 0)
+        {
+            StatusMessage = "请先输入房间号或直播间链接。";
+            return null;
+        }
+
         bool looksLikeUrl = input.Contains("://", StringComparison.Ordinal)
             || input.Contains('/', StringComparison.Ordinal);
 
         RoomQuery query = looksLikeUrl
-            ? RoomQuery.FromUrl(SelectedPlatform, input)
-            : RoomQuery.FromRoomId(SelectedPlatform, input);
+            ? RoomQuery.FromUrl(platform, input)
+            : RoomQuery.FromRoomId(platform, input);
 
         // Cookie 只参与解析（换最高画质），播放地址本身不带登录态。
         return query with
         {
-            Cookie = _options.Platforms.ForPlatform(SelectedPlatform),
+            Cookie = _options.Platforms.ForPlatform(platform),
             PreferredQualityKey = _preferredQualityKey,
         };
+    }
+
+    /// <summary>为指定平台构造解析请求（预设点击路径，平台来自预设本身）。</summary>
+    /// <param name="platform">预设的平台。</param>
+    /// <param name="input">预设的房间号或链接。</param>
+    /// <returns>解析请求。</returns>
+    private RoomQuery BuildQueryFor(PlatformId platform, string input)
+    {
+        string trimmed = input.Trim();
+        bool looksLikeUrl = trimmed.Contains("://", StringComparison.Ordinal)
+            || trimmed.Contains('/', StringComparison.Ordinal);
+
+        RoomQuery query = looksLikeUrl
+            ? RoomQuery.FromUrl(platform, trimmed)
+            : RoomQuery.FromRoomId(platform, trimmed);
+
+        return query with
+        {
+            Cookie = _options.Platforms.ForPlatform(platform),
+            PreferredQualityKey = _preferredQualityKey,
+        };
+    }
+
+    /// <summary>构造候选线路摘要文本（不含 host 与完整地址）。</summary>
+    /// <param name="total">候选总数。</param>
+    /// <param name="usable">仍在有效期内的候选数。</param>
+    /// <returns>形如"候选线路：12 条（可用 8 条）"的文本。</returns>
+    private static string BuildCandidateSummary(int total, int usable) =>
+        $"候选线路：{total} 条（可用 {usable} 条）";
+
+    /// <summary>统计仍在有效期内的候选数量。</summary>
+    /// <param name="room">已解析的房间。</param>
+    /// <returns>可用候选数。</returns>
+    private static int CountUsableCandidates(ResolvedRoom room)
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        int usable = 0;
+        foreach (StreamCandidate candidate in room.Candidates)
+        {
+            if (candidate.ExpiresAt is null || candidate.ExpiresAt > now)
+            {
+                usable++;
+            }
+        }
+
+        return usable;
     }
 
     private void StopPlayback()
@@ -886,30 +1054,34 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             : key;
     }
 
-    private void SetTarget(object? parameter)
+    /// <summary>
+    /// 播放页在底部档位控件里改变追帧目标时同步到宿主：记住档位供下次播放使用。
+    /// </summary>
+    /// <param name="targetMs">页面报告的目标延迟（毫秒）。</param>
+    private void ApplyPlayerTarget(int targetMs)
     {
-        if (parameter is null)
+        int normalized = NormalizeTarget(targetMs);
+        if (normalized == _extremeTargetMs)
         {
             return;
         }
 
-        if (!int.TryParse(parameter.ToString(), out int target))
-        {
-            return;
-        }
-
-        ExtremeTargetMs = target;
+        _extremeTargetMs = normalized;
         PersistPlaybackSettings();
+        AppendLog("播放页把追帧档位改为 " + normalized + " ms（下次播放沿用）");
+    }
 
-        // 正在播放时热切换：把新档位直接下发给页面，而不是等下一次播放才生效。
-        if (_isPlayerReady && _activeSessionId != 0)
+    /// <summary>读取播放页传来的追帧目标延迟。</summary>
+    /// <param name="root">消息根元素。</param>
+    /// <returns>目标延迟（毫秒）；字段缺失或非法时返回 <see langword="null"/>。</returns>
+    private static int? ReadTargetMs(JsonElement root)
+    {
+        if (!root.TryGetProperty(TargetFieldName, out JsonElement element) || element.ValueKind != JsonValueKind.Number)
         {
-            SendToPlayer(new { type = HostTargetType, extremeTargetMs = ExtremeTargetMs });
-            AppendLog("追帧档位切换为 " + ExtremeTargetMs + " ms（已应用到当前播放）");
-            return;
+            return null;
         }
 
-        AppendLog("追帧档位切换为 " + ExtremeTargetMs + " ms（下次播放生效）");
+        return element.TryGetInt32(out int value) ? value : null;
     }
 
     /// <summary>打开独立的设置窗口，保存后立即生效并把新音量下发给播放页。</summary>
@@ -939,14 +1111,11 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
             _extremeTargetMs = NormalizeTarget(_options.Playback.ExtremeTargetMs);
             _volume = Math.Clamp(_options.Playback.Volume, 0, 100);
-            OnPropertyChanged(nameof(ExtremeTargetMs));
-            OnPropertyChanged(nameof(IsTarget150));
-            OnPropertyChanged(nameof(IsTarget200));
-            OnPropertyChanged(nameof(IsTarget250));
             OnPropertyChanged(nameof(Volume));
             OnPropertyChanged(nameof(RecordingDirectory));
 
-            RefreshPresets();
+            ApplyPlatformChangeFromSettings();
+            RefreshBridgeStatus();
             SendToPlayer(new { type = "volume", value = _volume });
 
             StatusMessage = "设置已保存。";
@@ -960,46 +1129,251 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         }
     }
 
-    /// <summary>刷新预设列表（以存储内容为准，且不触发自动解析）。</summary>
-    private void RefreshPresets()
+    /// <summary>设置窗口保存后同步默认平台与界面提示。</summary>
+    private void ApplyPlatformChangeFromSettings()
     {
-        bool previous = _suppressPresetAutoApply;
-        _suppressPresetAutoApply = true;
-        try
+        PlatformOption? option = PlatformOption.Find(_options.DefaultPlatform);
+        if (option is not null && option.Id != _selectedPlatformOption.Id)
         {
-            Presets.Clear();
-            foreach (RoomPreset preset in _presetStore.Items)
-            {
-                Presets.Add(preset);
-            }
-
-            SelectedPreset = Presets.Count > 0 ? Presets[0] : null;
-            (DeleteSelectedPresetCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-            (SavePresetCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+            SelectedPlatformOption = option;
         }
-        finally
+
+        _effectivePlatform = option is null ? PlatformId.Unknown : option.Id;
+        _isPlatformDetectedFromInput = false;
+        RaisePlatformChanged();
+        UpdatePresetSummary();
+    }
+
+    /// <summary>按存储内容重建预设列表（不触发开播检查）。</summary>
+    private void RefreshPresetItems()
+    {
+        foreach (PresetItemViewModel previous in _presetItemSubscriptions)
         {
-            _suppressPresetAutoApply = previous;
+            previous.PropertyChanged -= OnPresetItemPropertyChanged;
+        }
+
+        _presetItemSubscriptions.Clear();
+        PresetItems.Clear();
+        foreach (RoomPreset preset in _presetStore.Items)
+        {
+            PresetItemViewModel item = new(preset, ApplyPresetCommand);
+            item.PropertyChanged += OnPresetItemPropertyChanged;
+            _presetItemSubscriptions.Add(item);
+            PresetItems.Add(item);
+        }
+
+        OnPropertyChanged(nameof(HasPresets));
+        UpdatePresetSummary();
+        (DeletePresetCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (SavePresetCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+    }
+
+    /// <summary>预设项状态变化时同步摘要（开播数量、失败数量）。</summary>
+    /// <param name="sender">变化的事件源。</param>
+    /// <param name="e">属性变化参数。</param>
+    private void OnPresetItemPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (string.Equals(e.PropertyName, nameof(PresetItemViewModel.State), StringComparison.Ordinal))
+        {
+            UpdatePresetSummary();
         }
     }
 
-    /// <summary>切换预设：填入平台与房间号并立即解析。</summary>
-    /// <param name="preset">预设。</param>
-    /// <returns>异步任务。</returns>
-    private async Task ApplyPresetAsync(RoomPreset preset)
+    /// <summary>刷新预设摘要文本。</summary>
+    private void UpdatePresetSummary()
     {
-        PlatformOption? option = Platforms.FirstOrDefault(item => item.Id == preset.Platform);
+        int total = PresetItems.Count;
+        int live = 0;
+        int failed = 0;
+        foreach (PresetItemViewModel item in PresetItems)
+        {
+            if (item.State == PresetLiveState.Live)
+            {
+                live++;
+            }
+            else if (item.State == PresetLiveState.Failed)
+            {
+                failed++;
+            }
+        }
+
+        _presetSummary = total == 0
+            ? "暂无预设：填好房间号后点「新增预设」，下次一键打开。"
+            : $"共 {total} 个预设 · 开播 {live} 个 · 检查失败 {failed} 个";
+        OnPropertyChanged(nameof(PresetSummary));
+    }
+
+    /// <summary>
+    /// 依次检测所有预设是否开播。
+    /// </summary>
+    /// <remarks>
+    /// 并发上限 <see cref="PresetCheckConcurrency"/>，单个预设 10 秒超时；检查失败的预设只标记自己，
+    /// 不影响其它预设。整个流程可被 <see cref="CancelPresetChecks"/> 取消，绝不在 UI 线程阻塞。
+    /// </remarks>
+    /// <returns>异步任务。</returns>
+    private async Task RefreshPresetStatusAsync()
+    {
+        if (PresetItems.Count == 0)
+        {
+            UpdatePresetSummary();
+            return;
+        }
+
+        // 已有检测在跑时先取消它：避免两轮检测同时改写同一批列表项。
+        _presetCheckCancellation?.Cancel();
+
+        SetPresetChecking(true);
+        CancellationTokenSource cancellation = new();
+        _presetCheckCancellation = cancellation;
+        try
+        {
+            using SemaphoreSlim gate = new(PresetCheckConcurrency, PresetCheckConcurrency);
+            List<Task> checks = [];
+            foreach (PresetItemViewModel item in PresetItems)
+            {
+                checks.Add(CheckPresetCoreAsync(item, gate, cancellation.Token));
+            }
+
+            await Task.WhenAll(checks).ConfigureAwait(true);
+            AppendLog($"预设开播检测完成（共 {PresetItems.Count} 个）。");
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
+        {
+            await HandleCommandErrorAsync(exception).ConfigureAwait(true);
+        }
+        finally
+        {
+            _presetCheckCancellation = null;
+            cancellation.Dispose();
+            SetPresetChecking(false);
+            UpdatePresetSummary();
+        }
+    }
+
+    /// <summary>
+    /// 取消进行中的预设开播检测。
+    /// </summary>
+    /// <remarks>窗口关闭时由宿主调用，避免检测回调打到已经开始释放的界面。</remarks>
+    public void CancelPresetChecks() => _presetCheckCancellation?.Cancel();
+
+    /// <summary>切换"检查中"状态并刷新相关命令的可用性。</summary>
+    /// <param name="isChecking">是否正在检查。</param>
+    private void SetPresetChecking(bool isChecking)
+    {
+        _isCheckingPresets = isChecking;
+        OnPropertyChanged(nameof(IsCheckingPresets));
+        (RefreshPresetStatusCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+    }
+
+    /// <summary>在并发闸门与超时保护下检测单个预设；单个预设的失败不会影响其它预设。</summary>
+    /// <param name="item">预设项。</param>
+    /// <param name="gate">并发闸门。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>异步任务。</returns>
+    private async Task CheckPresetCoreAsync(PresetItemViewModel item, SemaphoreSlim gate, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await gate.WaitAsync(cancellationToken).ConfigureAwait(true);
+            try
+            {
+                using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(PresetCheckTimeout);
+                await CheckPresetAsync(item, timeout.Token).ConfigureAwait(true);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            item.ApplyFailure("检查已取消。");
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
+        {
+            item.ApplyFailure("检查失败：" + exception.Message);
+            _logger.LogError(LogLevel.Warn, _moduleName, "预设开播检测任务异常。", exception, new Dictionary<string, object?>
+            {
+                ["preset"] = item.Preset.Name,
+                ["platform"] = item.Platform.ToString(),
+            });
+        }
+    }
+
+    /// <summary>检测单个预设是否开播，并把结果写回列表项。</summary>
+    /// <param name="item">预设项。</param>
+    /// <param name="cancellationToken">带超时的取消令牌。</param>
+    /// <returns>异步任务。</returns>
+    private async Task CheckPresetAsync(PresetItemViewModel item, CancellationToken cancellationToken)
+    {
+        item.ApplyChecking();
+        string anchor = item.Preset.Name;
+        try
+        {
+            ResolveOutcome outcome = await _resolver
+                .ResolveAsync(BuildQueryFor(item.Platform, item.RoomInput), cancellationToken)
+                .ConfigureAwait(true);
+
+            if (outcome.Success && outcome.Room is not null)
+            {
+                anchor = outcome.Room.Anchor;
+                item.ApplyLive(anchor);
+                return;
+            }
+
+            if (outcome.Failure == ResolveFailure.NotLive)
+            {
+                item.ApplyOffline(anchor);
+                return;
+            }
+
+            string reason = outcome.Message.Length > 0 ? outcome.Message : ResolveMessages.DescribeFailure(outcome.Failure);
+            item.ApplyFailure(reason);
+            _logger.Warn(_moduleName, "预设开播检测失败。", new Dictionary<string, object?>
+            {
+                ["preset"] = item.Preset.Name,
+                ["platform"] = item.Platform.ToString(),
+                ["failure"] = outcome.Failure.ToString(),
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            item.ApplyFailure("检查超时或已取消（可在网络空闲时点「刷新状态」重试）。");
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
+        {
+            item.ApplyFailure("检查失败：" + exception.Message);
+            _logger.LogError(LogLevel.Warn, _moduleName, "预设开播检测异常。", exception, new Dictionary<string, object?>
+            {
+                ["preset"] = item.Preset.Name,
+                ["platform"] = item.Platform.ToString(),
+            });
+        }
+    }
+
+    /// <summary>点击预设：填入平台与房间号并自动解析（自动播放由设置里的开关决定，不再重复下发）。</summary>
+    /// <param name="item">被点击的预设项。</param>
+    /// <returns>异步任务。</returns>
+    private async Task ApplyPresetAsync(PresetItemViewModel? item)
+    {
+        if (item is null)
+        {
+            return;
+        }
+
+        PlatformOption? option = PlatformOption.Find(item.Platform);
         if (option is not null)
         {
             SelectedPlatformOption = option;
         }
 
-        RoomInput = preset.RoomInput;
-        AppendLog("载入预设：" + preset.Name + " → " + preset.RoomInput);
+        RoomInput = item.RoomInput;
+        AppendLog("载入预设：" + item.Preset.Name + " → " + item.RoomInput);
         await ResolveAsync().ConfigureAwait(true);
     }
 
-    /// <summary>把当前平台与房间号保存为预设（同名同平台会覆盖）。</summary>
+    /// <summary>把当前平台与房间号保存为预设（同名同平台会覆盖），并立刻检测其开播状态。</summary>
     /// <returns>异步任务。</returns>
     private async Task SavePresetAsync()
     {
@@ -1012,53 +1386,44 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             return;
         }
 
+        PlatformId platform = _effectivePlatform == PlatformId.Unknown ? _selectedPlatformOption.Id : _effectivePlatform;
         string defaultName = string.IsNullOrWhiteSpace(_roomAnchor) || _roomAnchor == "-"
             ? roomInput
             : _roomAnchor;
-        string? name = InputDialog.Show(System.Windows.Application.Current?.MainWindow, "新增预设", "给这个直播间起个名字（存在下拉里方便下次点开）", defaultName);
+        string? name = InputDialog.Show(System.Windows.Application.Current?.MainWindow, "新增预设", "给这个直播间起个名字（列表里一眼就能找到）", defaultName);
         if (string.IsNullOrWhiteSpace(name))
         {
             StatusMessage = "已取消新增预设。";
             return;
         }
 
-        if (!_presetStore.Add(new RoomPreset(name.Trim(), SelectedPlatform, roomInput)))
+        if (!_presetStore.Add(new RoomPreset(name.Trim(), platform, roomInput)))
         {
             StatusMessage = "新增预设失败：名称或房间号不合法（名称最长 60 字）。";
             AppendLog("新增预设失败：" + name);
             return;
         }
 
-        RefreshPresets();
-        RoomPreset? saved = Presets.FirstOrDefault(item => string.Equals(item.Name, name.Trim(), StringComparison.Ordinal));
-        _suppressPresetAutoApply = true;
-        try
-        {
-            SelectedPreset = saved;
-        }
-        finally
-        {
-            _suppressPresetAutoApply = false;
-        }
-
-        StatusMessage = $"已新增预设「{name.Trim()}」，下拉里已选中它（当前共 {Presets.Count} 个）。";
+        RefreshPresetItems();
+        StatusMessage = $"已新增预设「{name.Trim()}」，正在后台检测它是否开播（当前共 {PresetItems.Count} 个）。";
         AppendLog("已新增预设：" + name.Trim());
+        _ = RefreshPresetStatusAsync();
         await Task.CompletedTask.ConfigureAwait(true);
     }
 
-    /// <summary>删除下拉中选中的预设。删除后不自动解析下一条。</summary>
+    /// <summary>删除指定预设（不从界面发起解析）。</summary>
+    /// <param name="item">要删除的预设项。</param>
     /// <returns>异步任务。</returns>
-    private async Task DeleteSelectedPresetAsync()
+    private async Task DeletePresetAsync(PresetItemViewModel? item)
     {
-        RoomPreset? preset = SelectedPreset;
-        if (preset is null)
+        if (item is null)
         {
             return;
         }
 
-        bool removed = _presetStore.Remove(preset.Name);
-        RefreshPresets();
-        StatusMessage = removed ? "已删除预设「" + preset.Name + "」。" : "删除预设失败：" + preset.Name;
+        bool removed = _presetStore.Remove(item.Preset.Name);
+        RefreshPresetItems();
+        StatusMessage = removed ? "已删除预设「" + item.Preset.Name + "」。" : "删除预设失败：" + item.Preset.Name;
         AppendLog(StatusMessage);
         await Task.CompletedTask.ConfigureAwait(true);
     }
@@ -1067,7 +1432,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     {
         _options = _options with
         {
-            LastPlatform = SelectedPlatform,
+            LastPlatform = ResolveLastPlatform(),
             LastRoomInput = _roomInput,
             Playback = _options.Playback with
             {
@@ -1082,11 +1447,16 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     {
         _options = _options with
         {
-            LastPlatform = SelectedPlatform,
+            LastPlatform = ResolveLastPlatform(),
             LastRoomInput = _roomInput,
         };
         _saveOptions(_options);
     }
+
+    /// <summary>解析要写入配置的"上次使用的平台"。</summary>
+    /// <returns>平台标识；从未成功识别过时返回 Unknown，避免覆盖用户已有的记录。</returns>
+    private PlatformId ResolveLastPlatform() =>
+        _effectivePlatform == PlatformId.Unknown ? _options.LastPlatform : _effectivePlatform;
 
     private void SendBridgeInfo()
     {
@@ -1208,11 +1578,3 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         return true;
     }
 }
-
-/// <summary>
-/// 平台下拉项。
-/// </summary>
-/// <param name="Id">平台标识。</param>
-/// <param name="DisplayName">展示名。</param>
-/// <param name="UrlPrefix">直播间链接前缀。</param>
-public sealed record PlatformOption(PlatformId Id, string DisplayName, string UrlPrefix);

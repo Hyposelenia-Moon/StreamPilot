@@ -885,13 +885,14 @@ internal sealed class BilibiliParser : PlatformParserBase
         }
 
         available.Sort(static (left, right) => right.CompareTo(left));
+        bool has4K = available.Contains(QualityNames.BilibiliQuality4K);
         List<QualityOption> options = [];
         foreach (int qn in available)
         {
             options.Add(new QualityOption
             {
                 Key = qn.ToString(CultureInfo.InvariantCulture),
-                Label = BuildQualityLabel(qn, names),
+                Label = BuildQualityLabel(qn, names, has4K),
                 IsBest = options.Count == 0,
             });
         }
@@ -983,30 +984,59 @@ internal sealed class BilibiliParser : PlatformParserBase
         return result;
     }
 
-    /// <summary>生成档位显示名：优先官方 desc，缺失时用内置中文名，HDR 追加标记。</summary>
+    /// <summary>生成档位显示名，命名与官方直播间一致（用户可对照）。</summary>
     /// <param name="qn">档位数值。</param>
-    /// <param name="names">官方名称表。</param>
+    /// <param name="names">官方名称表（qn → 名称、HDR 标记）。</param>
+    /// <param name="has4K">本房间是否提供 4K 档位（决定 1080P 档叫"原画"还是"高码率"）。</param>
     /// <returns>显示名。</returns>
-    private static string BuildQualityLabel(int qn, Dictionary<int, (string Name, string Hdr)> names)
+    /// <remarks>
+    /// 命名规则：有 4K 时依次为 4K 原画（高帧率）→ 1080P 高码率（高帧率）→ 1080P 蓝光 → 720P 超清；
+    /// 无 4K 时依次为 1080P 原画（高帧率）→ 1080P 蓝光 → 720P 超清。
+    /// 平台的 hdr_desc 为 HDR 时，标记写在"高帧率"之前；接口不逐档返回帧率，
+    /// 因此高帧率按 B站 的档位语义（1080P 原画 / 4K 原画 / 高码率）判定。
+    /// </remarks>
+    private static string BuildQualityLabel(int qn, Dictionary<int, (string Name, string Hdr)> names, bool has4K)
     {
-        string label = names.TryGetValue(qn, out (string Name, string Hdr) entry) && entry.Name.Length > 0
-            ? entry.Name
-            : qn switch
-            {
-                QualityNames.BilibiliMaxQualityNumber => "杜比原画",
-                QualityNames.BilibiliQuality4K => "4K 原画",
-                QualityNames.BilibiliQuality2K => "2K 原画",
-                QualityNames.BilibiliQuality1080HighFps => "原画（1080P 高帧率）",
-                QualityNames.BilibiliQuality1080 => "蓝光（1080P）",
-                QualityNames.BilibiliQuality720 => "超清（720P）",
-                QualityNames.BilibiliQuality480 => "高清（480P）",
-                80 => "流畅",
-                _ => $"qn={qn}",
-            };
-
         bool hdr = names.TryGetValue(qn, out (string Name, string Hdr) hdrEntry)
             && hdrEntry.Hdr.Contains("HDR", StringComparison.OrdinalIgnoreCase);
-        return hdr && !label.Contains("HDR", StringComparison.OrdinalIgnoreCase) ? label + "（HDR）" : label;
+
+        return qn switch
+        {
+            QualityNames.BilibiliMaxQualityNumber => "杜比原画",
+            QualityNames.BilibiliQuality4K => Decorate("4K 原画", hdr, highFrameRate: true),
+            QualityNames.BilibiliQuality2K => Decorate("2K 原画", hdr, highFrameRate: true),
+            QualityNames.BilibiliQuality1080HighFps => has4K
+                ? Decorate("1080P 高码率", hdr, highFrameRate: true)
+                : Decorate("1080P 原画", hdr, highFrameRate: true),
+            QualityNames.BilibiliQuality1080 => Decorate("1080P 蓝光", hdr, highFrameRate: false),
+            QualityNames.BilibiliQuality720 => Decorate("720P 超清", hdr, highFrameRate: false),
+            QualityNames.BilibiliQuality480 => Decorate("高清", hdr, highFrameRate: false),
+            80 => "流畅",
+            _ => names.TryGetValue(qn, out (string Name, string Hdr) entry) && entry.Name.Length > 0
+                ? entry.Name
+                : $"qn={qn}",
+        };
+    }
+
+    /// <summary>按需要给档位名补上（HDR 高帧率）后缀。</summary>
+    /// <param name="name">档位名（例如「1080P 原画」）。</param>
+    /// <param name="hdr">平台是否把该档标记为 HDR。</param>
+    /// <param name="highFrameRate">是否属于高帧率档。</param>
+    /// <returns>带后缀的显示名；两种标记都没有时原样返回。</returns>
+    private static string Decorate(string name, bool hdr, bool highFrameRate)
+    {
+        List<string> marks = [];
+        if (hdr)
+        {
+            marks.Add("HDR");
+        }
+
+        if (highFrameRate)
+        {
+            marks.Add("高帧率");
+        }
+
+        return marks.Count == 0 ? name : name + "（" + string.Join(" ", marks) + "）";
     }
 
     /// <summary>

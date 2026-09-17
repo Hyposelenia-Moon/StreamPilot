@@ -51,6 +51,7 @@ public partial class MainWindow : Window
         if (_viewModel is not null)
         {
             _viewModel.SendMessageRequested -= OnSendMessageRequested;
+            _viewModel.FullscreenChanged -= OnFullscreenChanged;
         }
 
         _viewModel = e.NewValue as ShellViewModel;
@@ -85,6 +86,8 @@ public partial class MainWindow : Window
         _statusTimer.Stop();
         if (_viewModel is not null)
         {
+            // 先取消后台的预设开播检测，避免回调打到已经开始释放的界面。
+            _viewModel.CancelPresetChecks();
             _viewModel.SendMessageRequested -= OnSendMessageRequested;
             _viewModel.FullscreenChanged -= OnFullscreenChanged;
         }

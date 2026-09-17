@@ -27,6 +27,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     private string _mpvPath = string.Empty;
     private int _extremeTargetMs = PlaybackRequest.DefaultExtremeTargetMs;
+    private PlatformOption _selectedDefaultPlatform = PlatformOption.All[0];
     private int _volume = 70;
     private bool _autoPlayOnResolve = true;
     private bool _autoLaunchMpv;
@@ -122,6 +123,24 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         get => _mpvPath;
         set => SetField(ref _mpvPath, value ?? string.Empty);
+    }
+
+    /// <summary>可用平台列表（供"默认平台"下拉绑定）。</summary>
+    public IReadOnlyList<PlatformOption> DefaultPlatformChoices { get; } = PlatformOption.All;
+
+    /// <summary>
+    /// 默认平台：仅当输入无法从链接域名识别平台时使用。
+    /// </summary>
+    public PlatformOption SelectedDefaultPlatform
+    {
+        get => _selectedDefaultPlatform;
+        set
+        {
+            if (value is not null)
+            {
+                SetField(ref _selectedDefaultPlatform, value);
+            }
+        }
     }
 
     /// <summary>默认追帧档位（毫秒）。</summary>
@@ -311,6 +330,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
         MpvPath = options.Playback.MpvPath;
         ExtremeTargetMs = NormalizeTarget(options.Playback.ExtremeTargetMs);
+        SelectedDefaultPlatform = PlatformOption.Find(options.DefaultPlatform) ?? PlatformOption.All[0];
         Volume = Clamp(options.Playback.Volume, 0, 100, 70);
         AutoPlayOnResolve = options.Playback.AutoPlayOnResolve;
         AutoLaunchMpv = options.Playback.AutoLaunchMpv;
@@ -366,6 +386,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
         result = baseOptions with
         {
+            DefaultPlatform = SelectedDefaultPlatform.Id,
             Playback = baseOptions.Playback with
             {
                 MpvPath = resolvedMpv,

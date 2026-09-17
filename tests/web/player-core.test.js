@@ -6,7 +6,7 @@
  * 运行方式：
  *   node --test tests/web
  * 覆盖：档位归一化、候选规范化与过滤、追帧参数推导、重连退避、卡顿阈值、
- *       手动追帧夹取、错误归类（正常 / 异常 / 边界三类）。
+ *       手动追帧夹取、错误归类、音量换算、模式/状态/空态文案（正常 / 异常 / 边界三类）。
  */
 
 const test = require('node:test');
@@ -237,4 +237,90 @@ test('applyExtremeTarget 热切换档位', () => {
   assert.equal(core.applyExtremeTarget(run, 999), true);
   assert.equal(run.extremeTargetMs, 250, '非法档位回落到默认 250');
   assert.equal(core.applyExtremeTarget(null, 250), false);
+});
+
+test('初始音量为 30 且不静音', () => {
+  assert.equal(core.INITIAL_VOLUME_PERCENT, 30);
+  assert.equal(core.shouldMuteAtVolume(core.INITIAL_VOLUME_PERCENT), false, '初始音量非 0 就不该静音');
+  assert.equal(core.volumePercentToGain(core.INITIAL_VOLUME_PERCENT), 0.3);
+  assert.equal(core.volumePercentToGain(core.MAX_VOLUME_PERCENT), 1);
+  assert.equal(core.volumePercentToGain(core.MIN_VOLUME_PERCENT), 0);
+});
+
+test('clampVolumePercent 夹取音量并处理非法输入', () => {
+  assert.equal(core.clampVolumePercent(30), 30);
+  assert.equal(core.clampVolumePercent('30'), 30, '滑块给的是字符串');
+  assert.equal(core.clampVolumePercent(130), 100);
+  assert.equal(core.clampVolumePercent(-10), 0);
+  assert.equal(core.clampVolumePercent(30.6), 31, '滚轮累加产生的浮点噪声要收敛');
+  assert.equal(core.clampVolumePercent(undefined), 0);
+  assert.equal(core.clampVolumePercent('abc'), 0);
+  assert.equal(core.clampVolumePercent(Number.NaN), 0);
+  assert.equal(core.clampVolumePercent(Number.POSITIVE_INFINITY), 0);
+});
+
+test('shouldMuteAtVolume 只在音量为 0 时静音', () => {
+  assert.equal(core.shouldMuteAtVolume(0), true);
+  assert.equal(core.shouldMuteAtVolume(1), false);
+  assert.equal(core.shouldMuteAtVolume(30), false);
+  assert.equal(core.shouldMuteAtVolume(100), false);
+});
+
+test('isAutoplayBlocked 只认 NotAllowedError', () => {
+  assert.equal(core.isAutoplayBlocked({ name: 'NotAllowedError' }), true);
+  assert.equal(core.isAutoplayBlocked({ name: 'AbortError' }), false, '播放被打断属于线路问题，不是自动播放策略');
+  assert.equal(core.isAutoplayBlocked({ name: 'TimeoutError' }), false);
+  assert.equal(core.isAutoplayBlocked(new Error('boom')), false);
+  assert.equal(core.isAutoplayBlocked(null), false);
+  assert.equal(core.isAutoplayBlocked(undefined), false);
+});
+
+test('formatModeHint 只显示档位与播放状态，不显示候选主机名', () => {
+  const playing = {
+    mode: 'extreme',
+    extremeTargetMs: 250,
+    playbackStarted: true,
+    currentCandidate: { host: 'al-game.flv.huya.com' },
+  };
+  assert.equal(core.formatModeHint(playing), '极限追帧 250 ms · 播放中');
+  assert.equal(core.formatModeHint(playing).includes('huya'), false);
+
+  const connecting = {
+    mode: 'stable',
+    playbackStarted: false,
+    currentCandidate: { host: 'al-game.flv.huya.com' },
+  };
+  assert.equal(core.formatModeHint(connecting), '稳定缓冲 · 连接中');
+  assert.equal(core.formatModeHint(connecting).includes('huya'), false);
+
+  assert.equal(core.formatModeHint({ mode: 'extreme', extremeTargetMs: 150, playbackStarted: true }), '等待直播源');
+  assert.equal(core.formatModeHint(null), '等待直播源');
+  assert.equal(core.formatModeHint(undefined), '等待直播源');
+});
+
+test('formatPlaybackStatusText 状态行不显示候选主机名', () => {
+  assert.equal(
+    core.formatPlaybackStatusText({ mode: 'extreme', extremeTargetMs: 150, currentCandidate: { host: 'a.example' } }),
+    '播放中 · 极限追帧 150 ms');
+  assert.equal(
+    core.formatPlaybackStatusText({ mode: 'stable', currentCandidate: { host: 'a.example' } }),
+    '播放中 · 稳定缓冲');
+});
+
+test('退出全屏不把已在播放的提示重新显示成空态', () => {
+  assert.equal(core.shouldHideHint({ everPlayed: true, playbackStarted: true }), true);
+  assert.equal(
+    core.shouldHideHint({ everPlayed: true, playbackStarted: false }),
+    true,
+    '换线路瞬间 playbackStarted 被清零，提示也不该弹回空态');
+  assert.equal(core.shouldHideHint({ everPlayed: false, playbackStarted: false }), false);
+  assert.equal(core.shouldHideHint({ playbackStarted: true }), false, '没有 everPlayed 字段的旧形状不应被误判');
+  assert.equal(core.shouldHideHint(null), false);
+});
+
+test('空态提示指向左侧主界面的「开始播放」', () => {
+  assert.equal(core.EMPTY_HINT_TITLE, '等待直播源');
+  assert.equal(core.EMPTY_HINT_ACTION.includes('左侧'), true, '按钮在主界面左侧，必须说清楚位置');
+  assert.equal(core.EMPTY_HINT_ACTION.includes('开始播放'), true);
+  assert.equal(core.AUTOPLAY_BLOCKED_HINT.includes('点一下画面'), true, '自动播放被拦时给出可执行的下一步');
 });
