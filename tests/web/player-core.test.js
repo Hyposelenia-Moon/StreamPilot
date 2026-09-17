@@ -17,6 +17,81 @@ const fs = require('node:fs');
 const path = require('node:path');
 const core = require('../../Web/player-core.js');
 
+/**
+ * 从播放页 HTML 里取出某条 CSS 规则的声明块内容。
+ *
+ * 先剥掉注释与 `@media` 块：否则 `#controls` / `#statusLine` / `button` 会先命中
+ * `@media (forced-colors: active)` 里那条同名规则（配色覆盖），取到的不是布局规则本体。
+ * 选择器允许成组出现（如 `#playBtn,` 起头的组）。
+ * @param {string} html 播放页 HTML 全文。
+ * @param {string} selector 选择器（如 `#controls`）。
+ * @returns {string} 声明块内容。
+ */
+function extractRule(html, selector) {
+  const layoutCss = stripAtRuleBlocks(stripCssComments(html));
+  const start = layoutCss.indexOf(selector);
+  assert.notEqual(start, -1, '找不到 CSS 选择器 ' + selector);
+
+  const openBrace = layoutCss.indexOf('{', start);
+  assert.notEqual(openBrace, -1, 'CSS 选择器 ' + selector + ' 后面没有声明块');
+
+  const endBrace = findBlockEnd(layoutCss, openBrace);
+  const rule = layoutCss.slice(openBrace + 1, endBrace).trim();
+  assert.ok(rule.length > 0, 'CSS 选择器 ' + selector + ' 的声明块是空的');
+  assert.equal(rule.includes('{'), false, selector + ' 命中的是嵌套规则（如 @media），不是规则本体');
+
+  return rule;
+}
+
+/**
+ * 剥掉 CSS 注释。
+ * @param {string} css 样式文本。
+ * @returns {string} 不含注释的样式文本。
+ */
+function stripCssComments(css) {
+  return css.replace(/\/\*[\s\S]*?\*\//g, '');
+}
+
+/**
+ * 剥掉 `@media` / `@supports` 这类带块的 at-rule（本页只有配色用的 forced-colors 块，不含布局规则）。
+ * @param {string} css 样式文本。
+ * @returns {string} 不含 at-rule 块的样式文本。
+ */
+function stripAtRuleBlocks(css) {
+  let removed = css;
+  let head = /@(media|supports)\b[^{]*\{/.exec(removed);
+  while (head !== null) {
+    const openBrace = head.index + head[0].length - 1;
+    const blockEnd = findBlockEnd(removed, openBrace);
+    removed = removed.slice(0, head.index) + ' '.repeat(blockEnd - head.index + 1) + removed.slice(blockEnd + 1);
+    head = /@(media|supports)\b[^{]*\{/.exec(removed);
+  }
+
+  return removed;
+}
+
+/**
+ * 找到与 `{` 配对的那个 `}` 的位置。
+ * @param {string} text 文本。
+ * @param {number} openBrace `{` 的下标。
+ * @returns {number} 配对 `}` 的下标。
+ */
+function findBlockEnd(text, openBrace) {
+  let depth = 0;
+  for (let index = openBrace; index < text.length; index += 1) {
+    if (text[index] === '{') {
+      depth += 1;
+    } else if (text[index] === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return index;
+      }
+    }
+  }
+
+  throw new Error('CSS 里有没配对的 {');
+}
+
 test('normalizeExtremeTargetSeconds 只接受 150/200/250，其他值回落 0.25s', () => {
   assert.equal(core.normalizeExtremeTargetSeconds(150), 0.15);
   assert.equal(core.normalizeExtremeTargetSeconds(200), 0.2);
@@ -573,6 +648,63 @@ test('追帧与停止追帧合并为播放页底部的单个按钮', () => {
   assert.equal(html.includes('refreshPlaybackStatus(run)'), true, '遥测每轮都要把实测延迟刷进状态行');
   assert.equal(html.includes('lastLatencyMs'), true, '实测延迟必须来自运行对象的遥测值');
   assert.equal(html.includes('applyPlayerTargetConfig(run)'), true, '停止追帧必须走配置热改，而不是重建播放器');
+});
+
+test('追帧按钮必须预留最长文案的固定宽度，文案切换不再引起重排', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+
+  // 按钮文案由 player-core 给出：最长文案就是「停止追帧」，最短是「追帧」。
+  const longestLabel = core.CHASE_BUTTON_LABELS.STOP;
+  const shortestLabel = core.CHASE_BUTTON_LABELS.START;
+  assert.equal(longestLabel, '停止追帧');
+  assert.ok(longestLabel.length > shortestLabel.length, '用例前提：两个文案长度不同，宽度才会变');
+
+  const chaseFontSizePx = 13;
+  const chasePaddingXPx = 8;
+  const chaseBorderPx = 1;
+  const chaseHeadroomPx = 8;
+  const requiredPx = longestLabel.length * chaseFontSizePx + 2 * (chasePaddingXPx + chaseBorderPx) + chaseHeadroomPx;
+
+  const chaseRule = extractRule(html, '#chaseBtn');
+  const declaredMinWidthPx = Number(/min-width:\s*(\d+(?:\.\d+)?)px/.exec(chaseRule)?.[1]);
+  assert.ok(Number.isFinite(declaredMinWidthPx), '#chaseBtn 必须用 min-width 预留固定宽度，否则文案变长会把右侧控件挤到别行');
+  assert.ok(
+    declaredMinWidthPx >= requiredPx,
+    '预留宽度 ' + declaredMinWidthPx + 'px 必须容纳最长文案「' + longestLabel + '」的 ' + requiredPx + 'px'
+      + '（' + longestLabel.length + ' 字 × ' + chaseFontSizePx + 'px + 内边距/边框 + 余量）');
+
+  // 计算依据本身也要锁住：改成更宽的内边距 / 更大的字号而没有同步加宽 min-width 就应当失败。
+  assert.equal(/font-size:\s*(\d+(?:\.\d+)?)px/.exec(extractRule(html, '#playBtn'))?.[1], String(chaseFontSizePx));
+  assert.equal(/padding:\s*4px\s+(\d+(?:\.\d+)?)px/.exec(extractRule(html, 'button'))?.[1], String(chasePaddingXPx));
+  assert.equal(/border:\s*1px\s+solid/.test(extractRule(html, 'button')), true);
+});
+
+test('底部控制条允许换行且不得用绝对定位把控件叠在一起', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+  const controlsRule = extractRule(html, '#controls');
+
+  assert.equal(/display:\s*flex/.test(controlsRule), true, '控制条必须是 flex 容器');
+  assert.equal(/flex-wrap:\s*wrap/.test(controlsRule), true, '控制条必须允许换行，宽度不够时换行而不是把控件压到彼此身上');
+  assert.equal(/row-gap:\s*\d/.test(controlsRule), true, '换行后必须有行间距，行与行不能贴着（堆叠感）');
+  assert.equal(/position:\s*(absolute|fixed)/.test(controlsRule), false, '控制条自身不能绝对定位');
+
+  // 靠右的「全屏」用 margin-left: auto 独占行尾：换行后仍与左侧按钮分开，不参与同一行的空间争夺。
+  assert.equal(/margin-left:\s*auto/.test(extractRule(html, '#fsBtn')), true, '右下角的全屏按钮必须靠 auto 外边距独占行尾');
+
+  // 控制条里任何控件都不许绝对定位到别的控件上面。
+  const children = html.slice(html.indexOf('<div id="controls">'), html.indexOf('<div id="statusLine">'));
+  assert.equal(/position:\s*absolute/.test(children), false, '控制条内部不得用绝对定位摆放控件（那正是重叠的成因）');
+});
+
+test('状态行过长时用省略号收敛，不得溢出盖住控件', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+  const statusRule = extractRule(html, '#statusLine');
+
+  assert.equal(/white-space:\s*nowrap/.test(statusRule), true, '状态行必须保持单行，否则变长会顶掉上面的控件');
+  assert.equal(/overflow:\s*hidden/.test(statusRule), true, '状态行必须裁掉超出部分，不能横向溢出到控制器上');
+  assert.equal(/text-overflow:\s*ellipsis/.test(statusRule), true, '被裁掉的部分必须用省略号收尾，让用户知道还有内容');
+  assert.equal(/max-width:\s*100%/.test(statusRule), true, '状态行宽度必须封在自己这一行内');
+  assert.equal(/position:\s*(absolute|fixed)/.test(statusRule), false, '状态行不能绝对定位到控制条上面');
 });
 
 test('退出全屏不把已在播放的提示重新显示成空态', () => {

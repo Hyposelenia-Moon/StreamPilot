@@ -153,6 +153,12 @@
     }
 
     /*
+      底部控制条的抗重叠约束（曾出现"点「追帧」后右下角堆叠"）：
+      1. 按钮文案会在运行时从「追帧」变成「停止追帧」（见 player-core 的 chaseButtonLabel），
+         所以 #chaseBtn 用 min-width 预留最长文案的宽度，文案切换不再引起重排；
+      2. #controls 允许换行（flex-wrap）+ 行间距（row-gap），控件宁可换行也不压缩重叠；
+      3. 靠右的「全屏」用 margin-left: auto 独占行尾，换行后也不会压到别的控件上；
+      4. 状态行是 footer 列布局里的独立一行（见 #statusLine 的省略号收敛），不参与 #controls 的行布局。
       画质、追帧档位与播放控制都放在画面下方的 footer：
       贴着画面的按钮比页头更容易点到，也避免页头在窄窗口里挤成一团。
     */
@@ -210,7 +216,7 @@
       padding: 10px 18px;
       font-size: 15px;
       border-radius: 8px;
-      /* 换行到第二行时也靠右，和上一行的控件分开 */
+      /* 换行到下一行时也独占行尾靠右，和其他控件分开，不参与同一行的空间争夺 */
       margin-left: auto;
     }
 
@@ -325,22 +331,35 @@
       gap: 10px;
       row-gap: 8px;
       padding: 8px 10px;
-      /* 窄窗口时换行而不是把控件压扁 */
+      /* 窄窗口时换行（并保留行间距）而不是把控件压扁、压到彼此身上 */
       flex-wrap: wrap;
       color: #1f2329;
+    }
+
+    /*
+      追帧按钮独占最小宽度：13px 字号下最长文案「停止追帧」= 4 字 ≈ 52px 文字，
+      加上左右各 8px 内边距与 2px 边框 = 70px，再加 8px 余量（70 → 78）留一点缩放余量。
+      保留位只按最长文案算，没有"缩短文案"这种掩盖做法。
+    */
+    #chaseBtn {
+      min-width: 78px;
     }
 
     .controlLabel {
       color: #6b7280;
     }
 
-    /* 状态行用主题强调色（WPF 侧 AccentBrush = #2f6feb），不再是灰字：状态要一眼能看见 */
+    /*
+      状态行独立成行（footer 是列方向的 flex 容器），过长时用省略号收敛：
+      nowrap + hidden + ellipsis 保证它只在自己这一行里被裁掉，既不会顶掉上面的控件，也不会盖住任何控件。
+    */
     #statusLine {
       padding: 0 10px 6px;
       color: #2f6feb;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      max-width: 100%;
     }
 
     /* 宿主状态按级别换色：警告 / 错误要与"一切正常"的蓝色区分开（与 #hint 用同一组颜色） */

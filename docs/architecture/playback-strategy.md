@@ -296,6 +296,18 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
    两者目的相反，不能互相牵连：停止追帧后画面仍在前进，失控保护就不会介入；
 2. **停止追帧不改变目标延迟档位**：`150/200/250` 只被记住（重新开启后立即生效），下拉框不回退、不改写。
 
+### 10.1 底部控制条的抗重叠约束
+
+`#chaseBtn` 的文案会在运行时从「追帧」变成「停止追帧」，宽度变化会挤压同一行的其他控件；
+底部控制条（`#controls` + `#statusLine`）因此有四条硬约束（由 `tests/web/player-core.test.js` 静态断言锁定）：
+
+- **#chaseBtn 预留固定宽度**：13px 字号下最长文案「停止追帧」= 4 字 ≈ 52px 文字 + 左右各 8px 内边距 + 2px 边框 = 70px，
+  再加 8px 余量取 `min-width: 78px`——文案切换不再引起重排，所以不存在"某个窗口宽度下点一下按钮就换行"的跳变；
+- **#controls 允许换行**：`display: flex` + `flex-wrap: wrap` + `row-gap: 8px`，宽度不够时换行而不是压缩重叠；
+- **右下角控件独占行尾**：`#fsBtn` 用 `margin-left: auto` 靠右，换行后独自占一行，不与左侧按钮争同一行空间；
+- **#statusLine 只在自己这一行被裁掉**：`white-space: nowrap` + `overflow: hidden` + `text-overflow: ellipsis` + `max-width: 100%`，
+  它是 footer 列布局里的独立一行，变长只会出现省略号，不会顶掉或盖住控制条。
+
 ## 11. 状态行显示实际延迟
 
 画面下方状态行（`#statusLine`）在播放状态下显示形如 `播放中 · 318 ms（极限追帧 250 ms）`：

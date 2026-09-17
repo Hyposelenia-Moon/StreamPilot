@@ -17,7 +17,7 @@
 |------|------|
 | `dotnet build StreamPilot.slnx`（Debug 与 Release） | 0 警告 / 0 错误（`TreatWarningsAsErrors=true`） |
 | C# 单元测试 | **131 / 131 通过** |
-| 播放策略前端测试 | **47 / 47 通过** |
+| 播放策略前端测试 | **50 / 50 通过** |
 | 静态红线自检 | 通过 |
 | 离线结构分析 | 101 文件 / 23282 行 / 156 类型 / 749 方法，无结构性问题 |
 
@@ -58,7 +58,7 @@
 | `Recording.Flv.FlvSegmentWriter` | 文件头字节、载荷逐字节一致、时间戳重定基、序列头重放、分片元数据、释放后拒绝写入 | `FlvSegmentWriterTests`（6 个） |
 | `Recording.Hls.HlsPlaylistParser` / `TsStreamRecorder.AlignToPacketBoundary` | media/master 播放列表、ENDLIST、空内容、TS 整包对齐、前导垃圾、不足一包 | `HlsPlaylistTests`（7 个） |
 | `Bridge.LoopbackOnlyGuard` / `RelayRegistry` / `BridgeHost` | 回环前缀校验、通配拒绝、端口越界、注册/解析/释放、未知令牌、容量上限、按地址释放、未启动时注册失败、**中继上游请求必须携带 User-Agent（缺 UA 时 B站 CDN 回 403，见 [ADR 0006](../adr/0006-relay-upstream-headers.md)）** | `BridgeTests`（9 个） |
-| `Web.player-core`（播放策略） | 见 `docs/architecture/playback-strategy.md` 第 7 节 | `player-core.test.js`（47 个，含画质/档位/暂停/缓冲失控/状态行优先级与分段/**状态行实际延迟与括号形态**/**追帧开关（追帧 / 停止追帧）**） |
+| `Web.player-core`（播放策略） | 见 `docs/architecture/playback-strategy.md` 第 7 节 | `player-core.test.js`（50 个，含画质/档位/暂停/缓冲失控/状态行优先级与分段/**状态行实际延迟与括号形态**/**追帧开关（追帧 / 停止追帧）**/**控制条抗重叠约束**） |
 
 **未覆盖（需联网或人工验证，属集成测试范畴）**：
 
