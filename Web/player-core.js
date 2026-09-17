@@ -199,6 +199,35 @@ const MODE_HINT_PLAYING = '播放中';
 /** 未连接时的状态行文案（页面初始化与停止播放后使用）。 */
 const STATUS_IDLE_TEXT = '未连接';
 
+/** 状态行分段之间的间隔符（"已连接"、"250 ms"这类分段共用一个写法）。 */
+const STATUS_SEGMENT_SEPARATOR = ' · ';
+
+/** 延迟分段的单位后缀（毫秒）。 */
+const LATENCY_UNIT_SUFFIX = ' ms';
+
+/** 取不到真实延迟时状态行不再追加该分段，绝不显示占位数字。 */
+const LATENCY_PLACEHOLDER = null;
+
+/** 状态行后缀：当前没有在自动追帧（用户点了「取消追帧」）。仅在"已取消"时追加。 */
+const CHASE_CANCELLED_SUFFIX = '已取消追帧';
+
+/** 追帧开关（按钮与状态行共用同一份文案判定）。 */
+const CHASE_SWITCH_LABELS = Object.freeze({
+  /** 取消追帧入口：当前在自动追帧，点击后停止自动追帧。 */
+  CANCEL: '取消追帧',
+  /** 恢复追帧入口：当前已取消，点击后恢复自动追帧。 */
+  RESUME: '恢复追帧',
+});
+
+/** 取消自动追帧时写入 mpegts.js 的"永不触发"延迟阈值（秒）。 */
+const CHASE_DISABLED_LATENCY_SECONDS = Number.MAX_SAFE_INTEGER;
+
+/** 取消自动追帧时写入 hls.js 的最大延迟切片数（等价于不因延迟跳片）。 */
+const CHASE_DISABLED_MAX_LATENCY_COUNT = Number.MAX_SAFE_INTEGER;
+
+/** 取消自动追帧时的倍速追帧上限（1 表示不加速追赶）。 */
+const CHASE_DISABLED_PLAYBACK_RATE = 1;
+
 /*
  * 宿主状态消息（`host-status`）在画面下方状态行上的保留时长。
  *
@@ -345,9 +374,22 @@ function normalizeCandidates(raw) {
  * 画面就会在"硬跳太频繁（一顿一顿）"与"追不上（越来越滞后）"之间摆动。
  * @param {boolean} extreme 是否极限追帧模式。
  * @param {number} targetSeconds 目标延迟（秒）。
+ * @param {boolean} [autoChase] 是否保留库内的自动追帧（硬跳 + 倍速）；false 时两路都关掉。
  * @returns {object} mpegts.js 配置对象。
  */
-function buildMpegtsConfig(extreme, targetSeconds) {
+function buildMpegtsConfig(extreme, targetSeconds, autoChase) {
+  const chasing = autoChase === undefined ? true : autoChase === true;
+
+  /*
+    取消自动追帧的意义不是"把阈值调大一点"，而是把两路自动行为都关掉：
+    `liveBufferLatencyChasing` 控制 updateend 时的硬跳，`liveSync` 控制 timeupdate 时的倍速。
+    阈值同时写入永不触发的值，避免旧版本库忽略这两个开关时仍然跳帧。
+    逐帧清理（autoCleanupSourceBuffer）不受影响，缓冲不会无限占内存。
+  */
+  const latencyMax = extreme
+    ? Math.max(0.35, targetSeconds + LATENCY_MAX_MARGIN_SECONDS)
+    : STABLE_LATENCY_MAX_SECONDS;
+
   return {
     isLive: true,
     enableWorker: true,
@@ -356,15 +398,15 @@ function buildMpegtsConfig(extreme, targetSeconds) {
     lazyLoad: false,
     deferLoadAfterSourceOpen: false,
     autoCleanupSourceBuffer: true,
-    liveBufferLatencyChasing: true,
-    liveBufferLatencyMaxLatency: extreme
-      ? Math.max(0.35, targetSeconds + LATENCY_MAX_MARGIN_SECONDS)
-      : STABLE_LATENCY_MAX_SECONDS,
+    liveBufferLatencyChasing: chasing,
+    liveBufferLatencyMaxLatency: chasing ? latencyMax : CHASE_DISABLED_LATENCY_SECONDS,
     liveBufferLatencyMinRemain: extreme ? targetSeconds : STABLE_LATENCY_MIN_REMAIN_SECONDS,
-    liveSync: extreme,
-    liveSyncMaxLatency: extreme ? Math.max(0.22, targetSeconds + LIVE_SYNC_MAX_MARGIN_SECONDS) : STABLE_LATENCY_MAX_SECONDS,
+    liveSync: chasing && extreme,
+    liveSyncMaxLatency: chasing
+      ? extreme ? Math.max(0.22, targetSeconds + LIVE_SYNC_MAX_MARGIN_SECONDS) : STABLE_LATENCY_MAX_SECONDS
+      : CHASE_DISABLED_LATENCY_SECONDS,
     liveSyncTargetLatency: extreme ? targetSeconds : 0.8,
-    liveSyncPlaybackRate: extreme ? LIVE_SYNC_PLAYBACK_RATE : 1,
+    liveSyncPlaybackRate: chasing ? extreme ? LIVE_SYNC_PLAYBACK_RATE : CHASE_DISABLED_PLAYBACK_RATE : CHASE_DISABLED_PLAYBACK_RATE,
     fixAudioTimestampGap: true,
   };
 }
@@ -372,19 +414,103 @@ function buildMpegtsConfig(extreme, targetSeconds) {
 /**
  * 计算 hls.js 的播放配置。注意：HLS 路径不区分 150/200/250 三档。
  * @param {boolean} extreme 是否极限追帧模式。
+ * @param {boolean} [autoChase] 是否保留 hls.js 的延迟同步（倍速追赶）；false 时按正常倍速播放。
  * @returns {object} hls.js 配置对象。
  */
-function buildHlsConfig(extreme) {
+function buildHlsConfig(extreme, autoChase) {
+  const chasing = autoChase === undefined ? true : autoChase === true;
+
   return {
     enableWorker: true,
     lowLatencyMode: HLS_LOW_LATENCY_MODE,
     backBufferLength: HLS_BACK_BUFFER_LENGTH,
     maxBufferLength: extreme ? HLS_MAX_BUFFER_EXTREME : HLS_MAX_BUFFER_STABLE,
     liveSyncDurationCount: extreme ? HLS_LIVE_SYNC_DURATION_COUNT_EXTREME : HLS_LIVE_SYNC_DURATION_COUNT_STABLE,
-    liveMaxLatencyDurationCount: extreme ? HLS_MAX_LATENCY_COUNT_EXTREME : HLS_MAX_LATENCY_COUNT_STABLE,
-    maxLiveSyncPlaybackRate: HLS_MAX_LIVE_SYNC_PLAYBACK_RATE,
+    /*
+      hls.js 没有"关闭延迟同步"的开关，能表达"不自动追帧"的只有两处：
+      `maxLiveSyncPlaybackRate = 1`（不加速追赶）与把最大延迟切片数放到不可能达到的值
+      （不因延迟而跳片）。两者同时给出，取消追帧后画面就以正常倍速连续播放。
+    */
+    liveMaxLatencyDurationCount: chasing
+      ? extreme ? HLS_MAX_LATENCY_COUNT_EXTREME : HLS_MAX_LATENCY_COUNT_STABLE
+      : CHASE_DISABLED_MAX_LATENCY_COUNT,
+    maxLiveSyncPlaybackRate: chasing ? HLS_MAX_LIVE_SYNC_PLAYBACK_RATE : CHASE_DISABLED_PLAYBACK_RATE,
   };
 }
+
+/**
+ * 判定当前是否应当自动追帧（把延迟压回目标值）。
+ *
+ * 语义（与「暂停播放」严格区分）：
+ *  - **自动追帧**：库内硬跳（mpegts.js 延迟追帧器）与倍速追赶（延迟同步器）按目标延迟把
+ *    画面拉回直播边缘。默认开启。
+ *  - **取消追帧**：关掉上面两路自动行为，画面以正常倍速实时推进；**不暂停播放、不销毁播放器、
+ *    不释放地址**，因此恢复时不需要重新解析。它只是为了"宁可延迟大一点也不要跳帧"。
+ *  - **暂停播放**：`video.pause()`，画面完全停止；恢复时可能因缓冲过期而追帧。
+ * 只有页面上"取消追帧"按钮会关闭它；按钮再点一次即恢复。缺省（字段未设置）视为开启，
+ * 这样旧的调用点与旧会话不会因为字段缺失而被当成"已取消"。
+ *
+ * 注意：取消追帧只停"自动追帧策略"，不停"缓冲失控自救"（{@link isBufferRunaway}）——
+ * 后者是兜底保护，只在画面真的停住且缓冲涨到 8 秒以上时才介入。
+ * @param {{autoChaseEnabled?:boolean}|null} run 运行对象。
+ * @returns {boolean} 应当自动追帧返回 true。
+ */
+function shouldAutoChase(run) {
+  if (!run || typeof run !== 'object') {
+    return false;
+  }
+
+  return run.autoChaseEnabled !== false;
+}
+
+/**
+ * 把状态行基础文案与实际延迟拼成最终显示文本。
+ *
+ * 延迟取遥测里的**真实测量值**（见播放页的 `formatLatencyText`），
+ * 取不到时（null / NaN / Infinity / 负数）不追加该分段，绝不显示占位或档位数字。
+ * @param {*} base 基础文案（例如"已连接"）。
+ * @param {*} latencyMs 实际延迟毫秒数；null、非数字或非法值时不追加。
+ * @returns {string} 拼接后的显示文本。
+ */
+function formatStatusWithLatency(base, latencyMs) {
+  const text = String(base === null || base === undefined ? '' : base);
+  const latency = Number(latencyMs);
+  if (latencyMs === null || latencyMs === undefined || !Number.isFinite(latency) || latency < 0) {
+    return text;
+  }
+
+  const segment = Math.round(latency) + LATENCY_UNIT_SUFFIX;
+  return text.length > 0 ? text + STATUS_SEGMENT_SEPARATOR + segment : segment;
+}
+
+/**
+ * 读取运行对象上最近一次遥测得到的真实延迟（毫秒）。
+ *
+ * 只认页面写进去的实测值：没有任何遥测时返回 {@link LATENCY_PLACEHOLDER}，
+ * 调用方据此不显示延迟分段。刻意**不**从追帧档位推导——档位是目标值，不是实际延迟。
+ * @param {{lastLatencyMs?:number}|null} run 运行对象。
+ * @returns {number|null} 实际延迟毫秒数；没有有效测量值时返回 null。
+ */
+function readActualLatencyMs(run) {
+  if (!run || typeof run !== 'object') {
+    return LATENCY_PLACEHOLDER;
+  }
+
+  const latency = Number(run.lastLatencyMs);
+  return run.lastLatencyMs === null || run.lastLatencyMs === undefined || !Number.isFinite(latency) || latency < 0
+    ? LATENCY_PLACEHOLDER
+    : latency;
+}
+
+/**
+ * 追帧开关按钮的文案（取消 / 恢复）。
+ * @param {*} autoChase 当前是否自动追帧（{@link shouldAutoChase} 的结果）。
+ * @returns {string} 按钮文案。
+ */
+function chaseSwitchLabel(autoChase) {
+  return autoChase ? CHASE_SWITCH_LABELS.CANCEL : CHASE_SWITCH_LABELS.RESUME;
+}
+
 
 /**
  * 计算重连退避时间。
@@ -627,11 +753,17 @@ function isAutoplayBlocked(error) {
 
 /**
  * 底部状态行在播放开始后的文案（不显示候选主机名与 CDN 节点）。
- * @param {{mode?:string,extremeTargetMs?:number}} run 运行对象。
+ *
+ * 组成：播放状态 + 模式/档位 + （仅在已取消追帧时）状态后缀 + **实际延迟**。
+ * 延迟来自遥测实测值（{@link readActualLatencyMs}），取不到就不追加该段，不写死档位数字。
+ * 追帧开启时不加后缀：默认行为不需要占状态行。
+ * @param {{mode?:string,extremeTargetMs?:number,extremeTargetSeconds?:number,autoChaseEnabled?:boolean,lastLatencyMs?:number}} run 运行对象。
  * @returns {string} 中文状态。
  */
 function formatPlaybackStatusText(run) {
-  return MODE_HINT_PLAYING + ' · ' + modeLabel(run);
+  const chaseSegment = shouldAutoChase(run) ? '' : STATUS_SEGMENT_SEPARATOR + CHASE_CANCELLED_SUFFIX;
+  const base = MODE_HINT_PLAYING + STATUS_SEGMENT_SEPARATOR + modeLabel(run) + chaseSegment;
+  return formatStatusWithLatency(base, readActualLatencyMs(run));
 }
 
 /**
@@ -937,6 +1069,10 @@ const StreamPilotPlayerCore = {
   AUTOPLAY_BLOCKED_HINT,
   MODE_HINT_PLAYING,
   STATUS_IDLE_TEXT,
+  STATUS_SEGMENT_SEPARATOR,
+  LATENCY_UNIT_SUFFIX,
+  CHASE_CANCELLED_SUFFIX,
+  CHASE_SWITCH_LABELS,
   HOST_STATUS_HOLD_INFO_MS,
   HOST_STATUS_HOLD_WARN_MS,
   HOST_STATUS_HOLD_ERROR_MS,
@@ -966,6 +1102,10 @@ const StreamPilotPlayerCore = {
   shouldMuteAtVolume,
   isAutoplayBlocked,
   formatPlaybackStatusText,
+  formatStatusWithLatency,
+  readActualLatencyMs,
+  shouldAutoChase,
+  chaseSwitchLabel,
   normalizeStatusLevel,
   getHostStatusHoldMs,
   getHostStatusRemainingMs,

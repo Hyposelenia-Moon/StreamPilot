@@ -163,6 +163,21 @@ internal sealed class BilibiliParser : PlatformParserBase
     /// <summary>播放状态字段名。</summary>
     private const string LiveStatusPropertyName = "live_status";
 
+    /// <summary>getRoomBaseInfo 响应里的房间号索引字段名（键为数字房间号的字符串形式）。</summary>
+    private const string RoomIdsIndexField = "by_room_ids";
+
+    /// <summary>getRoomBaseInfo 响应里的房间号字段名。</summary>
+    private const string RoomIdField = "room_id";
+
+    /// <summary>getRoomBaseInfo 响应里的主播名字段名。</summary>
+    private const string AnchorField = "uname";
+
+    /// <summary>getRoomBaseInfo 响应里的分区名字段名。</summary>
+    private const string AreaNameField = "area_name";
+
+    /// <summary>直播状态未知时的取值（接口未给出该字段）。</summary>
+    private const int LiveStatusUnknown = -1;
+
     /// <summary>getInfoByRoom 返回"房间不存在"时的错误码。</summary>
     private const int RoomNotFoundCode = -400;
 
@@ -250,6 +265,7 @@ internal sealed class BilibiliParser : PlatformParserBase
                 {
                     ["roomId"] = numericRoomId,
                     ["failure"] = exception.Failure.ToString(),
+                    ["liveStatus"] = fallback.LiveStatus,
                 });
             }
             else
@@ -269,15 +285,31 @@ internal sealed class BilibiliParser : PlatformParserBase
             await FetchPlayInfoAsync(
                 roomInfo.RoomId,
                 query.Cookie,
-                roomInfoAvailable,
                 cancellationToken,
                 ParseQualityNumber(query.PreferredQualityKey)).ConfigureAwait(false);
 
-        if (candidates.Count == 0)
+        /*
+          直播状态以接口声明为准，两个来源按可信度排序：
+          ① 房间信息接口（getInfoByRoom / getRoomBaseInfo）明确给出的 live_status；
+          ② 播放接口在 data 层给出的 live_status。
+          只有当两个来源**都**没有给出状态时才算"未知"——未知不等于未开播。
+        */
+        int? declaredLiveStatus = roomInfo.LiveStatus != LiveStatusUnknown
+            ? roomInfo.LiveStatus
+            : liveStatus != LiveStatusUnknown ? liveStatus : null;
+
+        ResolveFailure? failure = ShouldRejectForMissingCandidates(candidates.Count, liveStatus, roomInfo.LiveStatus);
+        if (failure is not null)
         {
-            // 播放接口明确给出状态时按状态分类；否则（房间信息也不可用）只能判定为未开播。
-            ResolveFailure failure = liveStatus == LiveStatusReplaying ? ResolveFailure.Replaying : ResolveFailure.NotLive;
-            throw Fail(failure, OperationGetPlayInfo, ResolveMessages.ForFailure(failure));
+            Logger.Warn(ModuleName, "播放接口未返回任何候选线路。", new Dictionary<string, object?>
+            {
+                ["roomId"] = roomInfo.RoomId,
+                ["roomInfoAvailable"] = roomInfoAvailable,
+                ["declaredLiveStatus"] = declaredLiveStatus,
+                ["failure"] = failure.Value.ToString(),
+            });
+
+            throw Fail(failure.Value, OperationGetPlayInfo, ResolveMessages.ForFailure(failure.Value));
         }
 
         Logger.Info(ModuleName, "B站直播间解析完成。", new Dictionary<string, object?>
@@ -285,6 +317,7 @@ internal sealed class BilibiliParser : PlatformParserBase
             ["roomId"] = roomInfo.RoomId,
             ["candidateCount"] = candidates.Count,
             ["roomInfoAvailable"] = roomInfoAvailable,
+            ["declaredLiveStatus"] = declaredLiveStatus,
             ["quality"] = selectedQualityKey,
         });
 
@@ -310,6 +343,36 @@ internal sealed class BilibiliParser : PlatformParserBase
     /// <returns>属于风控/限流返回 <see langword="true"/>。</returns>
     internal static bool IsRiskControlCode(int code) =>
         code is RiskControlCode or RequestBlockedCode or RequestThrottledCode;
+
+    /// <summary>
+    /// 判定"没有候选线路时是否要判失败"，以及失败该归到哪一类（纯函数，供离线用例锁定规则）。
+    /// </summary>
+    /// <param name="candidateCount">播放接口给出的候选数量。</param>
+    /// <param name="liveStatus">播放接口 <c>data.live_status</c>；未给出时为 <see cref="LiveStatusUnknown"/>。</param>
+    /// <param name="roomLiveStatus">房间信息接口给出的 <c>live_status</c>；未给出时为 <see cref="LiveStatusUnknown"/>。</param>
+    /// <returns>不需要判失败时返回 <see langword="null"/>，否则返回对应的失败分类。</returns>
+    /// <remarks>
+    /// 规则只有两条，顺序不能颠倒：
+    /// <list type="number">
+    /// <item><description>只要有候选就必须成功：候选是不可替代的产物，直播状态只影响文案；</description></item>
+    /// <item><description>没有候选时才按直播状态分类：轮播单独提示，其余（含状态未知）按未开播，
+    /// 因为"没有任何地址"对用户的可操作结论就是"现在没得看"。
+    /// 房间信息接口给出的状态优先（它来自 <c>getInfoByRoom</c> / <c>getRoomBaseInfo</c> 的权威字段）。</description></item>
+    /// </list>
+    /// </remarks>
+    internal static ResolveFailure? ShouldRejectForMissingCandidates(
+        int candidateCount,
+        int liveStatus = LiveStatusUnknown,
+        int roomLiveStatus = LiveStatusUnknown)
+    {
+        if (candidateCount > 0)
+        {
+            return null;
+        }
+
+        int declared = roomLiveStatus != LiveStatusUnknown ? roomLiveStatus : liveStatus;
+        return declared == LiveStatusReplaying ? ResolveFailure.Replaying : ResolveFailure.NotLive;
+    }
 
     /// <summary>
     /// 确定数字房间号：输入是纯数字时直接使用，否则按短号抓取直播间页面解析。
@@ -490,16 +553,22 @@ internal sealed class BilibiliParser : PlatformParserBase
                 coverUrl = ReadOptionalString(roomInfo, "keyframe");
             }
 
-            string roomId = TryReadInt64(roomInfo, "room_id", out long reportedRoomId) && reportedRoomId > 0
+            string roomId = TryReadInt64(roomInfo, RoomIdField, out long reportedRoomId) && reportedRoomId > 0
                 ? reportedRoomId.ToString(CultureInfo.InvariantCulture)
                 : numericRoomId;
+
+            // live_status 与 room_info 同级：拿到它就等于拿到了权威的"在播/未开播"结论。
+            int liveStatus = TryReadInt32(roomInfo, LiveStatusPropertyName, out int roomLiveStatus)
+                ? roomLiveStatus
+                : LiveStatusUnknown;
 
             return new RoomInfoSnapshot(
                 roomId,
                 title,
                 anchor,
                 category,
-                string.IsNullOrWhiteSpace(coverUrl) ? null : coverUrl);
+                string.IsNullOrWhiteSpace(coverUrl) ? null : coverUrl,
+                liveStatus);
         }
         catch (Exception exception) when (exception is InvalidOperationException or JsonException)
         {
@@ -538,37 +607,7 @@ internal sealed class BilibiliParser : PlatformParserBase
         try
         {
             using JsonDocument document = await _http.GetJsonAsync(spec, cancellationToken).ConfigureAwait(false);
-            JsonElement root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object
-                || ReadRequiredInt32(root, "code", OperationGetRoomBaseInfo) != 0
-                || !TryReadProperty(root, "data", out JsonElement data)
-                || !TryReadProperty(data, "by_room_ids", out JsonElement byRoomIds)
-                || byRoomIds.ValueKind != JsonValueKind.Object)
-            {
-                return null;
-            }
-
-            foreach (JsonProperty entry in byRoomIds.EnumerateObject())
-            {
-                JsonElement room = entry.Value;
-                if (room.ValueKind != JsonValueKind.Object)
-                {
-                    continue;
-                }
-
-                string roomId = TryReadInt64(room, "room_id", out long reportedRoomId) && reportedRoomId > 0
-                    ? reportedRoomId.ToString(CultureInfo.InvariantCulture)
-                    : numericRoomId;
-
-                return new RoomInfoSnapshot(
-                    roomId,
-                    ReadOptionalString(room, "title") ?? string.Empty,
-                    ReadOptionalString(room, "uname") ?? string.Empty,
-                    ReadOptionalString(room, "area_name") ?? string.Empty,
-                    ReadOptionalString(room, "cover"));
-            }
-
-            return null;
+            return TryParseRoomBaseInfo(document.RootElement, numericRoomId);
         }
         catch (Exception exception) when (exception is ResolveException or JsonException or InvalidOperationException)
         {
@@ -582,22 +621,77 @@ internal sealed class BilibiliParser : PlatformParserBase
     }
 
     /// <summary>
+    /// 从 getRoomBaseInfo 响应中读取房间信息（纯函数，便于离线用例覆盖字段路径）。
+    /// </summary>
+    /// <param name="root">接口响应根节点。</param>
+    /// <param name="fallbackRoomId">响应未给出房间号时使用的数字房间号。</param>
+    /// <returns>房间信息快照；响应结构不符合预期时返回 <see langword="null"/>。</returns>
+    /// <remarks>
+    /// 实测结构（room_ids=814，2026-09-17）：
+    /// <c>{"code":0,"data":{"by_uids":{},"by_room_ids":{"856077":{...}}}}</c>。
+    /// 注意两点，都曾让降级通道"取到数据却判错"：
+    /// <list type="number">
+    /// <item><description>索引键是**平台真实房间号**（814 是短号，键为 856077），不是请求里的房间号；</description></item>
+    /// <item><description><c>live_status</c> 藏在 <c>by_room_ids</c> 的每个房间对象里，
+    /// 顶层与 <c>data</c> 层都没有；读取路径写错会得到"未知"，进而把在播房间误判成未开播。</description></item>
+    /// </list>
+    /// </remarks>
+    internal static RoomInfoSnapshot? TryParseRoomBaseInfo(JsonElement root, string fallbackRoomId)
+    {
+        if (root.ValueKind != JsonValueKind.Object
+            || !TryReadInt32(root, "code", out int code)
+            || code != 0
+            || !TryReadProperty(root, "data", out JsonElement data)
+            || !TryReadProperty(data, RoomIdsIndexField, out JsonElement byRoomIds)
+            || byRoomIds.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        foreach (JsonProperty entry in byRoomIds.EnumerateObject())
+        {
+            JsonElement room = entry.Value;
+            if (room.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            string roomId = TryReadInt64(room, RoomIdField, out long reportedRoomId) && reportedRoomId > 0
+                ? reportedRoomId.ToString(CultureInfo.InvariantCulture)
+                : fallbackRoomId;
+
+            int liveStatus = TryReadInt32(room, LiveStatusPropertyName, out int status)
+                ? status
+                : LiveStatusUnknown;
+
+            return new RoomInfoSnapshot(
+                roomId,
+                ReadOptionalString(room, "title") ?? string.Empty,
+                ReadOptionalString(room, AnchorField) ?? string.Empty,
+                ReadOptionalString(room, AreaNameField) ?? string.Empty,
+                ReadOptionalString(room, "cover"),
+                liveStatus);
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// 调用 getRoomPlayInfo 收集全部播放线路候选，并返回平台声明的直播状态。
     /// </summary>
     /// <param name="numericRoomId">数字房间号。</param>
     /// <param name="cookie">B站 Cookie，可为 <see langword="null"/>（匿名解析）。</param>
-    /// <param name="failOnOfflineStatus">
-    /// 为 <see langword="true"/> 时，直播状态为未开播/轮播直接抛异常；
-    /// 为 <see langword="false"/> 时（房间信息接口也不可用）把状态交回调用方统一判定，
-    /// 避免在信息缺失时把"未开播"与"接口不可用"混为一谈。
-    /// </param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <param name="requestedQuality">调用方指定的 qn，可为 <see langword="null"/>（最高档）。</param>
-    /// <returns>候选流与平台声明的直播状态（未声明时为 -1）。</returns>
+    /// <returns>候选流与平台声明的直播状态（未声明时为 <see cref="LiveStatusUnknown"/>）。</returns>
+    /// <remarks>
+    /// 本方法**不**依据 live_status 抛"未开播"：直播状态只用来决定文案，
+    /// 只要接口给出了 playurl_info 就必须把候选交给调用方，
+    /// 否则"房间信息接口不可用 + 播放接口正常"会被误报成失败。
+    /// </remarks>
     private async Task<(IReadOnlyList<StreamCandidate> Candidates, int LiveStatus, IReadOnlyList<QualityOption> Qualities, string? SelectedKey)> FetchPlayInfoAsync(
         string numericRoomId,
         string? cookie,
-        bool failOnOfflineStatus,
         CancellationToken cancellationToken,
         int? requestedQuality = null)
     {
@@ -623,20 +717,11 @@ internal sealed class BilibiliParser : PlatformParserBase
             bool hasData = TryReadProperty(root, "data", out JsonElement data)
                 && data.ValueKind == JsonValueKind.Object;
 
-            // 先读 live_status：未开播/轮播时接口可能仍返回 code=0，但没有任何可用线路。
-            int observedLiveStatus = -1;
+            // 先读 live_status：只作为"没有候选时如何分类"的依据，不影响有候选时的成功判定。
+            int observedLiveStatus = LiveStatusUnknown;
             if (hasData && TryReadInt32(data, LiveStatusPropertyName, out int liveStatus))
             {
                 observedLiveStatus = liveStatus;
-                if (failOnOfflineStatus && liveStatus == LiveStatusOffline)
-                {
-                    throw Fail(ResolveFailure.NotLive, OperationGetPlayInfo, ResolveMessages.NotLive);
-                }
-
-                if (failOnOfflineStatus && liveStatus == LiveStatusReplaying)
-                {
-                    throw Fail(ResolveFailure.Replaying, OperationGetPlayInfo, ResolveMessages.Replaying);
-                }
             }
 
             if (code != 0)
@@ -652,13 +737,21 @@ internal sealed class BilibiliParser : PlatformParserBase
             StreamCandidateBuilder builder = new(PlatformId.Bilibili, Logger);
             IReadOnlyList<QualityOption> qualities = [];
             string? selectedKey = null;
-            if (hasData && HasPlayUrlInfo(data))
+            if (HasPlayUrlInfo(data))
             {
                 CollectCandidates(data, builder);
                 (qualities, selectedKey) = BuildQualityOptions(data, requestedQuality);
             }
+            else
+            {
+                Logger.Warn(ModuleName, "播放接口未返回 playurl_info，无法收集候选线路。", new Dictionary<string, object?>
+                {
+                    ["roomId"] = numericRoomId,
+                    ["liveStatus"] = observedLiveStatus,
+                    ["requestedQuality"] = requestedQuality,
+                });
+            }
 
-            // 不在这里判定"未开播"：候选为空的最终分类由调用方结合房间信息是否可用统一决定。
             return (builder.Build(), observedLiveStatus, qualities, selectedKey);
         }
         catch (Exception exception) when (exception is InvalidOperationException or JsonException)
@@ -693,7 +786,7 @@ internal sealed class BilibiliParser : PlatformParserBase
     /// </summary>
     /// <param name="playData">getRoomPlayInfo 响应的 data 节点。</param>
     /// <param name="builder">候选构造器（同一房间共用，保证源索引按遍历顺序从 0 递增）。</param>
-    private void CollectCandidates(JsonElement playData, StreamCandidateBuilder builder)
+    internal void CollectCandidates(JsonElement playData, StreamCandidateBuilder builder)
     {
         if (!TryReadProperty(playData, "playurl_info", out JsonElement playUrlInfo)
             || playUrlInfo.ValueKind != JsonValueKind.Object)
@@ -1585,16 +1678,23 @@ internal sealed class BilibiliParser : PlatformParserBase
             && long.TryParse(element.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
     }
 
-    /// <summary>B站房间信息的解析中间结果。</summary>
+    /// <summary>
+    /// B站房间信息的解析中间结果（内部可见，便于离线用例直接断言字段读取路径）。
+    /// </summary>
     /// <param name="RoomId">数字房间号（平台返回值优先）。</param>
     /// <param name="Title">直播间标题。</param>
     /// <param name="Anchor">主播名。</param>
     /// <param name="Category">直播分区名，缺失时为空字符串。</param>
     /// <param name="CoverUrl">封面地址，缺失时为 <see langword="null"/>。</param>
-    private sealed record RoomInfoSnapshot(
+    /// <param name="LiveStatus">
+    /// 接口声明的直播状态；房间信息接口未给出该字段时为 <see cref="LiveStatusUnknown"/>
+    /// （此时不得据此判定"未开播"，只能由播放接口的 <c>live_status</c> 决定）。
+    /// </param>
+    internal sealed record RoomInfoSnapshot(
         string RoomId,
         string Title,
         string Anchor,
         string Category,
-        string? CoverUrl);
+        string? CoverUrl,
+        int LiveStatus = LiveStatusUnknown);
 }

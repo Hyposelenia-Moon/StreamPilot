@@ -1,0 +1,30 @@
+[getInfoByRoom] code=-352 message=-352 hasData=false
+[getRoomBaseInfo] code=0 message=OK
+  data keys = by_uids, by_room_ids
+  by_room_ids keys = ["856077"]
+  key=856077 room_id=856077 short_id=814 uid=13221028 live_status=1 uname=迷茫小树叶 title=【树叶】赛季末打打排位 area_name=王者荣耀 live_time=2026-09-17 17:59:22
+  by_room_ids 是对象(Object)? true
+[getRoomPlayInfo] code=0 message=OK hasPlayurlInfo=true
+  data.room_id=856077 data.short_id=814 data.live_status=1 data.uid=13221028
+  playurl.local keys = cid, g_qn_desc, stream, p2p_data, dolby_qn, hot, hdr_metadata_degrade_desc（无顶层 current_qn / accept_qn）
+  g_qn_desc 条数 = 8
+    qn=30000 desc=杜比 hdr_desc="" attr_desc=null hdr_type=0 media_base_desc=null
+    qn=20000 desc=4K hdr_desc="" attr_desc=null hdr_type=0 media_base_desc=null
+    qn=15000 desc=2K hdr_desc="" attr_desc=null hdr_type=0 media_base_desc=null
+    qn=10000 desc=原画 hdr_desc="" attr_desc=null hdr_type=0 media_base_desc={"detail_desc":{"desc":"1080P 原画","tag":["高帧率"]},"brief_desc":{"desc":"1080P","badge":"原画"}}
+    qn=400 desc=蓝光 hdr_desc="" attr_desc=null hdr_type=0 media_base_desc={"detail_desc":{"desc":"1080P 蓝光"},"brief_desc":{"desc":"1080P"}}
+    qn=250 desc=超清 hdr_desc="" attr_desc=null hdr_type=0 media_base_desc={"detail_desc":{"desc":"720P 超清"},"brief_desc":{"desc":"720P"}}
+    qn=150 desc=高清 hdr_desc="" attr_desc=null hdr_type=0 media_base_desc=null
+    qn=80 desc=流畅 hdr_desc="" attr_desc=null hdr_type=0 media_base_desc=null
+  stream=http_stream format=flv codec=avc current_qn=250 accept_qn=[10000,400,250] base_url=/live-bvc/888878/live_7vdes_SzLiDtW_5tbz1_2500.flv? url_info=2
+  stream=http_stream format=flv codec=hevc current_qn=250 accept_qn=[10000,400,250] base_url=/live-bvc/777112/live_7vdes_SzLiDtW_5tbz1_minihevc.flv? url_info=2
+  stream=http_hls format=ts codec=avc current_qn=250 accept_qn=[10000,400,250] base_url=/live-bvc/280866/live_7vdes_SzLiDtW_5tbz1_2500.m3u8? url_info=2
+  stream=http_hls format=ts codec=hevc current_qn=250 accept_qn=[10000,400,250] base_url=/live-bvc/835051/live_7vdes_SzLiDtW_5tbz1_minihevc.m3u8? url_info=2
+  stream=http_hls format=fmp4 codec=avc current_qn=250 accept_qn=[10000,400,250] base_url=/live-bvc/123214/live_7vdes_SzLiDtW_5tbz1_2500/index.m3u8? url_info=2
+  stream=http_hls format=fmp4 codec=hevc current_qn=250 accept_qn=[10000,400,250] base_url=/live-bvc/812814/live_7vdes_SzLiDtW_5tbz1_minihevc/index.m3u8? url_info=2
+  代码 collectCandidates 口径下的候选总数 = 12
+[room-page] marker "defaultRoomId":" index=-1
+[room-page] marker "room_id": index=44836 紧随内容="856077,\"short_id\":81"
+[room-page] marker "roomid": index=65538 紧随内容="0,\"rank_desc\":\"\",\"co"
+[room-page] marker "roomId": index=-1
+[room-page] 含 g_qn_desc? true  含 playurl_info? true  字节数=107850

@@ -428,6 +428,117 @@ test('formatPlaybackStatusText 状态行不显示候选主机名', () => {
     '播放中 · 稳定缓冲');
 });
 
+test('formatPlaybackStatusText 追加遥测实测延迟，取不到实测值时不显示该段', () => {
+  assert.equal(
+    core.formatPlaybackStatusText({ mode: 'extreme', extremeTargetMs: 250, lastLatencyMs: 318 }),
+    '播放中 · 极限追帧 250 ms · 318 ms',
+    '显示的是遥测实测值，不是档位值');
+  assert.equal(
+    core.formatPlaybackStatusText({ mode: 'extreme', extremeTargetMs: 250, lastLatencyMs: 318.6 }),
+    '播放中 · 极限追帧 250 ms · 319 ms',
+    '实测值四舍五入到整数毫秒');
+  assert.equal(
+    core.formatPlaybackStatusText({ mode: 'extreme', extremeTargetMs: 250, lastLatencyMs: null }),
+    '播放中 · 极限追帧 250 ms',
+    '没有遥测时不显示延迟段，也不拿档位值凑数');
+  assert.equal(
+    core.formatPlaybackStatusText({ mode: 'extreme', extremeTargetMs: 250 }),
+    '播放中 · 极限追帧 250 ms',
+    '从未遥测过（字段缺失）同样不显示延迟段');
+  assert.equal(
+    core.formatPlaybackStatusText({ mode: 'stable', lastLatencyMs: Number.NaN }),
+    '播放中 · 稳定缓冲',
+    '非法实测值不得显示成 NaN ms');
+});
+
+test('formatStatusWithLatency 只拼接合法延迟，非法值一律不追加该段', () => {
+  assert.equal(core.formatStatusWithLatency('已连接', 250), '已连接 · 250 ms');
+  assert.equal(core.formatStatusWithLatency('已连接', 0), '已连接 · 0 ms', '0 ms 是合法实测值');
+  assert.equal(core.formatStatusWithLatency('已连接', 249.5), '已连接 · 250 ms');
+  assert.equal(core.formatStatusWithLatency('已连接', null), '已连接');
+  assert.equal(core.formatStatusWithLatency('已连接', undefined), '已连接');
+  assert.equal(core.formatStatusWithLatency('已连接', Number.NaN), '已连接');
+  assert.equal(core.formatStatusWithLatency('已连接', Number.POSITIVE_INFINITY), '已连接');
+  assert.equal(core.formatStatusWithLatency('已连接', -1), '已连接', '负延迟是非法测量，不能显示');
+  assert.equal(core.formatStatusWithLatency('已连接', 'abc'), '已连接');
+  assert.equal(core.formatStatusWithLatency('', 250), '250 ms', '没有基础文案时只显示延迟段');
+  assert.equal(core.formatStatusWithLatency(null, null), '', '空输入给出空串而不是 undefined');
+});
+
+test('shouldAutoChase 判定自动追帧开关（默认开启）', () => {
+  assert.equal(core.shouldAutoChase({ autoChaseEnabled: true }), true);
+  assert.equal(core.shouldAutoChase({}), true, '字段缺失视为开启，旧会话不会被误当成已取消');
+  assert.equal(core.shouldAutoChase({ autoChaseEnabled: undefined }), true);
+  assert.equal(core.shouldAutoChase({ autoChaseEnabled: false }), false, '只有显式 false 才算已取消');
+  assert.equal(core.shouldAutoChase(null), false, '没有会话时不追帧');
+  assert.equal(core.shouldAutoChase(undefined), false);
+  assert.equal(core.shouldAutoChase('run'), false, '非对象输入不得抛异常');
+});
+
+test('chaseSwitchLabel 给出取消 / 恢复两侧按钮文案', () => {
+  assert.equal(core.chaseSwitchLabel(true), core.CHASE_SWITCH_LABELS.CANCEL);
+  assert.equal(core.chaseSwitchLabel(false), core.CHASE_SWITCH_LABELS.RESUME);
+  assert.equal(core.CHASE_SWITCH_LABELS.CANCEL, '取消追帧');
+  assert.equal(core.CHASE_SWITCH_LABELS.RESUME, '恢复追帧');
+});
+
+test('取消追帧关闭 mpegts.js / hls.js 的两路自动追帧，但不影响其它配置', () => {
+  const chasing = core.buildMpegtsConfig(true, 0.25, true);
+  const cancelled = core.buildMpegtsConfig(true, 0.25, false);
+
+  assert.equal(chasing.liveBufferLatencyChasing, true, '默认必须保留库内硬跳');
+  assert.equal(chasing.liveSync, true, '默认必须保留倍速追赶');
+  assert.equal(chasing.liveBufferLatencyMaxLatency, 0.52);
+
+  assert.equal(cancelled.liveBufferLatencyChasing, false, '取消后不得再硬跳');
+  assert.equal(cancelled.liveSync, false, '取消后不得再倍速追赶');
+  assert.ok(cancelled.liveBufferLatencyMaxLatency > 1e9, '阈值同时设为永不触发，兼容忽略开关的旧版本库');
+  assert.ok(cancelled.liveSyncMaxLatency > 1e9);
+  assert.equal(cancelled.liveSyncPlaybackRate, 1);
+  assert.equal(cancelled.autoCleanupSourceBuffer, true, '逐帧清理不受取消追帧影响');
+  assert.equal(cancelled.enableStashBuffer, chasing.enableStashBuffer, '缓冲策略不变，取消的只是追帧');
+
+  const stableCancelled = core.buildMpegtsConfig(false, 0.2, false);
+  assert.equal(stableCancelled.liveBufferLatencyChasing, false, '稳定档同样要能取消');
+  assert.equal(stableCancelled.liveSync, false);
+
+  const hlsChasing = core.buildHlsConfig(true, true);
+  const hlsCancelled = core.buildHlsConfig(true, false);
+  assert.equal(hlsChasing.maxLiveSyncPlaybackRate, 1.5, '默认保留 hls.js 倍速追赶');
+  assert.equal(hlsCancelled.maxLiveSyncPlaybackRate, 1, '取消后按正常倍速播放');
+  assert.ok(hlsCancelled.liveMaxLatencyDurationCount > 1e9, '取消后不因延迟跳片');
+  assert.equal(hlsCancelled.maxBufferLength, hlsChasing.maxBufferLength, '缓冲上限不变');
+  assert.equal(hlsCancelled.liveSyncDurationCount, hlsChasing.liveSyncDurationCount, '起播位置不变');
+});
+
+test('取消追帧的状态行标注（与暂停播放是两件事）', () => {
+  const cancelled = { mode: 'extreme', extremeTargetMs: 250, autoChaseEnabled: false, lastLatencyMs: 900 };
+  assert.equal(
+    core.formatPlaybackStatusText(cancelled),
+    '播放中 · 极限追帧 250 ms · 已取消追帧 · 900 ms',
+    '取消后状态行标注，并继续显示实测延迟');
+  assert.equal(
+    core.formatPlaybackStatusText({ mode: 'extreme', extremeTargetMs: 250, autoChaseEnabled: true, lastLatencyMs: 260 }),
+    '播放中 · 极限追帧 250 ms · 260 ms',
+    '追帧开启时不加赘述后缀');
+});
+
+test('播放页新增「取消追帧」按钮，且在「追帧」按钮左边', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+
+  const toggleIndex = html.indexOf('id="chaseToggleBtn"');
+  const chaseIndex = html.indexOf('id="chaseBtn"');
+  assert.ok(toggleIndex > 0, '取消追帧按钮必须存在');
+  assert.ok(chaseIndex > 0, '追帧按钮必须仍然存在');
+  assert.ok(toggleIndex < chaseIndex, '取消追帧必须排在追帧左边');
+
+  assert.equal(html.includes('toggleAutoChase'), true, '按钮必须绑定到追帧开关');
+  assert.equal(html.includes('syncChaseToggle'), true, '按钮文案必须随开关同步');
+  assert.equal(html.includes('refreshPlaybackStatus(run)'), true, '遥测每轮都要把实测延迟刷进状态行');
+  assert.equal(html.includes('lastLatencyMs'), true, '实测延迟必须来自运行对象的遥测值');
+  assert.equal(html.includes('applyPlayerTargetConfig(run)'), true, '取消追帧必须走配置热改，而不是重建播放器');
+});
+
 test('退出全屏不把已在播放的提示重新显示成空态', () => {
   assert.equal(core.shouldHideHint({ everPlayed: true, playbackStarted: true }), true);
   assert.equal(

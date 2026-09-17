@@ -16,10 +16,10 @@
 | 阶段 | 结果 |
 |------|------|
 | `dotnet build StreamPilot.slnx`（Debug 与 Release） | 0 警告 / 0 错误（`TreatWarningsAsErrors=true`） |
-| C# 单元测试 | **97 / 97 通过** |
-| 播放策略前端测试 | **18 / 18 通过** |
+| C# 单元测试 | **123 / 123 通过** |
+| 播放策略前端测试 | **39 / 39 通过** |
 | 静态红线自检 | 通过 |
-| 离线结构分析 | 94 文件 / 18890 行 / 145 类型 / 618 方法，无结构性问题 |
+| 离线结构分析 | 101 文件 / 22860 行 / 156 类型 / 738 方法，无结构性问题 |
 
 > 离线结构分析的定位：在没有 SDK 的环境里提供可复现的前置检查（括号配对、命名空间规则、重复类型、空 catch、CS1998、未引用私有字段、方法行数、XML 注释 `--`）。
 > **它不替代编译器**：本项目的首次真实编译仍发现了 22 处问题，因此有 SDK 时必须以 `dotnet build` 为准。
@@ -57,7 +57,7 @@
 | `Recording.Flv.FlvSegmentWriter` | 文件头字节、载荷逐字节一致、时间戳重定基、序列头重放、分片元数据、释放后拒绝写入 | `FlvSegmentWriterTests`（6 个） |
 | `Recording.Hls.HlsPlaylistParser` / `TsStreamRecorder.AlignToPacketBoundary` | media/master 播放列表、ENDLIST、空内容、TS 整包对齐、前导垃圾、不足一包 | `HlsPlaylistTests`（7 个） |
 | `Bridge.LoopbackOnlyGuard` / `RelayRegistry` / `BridgeHost` | 回环前缀校验、通配拒绝、端口越界、注册/解析/释放、未知令牌、容量上限、按地址释放、未启动时注册失败 | `BridgeTests`（7 个） |
-| `Web.player-core`（播放策略） | 见 `docs/architecture/playback-strategy.md` 第 7 节 | `player-core.test.js`（18 个，含画质下拉规范化与档位热切换） |
+| `Web.player-core`（播放策略） | 见 `docs/architecture/playback-strategy.md` 第 7 节 | `player-core.test.js`（39 个，含画质/档位/暂停/缓冲失控/状态行优先级） |
 
 **未覆盖（需联网或人工验证，属集成测试范畴）**：
 

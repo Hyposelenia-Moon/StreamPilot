@@ -463,6 +463,250 @@ public sealed class PlatformParserTests
         Assert.Equal("10000", selectedKey);
     }
 
+    /// <summary>
+    /// B站：真实响应夹具（room_id=814，2026-09-17 抓取）。
+    /// </summary>
+    /// <remarks>
+    /// 用来锁死"房间信息接口被风控 + 播放接口正常"这条组合路径，避免再次回归。
+    /// 814 是短号，平台真实房间号是 856077（<c>by_room_ids</c> 的键），
+    /// 三个片段都删掉了地址里的签名参数（<c>extra</c> 只保留 <c>expires</c>）。
+    /// </remarks>
+    private const string BilibiliRiskControlResponse =
+        """{ "code": -352, "message": "-352", "ttl": 1 }""";
+
+    private const string BilibiliRoomBaseInfoResponse =
+        """
+        { "code": 0, "message": "OK", "ttl": 1, "data": { "by_uids": {}, "by_room_ids": {
+            "856077": {
+              "room_id": 856077, "short_id": 814, "uid": 13221028, "live_status": 1,
+              "live_url": "https://live.bilibili.com/856077", "parent_area_name": "手游",
+              "area_name": "王者荣耀", "title": "【树叶】赛季末打打排位",
+              "uname": "迷茫小树叶", "online": 186564,
+              "cover": "https://i0.hdslb.com/bfs/live/new_room_cover/cover.jpg" } } } }
+        """;
+
+    private const string BilibiliPlayInfoResponse =
+        """
+        { "code": 0, "message": "OK", "ttl": 1, "data": {
+            "room_id": 856077, "short_id": 814, "uid": 13221028, "live_status": 1,
+            "playurl_info": { "conf_json": "{\"cdn_rate\":10000}", "playurl": { "cid": 856077,
+              "g_qn_desc": [
+                { "qn": 30000, "desc": "杜比", "hdr_desc": "", "attr_desc": null, "hdr_type": 0, "media_base_desc": null },
+                { "qn": 20000, "desc": "4K", "hdr_desc": "", "attr_desc": null, "hdr_type": 0, "media_base_desc": null },
+                { "qn": 15000, "desc": "2K", "hdr_desc": "", "attr_desc": null, "hdr_type": 0, "media_base_desc": null },
+                { "qn": 10000, "desc": "原画", "hdr_desc": "", "attr_desc": null, "hdr_type": 0,
+                  "media_base_desc": { "detail_desc": { "desc": "1080P 原画", "tag": ["高帧率"] },
+                                       "brief_desc": { "desc": "1080P", "badge": "原画" } } },
+                { "qn": 400, "desc": "蓝光", "hdr_desc": "", "attr_desc": null, "hdr_type": 0,
+                  "media_base_desc": { "detail_desc": { "desc": "1080P 蓝光" }, "brief_desc": { "desc": "1080P" } } },
+                { "qn": 250, "desc": "超清", "hdr_desc": "", "attr_desc": null, "hdr_type": 0,
+                  "media_base_desc": { "detail_desc": { "desc": "720P 超清" }, "brief_desc": { "desc": "720P" } } },
+                { "qn": 150, "desc": "高清", "hdr_desc": "", "attr_desc": null, "hdr_type": 0, "media_base_desc": null },
+                { "qn": 80, "desc": "流畅", "hdr_desc": "", "attr_desc": null, "hdr_type": 0, "media_base_desc": null } ],
+              "stream": [
+                { "protocol_name": "http_stream", "format": [ { "format_name": "flv", "codec": [
+                    { "codec_name": "avc", "current_qn": 250, "accept_qn": [ 10000, 400, 250 ],
+                      "base_url": "/live-bvc/888878/live_lowlatency_2500.flv?",
+                      "url_info": [
+                        { "host": "https://cn-jssz-cm-02-09.bilivideo.com", "extra": "expires=1789656617&pt=web&qn=250" },
+                        { "host": "https://d1-cn-gotcha04b.bilivideo.com", "extra": "expires=1789656617&pt=web&qn=250" } ] },
+                    { "codec_name": "hevc", "current_qn": 250, "accept_qn": [ 10000, 400, 250 ],
+                      "base_url": "/live-bvc/777112/live_lowlatency_minihevc.flv?",
+                      "url_info": [
+                        { "host": "https://cn-fjqz-cm-01-01.bilivideo.com", "extra": "expires=1789656617&pt=web&qn=250" },
+                        { "host": "https://d1-cn-gotcha04b.bilivideo.com", "extra": "expires=1789656617&pt=web&qn=250" } ] } ] } ] },
+                { "protocol_name": "http_hls", "format": [
+                    { "format_name": "ts", "codec": [
+                        { "codec_name": "avc", "current_qn": 250, "accept_qn": [ 10000, 400, 250 ],
+                          "base_url": "/live-bvc/280866/live_lowlatency_2500.m3u8?",
+                          "url_info": [ { "host": "https://d1-cn-gotcha104.bilivideo.com", "extra": "expires=1789656617&qn=250" } ] },
+                        { "codec_name": "hevc", "current_qn": 250, "accept_qn": [ 10000, 400, 250 ],
+                          "base_url": "/live-bvc/835051/live_lowlatency_minihevc.m3u8?",
+                          "url_info": [ { "host": "https://d1-cn-gotcha104b.bilivideo.com", "extra": "expires=1789656617&qn=250" } ] } ] },
+                    { "format_name": "fmp4", "codec": [
+                        { "codec_name": "avc", "current_qn": 250, "accept_qn": [ 10000, 400, 250 ],
+                          "base_url": "/live-bvc/123214/live_lowlatency_2500/index.m3u8?",
+                          "url_info": [ { "host": "https://cn-jssz-cm-02-08.bilivideo.com", "extra": "expires=1789656617&qn=250" } ] },
+                        { "codec_name": "hevc", "current_qn": 250, "accept_qn": [ 10000, 400, 250 ],
+                          "base_url": "/live-bvc/812814/live_lowlatency_minihevc/index.m3u8?",
+                          "url_info": [ { "host": "https://cn-fjqz-cm-01-03.bilivideo.com", "extra": "expires=1789656617&qn=250" } ] } ] } ] } } } }
+        """;
+
+    /// <summary>B站：getRoomBaseInfo 的字段路径必须能读出在播状态（读取路径写错会把在播房间判成未开播）。</summary>
+    /// <remarks>
+    /// 本次回归的核心之一：<c>live_status</c> 在 <c>data.by_room_ids["&lt;真实房间号&gt;"]</c> 里，
+    /// 顶层与 <c>data</c> 层都没有该字段；<c>by_room_ids</c> 的键是 856077（814 是短号）。
+    /// </remarks>
+    [TestMethod("B站：getRoomBaseInfo 读出真实房间号与在播状态")]
+    public void BilibiliReadsRoomBaseInfoFields()
+    {
+        using JsonDocument document = JsonDocument.Parse(BilibiliRoomBaseInfoResponse);
+
+        BilibiliParser.RoomInfoSnapshot? snapshot = BilibiliParser.TryParseRoomBaseInfo(document.RootElement, "814");
+
+        Assert.NotNull(snapshot);
+        Assert.Equal("856077", snapshot!.RoomId, "必须用平台返回的真实房间号，而不是请求里的短号 814");
+        Assert.Equal(1, snapshot.LiveStatus, "live_status 必须在 by_room_ids 的房间对象里读到");
+        Assert.Equal("迷茫小树叶", snapshot.Anchor);
+        Assert.Equal("【树叶】赛季末打打排位", snapshot.Title);
+        Assert.Equal("王者荣耀", snapshot.Category);
+    }
+
+    /// <summary>B站：getInfoByRoom 被风控（code=-352）时，降级通道必须仍然给出在播状态与主播名。</summary>
+    [TestMethod("B站：风控响应不能当作房间信息，降级通道要能接手")]
+    public void BilibiliFallsBackToRoomBaseInfoWhenRiskControlled()
+    {
+        using JsonDocument riskControl = JsonDocument.Parse(BilibiliRiskControlResponse);
+        Assert.Equal(-352, riskControl.RootElement.GetProperty("code").GetInt32());
+        Assert.True(BilibiliParser.IsRiskControlCode(-352), "-352 必须分类为风控而不是房间不存在");
+        Assert.False(riskControl.RootElement.TryGetProperty("data", out _), "风控响应没有 data，降级逻辑必须能处理");
+
+        using JsonDocument baseInfo = JsonDocument.Parse(BilibiliRoomBaseInfoResponse);
+        BilibiliParser.RoomInfoSnapshot? fallback = BilibiliParser.TryParseRoomBaseInfo(baseInfo.RootElement, "814");
+
+        Assert.NotNull(fallback, "风控时必须能用 getRoomBaseInfo 拿到主播名与标题");
+        Assert.Equal(1, fallback!.LiveStatus);
+    }
+
+    /// <summary>B站：getRoomBaseInfo 结构变化（键改名 / data 缺失）时返回 null，不得抛异常。</summary>
+    [TestMethod("B站：getRoomBaseInfo 结构变化时安全返回 null")]
+    public void BilibiliRoomBaseInfoToleratesStructureChanges()
+    {
+        using JsonDocument renamedIndex = JsonDocument.Parse("""{ "code": 0, "data": { "rooms": { "856077": { "live_status": 1 } } } }""");
+        Assert.Null(BilibiliParser.TryParseRoomBaseInfo(renamedIndex.RootElement, "814"), "索引字段改名后应返回 null");
+
+        using JsonDocument noData = JsonDocument.Parse("""{ "code": 0, "message": "OK" }""");
+        Assert.Null(BilibiliParser.TryParseRoomBaseInfo(noData.RootElement, "814"), "缺少 data 时应返回 null");
+
+        using JsonDocument riskControl = JsonDocument.Parse(BilibiliRiskControlResponse);
+        Assert.Null(BilibiliParser.TryParseRoomBaseInfo(riskControl.RootElement, "814"), "降级通道自身被风控时应返回 null");
+
+        using JsonDocument emptyIndex = JsonDocument.Parse("""{ "code": 0, "data": { "by_room_ids": {} } }""");
+        Assert.Null(BilibiliParser.TryParseRoomBaseInfo(emptyIndex.RootElement, "814"), "索引为空时应返回 null");
+    }
+
+    /// <summary>B站（回归 ①）：<c>g_qn_desc</c> 为空或字段改名时，档位必须回退到 <c>accept_qn</c>，不能整条解析失败。</summary>
+    [TestMethod("B站：g_qn_desc 为空时回退 accept_qn")]
+    public void BilibiliFallsBackToAcceptedQualitiesWhenDescriptionsMissing()
+    {
+        // 字段存在但为空数组：声明表读出来是空的，档位必须由 accept_qn 决定。
+        using JsonDocument emptyArray = JsonDocument.Parse("""
+            { "playurl_info": { "playurl": {
+                "g_qn_desc": [],
+                "stream": [ { "format": [ { "codec": [ { "current_qn": 10000, "accept_qn": [ 10000, 400, 250 ] } ] } ] } ] } } }
+            """);
+
+        (IReadOnlyList<QualityOption> qualities, string? selectedKey) =
+            CreateBilibiliParser().BuildQualityOptions(emptyArray.RootElement, requestedQuality: null);
+
+        Assert.Equal(3, qualities.Count, "accept_qn 必须仍然被使用");
+        Assert.Equal("10000", qualities[0].Key);
+        Assert.Equal("1080P 原画", qualities[0].Label, "没有声明时不加高帧率后缀，且不能失败");
+        Assert.Equal("10000", selectedKey);
+
+        // 字段改名：整条 g_qn_desc 从响应里消失，解析仍然必须成功。
+        using JsonDocument renamed = JsonDocument.Parse("""
+            { "playurl_info": { "playurl": {
+                "quality_descriptions": [ { "qn": 10000, "desc": "原画" } ],
+                "stream": [ { "format": [ { "codec": [ { "accept_qn": [ 10000, 400 ] } ] } ] } ] } } }
+            """);
+
+        (IReadOnlyList<QualityOption> renamedQualities, string? renamedKey) =
+            CreateBilibiliParser().BuildQualityOptions(renamed.RootElement, requestedQuality: null);
+
+        Assert.Equal(2, renamedQualities.Count);
+        Assert.Equal("10000", renamedQualities[0].Key);
+        Assert.Equal("1080P 原画", renamedQualities[0].Label);
+        Assert.Equal("10000", renamedKey);
+    }
+
+    /// <summary>B站（回归 ②）：<c>accept_qn</c> 为空时，档位必须回退到 <c>g_qn_desc</c> 声明的档位。</summary>
+    [TestMethod("B站：accept_qn 为空时回退 g_qn_desc 声明")]
+    public void BilibiliFallsBackToDeclaredQualitiesWhenAcceptedEmpty()
+    {
+        using JsonDocument document = JsonDocument.Parse("""
+            { "playurl_info": { "playurl": {
+                "g_qn_desc": [
+                  { "qn": 10000, "desc": "原画", "hdr_desc": "", "hdr_type": 0,
+                    "media_base_desc": { "detail_desc": { "desc": "1080P 原画", "tag": ["高帧率"] } } },
+                  { "qn": 400, "desc": "蓝光", "hdr_desc": "", "hdr_type": 0,
+                    "media_base_desc": { "detail_desc": { "desc": "1080P 蓝光" } } } ],
+                "stream": [ { "format": [ { "codec": [ { "current_qn": 10000, "accept_qn": [] } ] } ] } ] } } }
+            """);
+
+        (IReadOnlyList<QualityOption> qualities, string? selectedKey) =
+            CreateBilibiliParser().BuildQualityOptions(document.RootElement, requestedQuality: null);
+
+        Assert.Equal(2, qualities.Count);
+        Assert.Equal("10000", qualities[0].Key);
+        Assert.Equal("1080P 原画（高帧率）", qualities[0].Label);
+        Assert.Equal("400", qualities[1].Key);
+        Assert.Equal("10000", selectedKey);
+    }
+
+    /// <summary>B站（回归 ②'）：<c>g_qn_desc</c> 与 <c>accept_qn</c> 同时为空时，用真实响应里的 <c>current_qn</c> 兜底。</summary>
+    [TestMethod("B站：档位声明全空时用真实响应的 current_qn 兜底")]
+    public void BilibiliFallsBackToCurrentQualityNumberFromRealResponse()
+    {
+        using JsonDocument document = JsonDocument.Parse("""
+            { "playurl_info": { "playurl": {
+                "g_qn_desc": [],
+                "stream": [ { "protocol_name": "http_stream", "format": [ { "format_name": "flv", "codec": [
+                    { "codec_name": "avc", "current_qn": 250, "accept_qn": [],
+                      "base_url": "/live-bvc/888878/live_lowlatency_2500.flv?",
+                      "url_info": [ { "host": "https://cn-jssz-cm-02-09.bilivideo.com", "extra": "expires=1789656617" } ] } ] } ] } ] } } }
+            """);
+
+        (IReadOnlyList<QualityOption> qualities, string? selectedKey) =
+            CreateBilibiliParser().BuildQualityOptions(document.RootElement, requestedQuality: null);
+
+        Assert.Equal(1, qualities.Count, "至少要有当前这一档");
+        Assert.Equal("250", qualities[0].Key);
+        Assert.Equal("250", selectedKey);
+    }
+
+    /// <summary>
+    /// B站（回归 ③④）：只要播放接口返回 <c>playurl_info</c>，无论房间信息接口是否可用都必须解析成功。
+    /// </summary>
+    /// <remarks>
+    /// 这正是房间 814 的真实组合：<c>getInfoByRoom</c> 返回 <c>code=-352</c>（风控），
+    /// <c>getRoomBaseInfo</c> 正常，播放接口返回 12 条候选地址。
+    /// 旧实现把"直播状态"当作是否失败的开关，一旦状态读取路径变化就会把在播房间判成未开播。
+    /// </remarks>
+    [TestMethod("B站：房间信息不可用时仍必须用播放接口解析成功")]
+    public void BilibiliSucceedsFromPlayInfoWithoutRoomInfo()
+    {
+        using JsonDocument document = JsonDocument.Parse(BilibiliPlayInfoResponse);
+        JsonElement playData = document.RootElement.GetProperty("data");
+        BilibiliParser parser = CreateBilibiliParser();
+
+        StreamCandidateBuilder builder = new(PlatformId.Bilibili, NullStructuredLogger.Instance);
+        parser.CollectCandidates(playData, builder);
+        IReadOnlyList<StreamCandidate> candidates = builder.Build();
+        (IReadOnlyList<QualityOption> qualities, string? selectedKey) = parser.BuildQualityOptions(playData, requestedQuality: null);
+
+        Assert.Equal(12, candidates.Count, "真实响应的候选数与运行日志一致");
+        Assert.Equal("cn-jssz-cm-02-09.bilivideo.com", candidates[0].CdnHost);
+        Assert.Equal(3, qualities.Count, "accept_qn=[10000,400,250] 决定可用档位");
+        Assert.Equal("10000", selectedKey);
+
+        // 房间信息两个来源都不可用 + 播放接口给出在播状态 → 必须继续解析（不抛 NotLive）。
+        Assert.Null(parser.ShouldRejectForMissingCandidates(3, liveStatus: 1), "有候选时永远不能判失败");
+        Assert.Null(parser.ShouldRejectForMissingCandidates(0, liveStatus: 1), "在播但无候选：交给上层按播放接口失败处理");
+
+        // 房间信息来源给出"在播"，播放接口的 live_status 缺失 → 在播状态必须被保留下来。
+        Assert.Null(parser.ShouldRejectForMissingCandidates(0, liveStatus: -1, roomLiveStatus: 1));
+        Assert.Equal(
+            (int)ResolveFailure.NotLive,
+            parser.ShouldRejectForMissingCandidates(0, liveStatus: -1, roomLiveStatus: 0));
+        Assert.Equal(
+            (int)ResolveFailure.Replaying,
+            parser.ShouldRejectForMissingCandidates(0, liveStatus: 2, roomLiveStatus: -1));
+        Assert.Equal(
+            (int)ResolveFailure.NotLive,
+            parser.ShouldRejectForMissingCandidates(0, liveStatus: -1, roomLiveStatus: -1));
+    }
+
     /// <summary>B站：调用方显式请求的档位在没有其它声明时也必须出现在列表里。</summary>
     [TestMethod("B站：请求档位在无声明时也要出现在列表")]
     public void BilibiliKeepsRequestedQualityWhenNothingDeclared()
