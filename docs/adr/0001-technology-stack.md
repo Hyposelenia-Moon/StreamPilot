@@ -102,7 +102,7 @@ StreamPilot 需要把三类能力（多平台低延迟播放、多平台解析�
 |----|------|
 | 使用的 SDK | **.NET SDK 10.0.401**（本机安装后完成全部验证） |
 | `dotnet build StreamPilot.slnx -c Debug/Release` | **0 警告 / 0 错误**（`TreatWarningsAsErrors=true` 生效） |
-| C# 单元测试（自研运行器） | **80 个用例全部通过** |
+| C# 单元测试（自研运行器） | **87 个用例全部通过** |
 | 播放策略前端测试（`node --test`） | **13 个用例全部通过** |
 | 静态红线自检（`build/verify-tree.ps1`） | 通过（无 TODO/Console/依赖方向/通配监听/二进制混入） |
 | 离线 C# 结构分析（`build/analyze-csharp.mjs`） | 88 文件 / 15119 行 / 133 类型 / 504 方法，无结构性问题 |

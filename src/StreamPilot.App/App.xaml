@@ -25,20 +25,34 @@
       <SolidColorBrush x:Key="WarnBrush" Color="#B45309" />
       <SolidColorBrush x:Key="ErrorBrush" Color="#C0392B" />
       <SolidColorBrush x:Key="OkBrush" Color="#1F8A4C" />
+      <SolidColorBrush x:Key="AccentHoverBrush" Color="#2A63D4" />
+      <SolidColorBrush x:Key="AccentPressedBrush" Color="#2456BC" />
+      <SolidColorBrush x:Key="AccentSoftBrush" Color="#EAF1FE" />
+      <SolidColorBrush x:Key="CardBackgroundBrush" Color="#F7F8FA" />
+
+      <!--
+        字体：优先 Segoe UI Variable（Win11 自带），Win10 回落到 Segoe UI，
+        中文由雅黑接管。字号比系统默认大一档，避免浅色底下文字显小发灰。
+      -->
+      <FontFamily x:Key="UiFontFamily">Segoe UI Variable Text, Segoe UI, Microsoft YaHei UI, Microsoft YaHei</FontFamily>
 
       <!-- 无主题键样式：作为默认样式应用于对应控件类型 -->
       <Style TargetType="TextBlock">
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
         <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="13" />
       </Style>
 
       <Style x:Key="MutedText" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
         <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+        <Setter Property="FontSize" Value="12" />
       </Style>
 
       <Style x:Key="SectionTitle" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
         <Setter Property="FontWeight" Value="SemiBold" />
-        <Setter Property="Margin" Value="0,10,0,4" />
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="Margin" Value="0,14,0,6" />
       </Style>
 
       <Style x:Key="ValueText" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
@@ -47,23 +61,27 @@
       </Style>
 
       <Style x:Key="CardPanel" TargetType="Border">
-        <Setter Property="Background" Value="#F7F8FA" />
+        <Setter Property="Background" Value="{StaticResource CardBackgroundBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
         <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="CornerRadius" Value="6" />
-        <Setter Property="Padding" Value="10" />
+        <Setter Property="CornerRadius" Value="8" />
+        <Setter Property="Padding" Value="12" />
       </Style>
 
       <!-- 按钮 -->
       <Style TargetType="Button">
         <Setter Property="Background" Value="{StaticResource ControlBackgroundBrush}" />
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+        <Setter Property="BorderBrush" Value="{StaticResource BorderBrushStrong}" />
         <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="Padding" Value="10,4" />
+        <Setter Property="Padding" Value="12,5" />
         <Setter Property="Margin" Value="0,0,6,0" />
+        <Setter Property="MinHeight" Value="30" />
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="13" />
         <!-- MinWidth 取 0：按钮宽度跟随文字，避免窄窗时文字被省略号截断 -->
         <Setter Property="MinWidth" Value="0" />
+        <Setter Property="Cursor" Value="Hand" />
         <Setter Property="Template">
           <Setter.Value>
             <ControlTemplate TargetType="Button">
@@ -71,7 +89,7 @@
                       Background="{TemplateBinding Background}"
                       BorderBrush="{TemplateBinding BorderBrush}"
                       BorderThickness="{TemplateBinding BorderThickness}"
-                      CornerRadius="4"
+                      CornerRadius="6"
                       SnapsToDevicePixels="True">
                 <ContentPresenter Margin="{TemplateBinding Padding}"
                                   HorizontalAlignment="Center"
@@ -84,11 +102,50 @@
                   <Setter TargetName="Root" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
                 </Trigger>
                 <Trigger Property="IsPressed" Value="True">
-                  <Setter TargetName="Root" Property="Background" Value="{StaticResource SelectionBackgroundBrush}" />
+                  <Setter TargetName="Root" Property="Background" Value="{StaticResource AccentSoftBrush}" />
                 </Trigger>
                 <Trigger Property="IsEnabled" Value="False">
                   <Setter TargetName="Root" Property="Opacity" Value="0.45" />
                   <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+                  <Setter Property="Cursor" Value="Arrow" />
+                </Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+
+      <!-- 主操作按钮：实心主色，用于「解析房间」「开始录制」「保存」等 -->
+      <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+        <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+        <Setter Property="Foreground" Value="#FFFFFF" />
+        <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="Button">
+              <Border x:Name="Root"
+                      Background="{TemplateBinding Background}"
+                      BorderBrush="{TemplateBinding BorderBrush}"
+                      BorderThickness="{TemplateBinding BorderThickness}"
+                      CornerRadius="6"
+                      SnapsToDevicePixels="True">
+                <ContentPresenter Margin="{TemplateBinding Padding}"
+                                  HorizontalAlignment="Center"
+                                  VerticalAlignment="Center"
+                                  RecognizesAccessKey="True" />
+              </Border>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                  <Setter TargetName="Root" Property="Background" Value="{StaticResource AccentHoverBrush}" />
+                  <Setter TargetName="Root" Property="BorderBrush" Value="{StaticResource AccentHoverBrush}" />
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True">
+                  <Setter TargetName="Root" Property="Background" Value="{StaticResource AccentPressedBrush}" />
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                  <Setter TargetName="Root" Property="Opacity" Value="0.4" />
+                  <Setter Property="Cursor" Value="Arrow" />
                 </Trigger>
               </ControlTemplate.Triggers>
             </ControlTemplate>
@@ -100,10 +157,14 @@
       <Style TargetType="TextBox">
         <Setter Property="Background" Value="{StaticResource ControlBackgroundBrush}" />
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+        <Setter Property="BorderBrush" Value="{StaticResource BorderBrushStrong}" />
         <Setter Property="CaretBrush" Value="{StaticResource TextBrush}" />
         <Setter Property="SelectionBrush" Value="{StaticResource AccentBrush}" />
-        <Setter Property="Padding" Value="6,4" />
+        <Setter Property="Padding" Value="8,5" />
+        <Setter Property="MinHeight" Value="30" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="13" />
       </Style>
 
       <!-- 下拉框：必须自带模板，否则选中项文字会使用系统主题的深色前景 -->
@@ -122,8 +183,11 @@
       <Style TargetType="ComboBox">
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
         <Setter Property="Background" Value="{StaticResource ControlBackgroundBrush}" />
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
-        <Setter Property="Padding" Value="6,3" />
+        <Setter Property="BorderBrush" Value="{StaticResource BorderBrushStrong}" />
+        <Setter Property="Padding" Value="8,4" />
+        <Setter Property="MinHeight" Value="30" />
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="13" />
         <Setter Property="Template">
           <Setter.Value>
             <ControlTemplate TargetType="ComboBox">
@@ -223,12 +287,62 @@
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
         <Setter Property="VerticalAlignment" Value="Center" />
         <Setter Property="Margin" Value="0,0,12,0" />
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="13" />
+      </Style>
+
+      <!--
+        分段式单选项：用于「低延迟追帧」这类少量互斥档位。
+        去掉圆点、改成胶囊按钮，选中时填充主色，目标是"一眼看出当前档位"。
+      -->
+      <Style x:Key="SegmentRadio" TargetType="RadioButton">
+        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+        <Setter Property="Padding" Value="14,6" />
+        <Setter Property="Margin" Value="0,0,8,0" />
+        <Setter Property="MinWidth" Value="76" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="RadioButton">
+              <Border x:Name="Root"
+                      Background="{StaticResource ControlBackgroundBrush}"
+                      BorderBrush="{StaticResource BorderBrushStrong}"
+                      BorderThickness="1"
+                      CornerRadius="6"
+                      SnapsToDevicePixels="True">
+                <ContentPresenter Margin="{TemplateBinding Padding}"
+                                  HorizontalAlignment="Center"
+                                  VerticalAlignment="Center"
+                                  RecognizesAccessKey="True" />
+              </Border>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                  <Setter TargetName="Root" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                </Trigger>
+                <Trigger Property="IsChecked" Value="True">
+                  <Setter TargetName="Root" Property="Background" Value="{StaticResource AccentBrush}" />
+                  <Setter TargetName="Root" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                  <Setter Property="Foreground" Value="#FFFFFF" />
+                  <Setter Property="FontWeight" Value="SemiBold" />
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                  <Setter TargetName="Root" Property="Opacity" Value="0.45" />
+                  <Setter Property="Cursor" Value="Arrow" />
+                </Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
       </Style>
 
       <!-- 复选项 -->
       <Style TargetType="CheckBox">
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
         <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="13" />
       </Style>
 
       <!-- 页签控件与页签：页签文字必须显式指定浅色 -->
@@ -240,7 +354,9 @@
       <Style TargetType="TabItem">
         <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
         <Setter Property="Background" Value="Transparent" />
-        <Setter Property="Padding" Value="12,6" />
+        <Setter Property="Padding" Value="14,7" />
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="13.5" />
         <Setter Property="Template">
           <Setter.Value>
             <ControlTemplate TargetType="TabItem">
@@ -270,9 +386,11 @@
 
       <!-- 列表：容器样式必须显式给浅色前景，否则列表项文字是深色 -->
       <Style TargetType="ListBox">
-        <Setter Property="Background" Value="#F7F8FA" />
+        <Setter Property="Background" Value="{StaticResource CardBackgroundBrush}" />
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="12.5" />
       </Style>
 
       <Style TargetType="ListBoxItem">

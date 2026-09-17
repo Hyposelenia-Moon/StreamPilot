@@ -50,14 +50,11 @@ internal sealed class YyParser : PlatformParserBase
     /// <summary>输入校验的操作名。</summary>
     private const string ValidateOperation = "validate";
 
-    /// <summary>主播名捕获组序号。</summary>
-    private const int AnchorGroupIndex = 1;
+    /// <summary>房间页内联脚本里 pageInfo 对象的捕获组名。</summary>
+    private const string PageInfoGroup = "body";
 
-    /// <summary>标题捕获组序号。</summary>
-    private const int TitleGroupIndex = 2;
-
-    /// <summary>分区捕获组序号。</summary>
-    private const int CategoryGroupIndex = 3;
+    /// <summary>房间页字段值的捕获组名。</summary>
+    private const string FieldValueGroup = "value";
 
     /// <summary>毫秒与秒的换算。</summary>
     private const long MillisecondsPerSecond = 1000;
@@ -68,7 +65,7 @@ internal sealed class YyParser : PlatformParserBase
     /// <summary>请求体中的发送时间占位符。</summary>
     private const string SendTimePlaceholder = "@SENDTIME@";
 
-    /// <summary>请求体中的房间号占位符。</summary>
+    /// <summary>请求体中的流标识占位符。</summary>
     private const string RoomIdPlaceholder = "@ROOMID@";
 
     /// <summary>请求体中的客户端版本占位符。</summary>
@@ -86,13 +83,50 @@ internal sealed class YyParser : PlatformParserBase
     /// <summary>无法从输入确定房间号时的提示。</summary>
     private const string MissingRoomIdMessage = "无法从输入中确定 YY 直播间房间号。";
 
-    /// <summary>房间页关键字段的抽取正则（页面内联脚本片段）。</summary>
-    private static readonly Regex RoomPagePattern = new(
-        @"nick: ""(.+?)"".+?roomName: decodeURIComponent\(""(.+?)""\).+?stringBiz: ""(.*?)""",
+    /// <summary>房间页缺少 pageInfo（例如落到 404 页）时的提示。</summary>
+    private const string RoomPageMissingMessage = "YY 房间页缺少直播信息，房间号可能不存在。";
+
+    /// <summary>房间页内联脚本里的 pageInfo 对象。</summary>
+    /// <remarks>
+    /// YY 页面结构变动过多次，这里只锁定 <c>var pageInfo = { ... };</c> 这一稳定外壳，
+    /// 字段再逐个抽取，避免"一个字段挪位就整页解析失败"。
+    /// </remarks>
+    private static readonly Regex PageInfoPattern = new(
+        @"var\s+pageInfo\s*=\s*\{(?<body>.+?)\r?\n\s*\};",
         RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.CultureInvariant);
+
+    /// <summary>主播名（nick 字段）。</summary>
+    private static readonly Regex AnchorPattern = new(
+        @"(?<![A-Za-z])nick\s*:\s*""(?<value>[^""]*)""",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>房间标题（roomName 字段，按 decodeURIComponent 语义解码）。</summary>
+    private static readonly Regex TitlePattern = new(
+        @"roomName\s*:\s*decodeURIComponent\(""(?<value>[^""]*)""\)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>分区业务标识（biz 字段，可能为空）。</summary>
+    private static readonly Regex CategoryPattern = new(
+        @"(?<![A-Za-z])biz\s*:\s*'(?<value>[^']*)'",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>真实流标识（sid 字段）；短号房间必须用它调用播放接口。</summary>
+    private static readonly Regex StreamIdPattern = new(
+        @"(?<![A-Za-z])sid\s*:\s*""(?<value>\d+)""",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>不写入 BOM 的 UTF-8 编码器（供请求体使用）。</summary>
     private static readonly UTF8Encoding Utf8WithoutBom = new(encoderShouldEmitUTF8Identifier: false);
+
+    /// <summary>
+    /// 播放接口请求体的媒体类型（不含参数）。
+    /// </summary>
+    /// <remarks>
+    /// <c>StringContent</c> 的 mediaType 参数只接受纯媒体类型，带 <c>;charset=</c> 会被
+    /// <c>MediaTypeHeaderValue</c> 判为非法格式并抛 <c>FormatException</c>；
+    /// 字符集由传入的编码自动补上。
+    /// </remarks>
+    private const string PlainTextContentType = "text/plain";
 
     /// <summary>播放接口请求体模板；键名、嵌套与取值必须与 Web 端一致（无签名计算）。</summary>
     private const string StreamRequestBodyTemplate = """
@@ -138,10 +172,9 @@ internal sealed class YyParser : PlatformParserBase
     protected override async Task<ResolvedRoom> OnParseAsync(RoomQuery query, CancellationToken cancellationToken)
     {
         string roomId = ResolveRoomId(query);
-        (string Anchor, string Title, string Category) page =
-            await FetchRoomPageInfoAsync(roomId, cancellationToken).ConfigureAwait(false);
+        YyRoomPage page = await FetchRoomPageAsync(roomId, cancellationToken).ConfigureAwait(false);
         IReadOnlyList<string> addresses =
-            await FetchStreamAddressesAsync(roomId, cancellationToken).ConfigureAwait(false);
+            await FetchStreamAddressesAsync(page.StreamId, cancellationToken).ConfigureAwait(false);
 
         StreamCandidateBuilder builder = new(Platform, Logger);
         CollectCandidates(builder, addresses);
@@ -157,6 +190,13 @@ internal sealed class YyParser : PlatformParserBase
             ResolvedAt = DateTimeOffset.UtcNow,
         };
     }
+
+    /// <summary>YY 房间页中抽取到的直播信息。</summary>
+    /// <param name="Anchor">主播名。</param>
+    /// <param name="Title">房间标题。</param>
+    /// <param name="Category">分区业务标识（可能为空）。</param>
+    /// <param name="StreamId">真实流标识（sid）；播放接口必须使用它而不是短号。</param>
+    internal readonly record struct YyRoomPage(string Anchor, string Title, string Category, string StreamId);
 
     /// <summary>解析输入中的房间号：优先使用房间号，其次从直播间链接提取。</summary>
     /// <param name="query">已校验的房间查询条件。</param>
@@ -176,14 +216,12 @@ internal sealed class YyParser : PlatformParserBase
         return roomId;
     }
 
-    /// <summary>抓取 YY 房间页并抽取主播名、标题与分区。</summary>
+    /// <summary>抓取 YY 房间页并抽取主播名、标题、分区与真实流标识。</summary>
     /// <param name="roomId">房间号。</param>
     /// <param name="cancellationToken">取消令牌。</param>
-    /// <returns>主播名、标题与分区（分区可能为空字符串）。</returns>
-    /// <remarks>页面缺少关键字段时抛出带 <c>RoomNotFound</c> 分类的解析异常。</remarks>
-    private async Task<(string Anchor, string Title, string Category)> FetchRoomPageInfoAsync(
-        string roomId,
-        CancellationToken cancellationToken)
+    /// <returns>房间页信息。</returns>
+    /// <remarks>页面缺少 pageInfo（房间不存在或已下线）时抛出带 <c>RoomNotFound</c> 分类的解析异常。</remarks>
+    private async Task<YyRoomPage> FetchRoomPageAsync(string roomId, CancellationToken cancellationToken)
     {
         HttpRequestSpec spec = new()
         {
@@ -193,43 +231,61 @@ internal sealed class YyParser : PlatformParserBase
         };
 
         string html = await _http.GetStringAsync(spec, cancellationToken).ConfigureAwait(false);
-        return ParseRoomPage(html);
+        return ParseRoomPage(html, roomId);
     }
 
-    /// <summary>从房间页 HTML 中抽取主播名、标题与分区。</summary>
+    /// <summary>从房间页 HTML 中抽取主播名、标题、分区与真实流标识。</summary>
     /// <param name="html">页面 HTML。</param>
-    /// <returns>主播名、标题（按 JS <c>decodeURIComponent</c> 语义解码）与分区。</returns>
-    private (string Anchor, string Title, string Category) ParseRoomPage(string html)
+    /// <param name="roomId">输入的房间号（页面未给出 sid 时作为回退）。</param>
+    /// <returns>房间页信息。</returns>
+    internal YyRoomPage ParseRoomPage(string html, string roomId)
     {
-        Match match = RoomPagePattern.Match(html);
-        if (!match.Success)
+        Match page = PageInfoPattern.Match(html);
+        if (!page.Success)
         {
-            throw Fail(ResolveFailure.RoomNotFound, RoomPageOperation, ResolveMessages.RoomNotFound);
+            throw Fail(ResolveFailure.RoomNotFound, RoomPageOperation, RoomPageMissingMessage);
         }
 
-        string anchor = match.Groups[AnchorGroupIndex].Value;
-        string title = QueryStringParser.DecodeComponentStrict(match.Groups[TitleGroupIndex].Value);
-        string category = match.Groups[CategoryGroupIndex].Value;
-        return (anchor, title, category);
+        string body = page.Groups[PageInfoGroup].Value;
+        string anchor = ReadField(AnchorPattern, body);
+        string title = QueryStringParser.DecodeComponentStrict(ReadField(TitlePattern, body));
+        string category = ReadField(CategoryPattern, body);
+        string streamId = ReadField(StreamIdPattern, body);
+
+        return new YyRoomPage(
+            anchor.Length == 0 ? ResolveMessages.UnknownAnchor : anchor,
+            title.Length == 0 ? ResolveMessages.TitleUnavailable : title,
+            category,
+            streamId.Length == 0 ? roomId : streamId);
+    }
+
+    /// <summary>读取单个字段；字段缺失时返回空字符串。</summary>
+    /// <param name="pattern">字段正则。</param>
+    /// <param name="body">pageInfo 对象文本。</param>
+    /// <returns>字段值。</returns>
+    private static string ReadField(Regex pattern, string body)
+    {
+        Match match = pattern.Match(body);
+        return match.Success ? match.Groups[FieldValueGroup].Value.Trim() : string.Empty;
     }
 
     /// <summary>调用 stream-manager 接口并取出全部线路地址。</summary>
-    /// <param name="roomId">房间号。</param>
+    /// <param name="streamId">真实流标识（页面 pageInfo.sid）。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>线路地址列表（顺序与接口返回一致，可能为空）。</returns>
     private async Task<IReadOnlyList<string>> FetchStreamAddressesAsync(
-        string roomId,
+        string streamId,
         CancellationToken cancellationToken)
     {
         long sequenceMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        string body = BuildStreamRequestBody(roomId, sequenceMs);
+        string body = BuildStreamRequestBody(streamId, sequenceMs);
 
         HttpRequestSpec spec = new()
         {
-            Url = BuildStreamManagerUrl(roomId, sequenceMs),
+            Url = BuildStreamManagerUrl(streamId, sequenceMs),
             Platform = Platform,
             Operation = StreamManagerOperation,
-            ContentFactory = () => new StringContent(body, Utf8WithoutBom, "text/plain;charset=UTF-8"),
+            ContentFactory = () => new StringContent(body, Utf8WithoutBom, PlainTextContentType),
         };
 
         string text = await _http.GetStringAsync(spec, cancellationToken).ConfigureAwait(false);
@@ -260,17 +316,17 @@ internal sealed class YyParser : PlatformParserBase
     }
 
     /// <summary>拼接 stream-manager 播放接口地址。</summary>
-    /// <param name="roomId">房间号。</param>
+    /// <param name="streamId">真实流标识（页面 pageInfo.sid）。</param>
     /// <param name="sequenceMs">请求序号（毫秒时间戳）。</param>
     /// <returns>完整请求地址。</returns>
-    private static string BuildStreamManagerUrl(string roomId, long sequenceMs) => string.Concat(
+    private static string BuildStreamManagerUrl(string streamId, long sequenceMs) => string.Concat(
         StreamManagerEndpoint,
         "?uid=",
         StreamManagerUid,
         "&cid=",
-        roomId,
+        streamId,
         "&sid=",
-        roomId,
+        streamId,
         "&appid=",
         StreamManagerAppId,
         "&sequence=",
@@ -278,17 +334,17 @@ internal sealed class YyParser : PlatformParserBase
         "&encode=json");
 
     /// <summary>构造 stream-manager 播放接口的 JSON 请求体。</summary>
-    /// <param name="roomId">房间号。</param>
+    /// <param name="streamId">真实流标识（页面 pageInfo.sid）。</param>
     /// <param name="sequenceMs">请求序号（毫秒时间戳）。</param>
     /// <returns>JSON 请求体文本。</returns>
-    /// <remarks>房间号已由基类限定为字母数字，直接内嵌不会破坏 JSON 结构。</remarks>
-    private static string BuildStreamRequestBody(string roomId, long sequenceMs)
+    /// <remarks>流标识已由基类限定为字母数字，直接内嵌不会破坏 JSON 结构。</remarks>
+    private static string BuildStreamRequestBody(string streamId, long sequenceMs)
     {
         long sendTimeSeconds = sequenceMs / MillisecondsPerSecond;
         return StreamRequestBodyTemplate
             .Replace(SequencePlaceholder, sequenceMs.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)
             .Replace(SendTimePlaceholder, sendTimeSeconds.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)
-            .Replace(RoomIdPlaceholder, roomId, StringComparison.Ordinal)
+            .Replace(RoomIdPlaceholder, streamId, StringComparison.Ordinal)
             .Replace(ClientVersionPlaceholder, ClientVersion, StringComparison.Ordinal);
     }
 

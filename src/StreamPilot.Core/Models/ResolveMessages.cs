@@ -32,6 +32,15 @@ public static class ResolveMessages
     /// <summary>解析错误的通用提示。</summary>
     public const string ParseError = "解析平台响应失败，接口可能已变更。";
 
+    /// <summary>平台未返回主播名时的占位文本。</summary>
+    public const string UnknownAnchor = "未知主播";
+
+    /// <summary>平台未返回标题时的占位文本。</summary>
+    public const string TitleUnavailable = "（标题不可用）";
+
+    /// <summary>平台未返回分区时的占位文本。</summary>
+    public const string CategoryUnavailable = "未知分区";
+
     /// <summary>把失败分类转换为面向用户的提示。</summary>
     /// <param name="failure">失败分类。</param>
     /// <returns>中文提示。</returns>

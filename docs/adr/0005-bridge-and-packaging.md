@@ -67,7 +67,7 @@
   3. `PATH` 中的 `mpv.exe`；
   4. 常见安装位置（`%ProgramFiles%\mpv`、`%LOCALAPPDATA%\Programs\mpv`、scoop shims）；
   5. 查找失败 → UI 提示用户手动选择（`OpenFileDialog`）。
-- mpv 启动参数沿用参考项目经验值：`--cache=no --cache-pause=no --demuxer-readahead-secs=0 --demuxer-max-bytes=512K --demuxer-max-back-bytes=0 --speed=1.08 --audio-pitch-correction=yes`，另加 `--force-window=yes`、`--title=StreamPilot - {title}` 与 `--http-header-fields=Referer: {referer}`（需要 Referer 的 B站/抖音流）。
+- mpv 启动参数只传播放必需的 `--title=StreamPilot - {title}` 与 `--http-header-fields=Referer: {referer}`（需要 Referer 的 B站/抖音/YY/Bigo 流）：缓存、画质、倍速等属用户偏好，交给用户自己的 mpv 配置，程序不覆盖（早期版本曾沿用参考项目的低延迟参数，因会覆盖用户的 mpv 调优而移除）。
 - 进程调用必须处理：`Process.Start` 失败、非零退出码、启动超时（10 秒内未创建主窗口则认为失败）；不 `WaitForExit` 阻塞 UI。
 
 ### 5. 打包发布

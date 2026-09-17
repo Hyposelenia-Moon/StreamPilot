@@ -58,9 +58,6 @@ public sealed record PlaybackOptions
     /// <summary>mpv 可执行文件路径；为空时按工具查找顺序自动探测。</summary>
     public string MpvPath { get; init; } = string.Empty;
 
-    /// <summary>mpv 启动参数（在默认参数之后追加，按空格分隔）。</summary>
-    public string MpvArguments { get; init; } = string.Empty;
-
     /// <summary>解析成功后是否自动开始播放。</summary>
     public bool AutoPlayOnResolve { get; init; } = true;
 }
@@ -98,9 +95,6 @@ public sealed record BridgeOptions
 
     /// <summary>是否在应用启动时自动开启桥接服务。</summary>
     public bool AutoStart { get; init; } = true;
-
-    /// <summary>启动 mpv 时是否使用低延迟参数。</summary>
-    public bool UseLowLatencyMpvArguments { get; init; } = true;
 }
 
 /// <summary>网络设置。</summary>

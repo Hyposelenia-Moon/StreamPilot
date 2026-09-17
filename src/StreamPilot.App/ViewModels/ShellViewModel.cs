@@ -8,6 +8,7 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Input;
 using StreamPilot.App.Services;
+using StreamPilot.App.Views;
 using StreamPilot.Core.Configuration;
 using StreamPilot.Core.Logging;
 using StreamPilot.Core.Models;
@@ -40,10 +41,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>页面请求重新解析的消息类型。</summary>
     private const string PlayerRefreshNeededType = "refresh-needed";
-
-    /// <summary>页面请求预设列表时回传的类型（页面 → 宿主使用 status + 约定文本）。</summary>
-    private const string PlayerPresetRequestMarker = "请求预设列表";
-
     /// <summary>宿主要求页面播放的消息类型。</summary>
     private const string HostPlayType = "play";
 
@@ -52,9 +49,11 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>宿主要求页面停止的消息类型。</summary>
     private const string HostStopType = "stop";
+    /// <summary>页面进入全屏的消息类型。</summary>
+    private const string PlayerFullscreenEnterType = "fullscreen-enter";
 
-    /// <summary>宿主下发预设列表的消息类型。</summary>
-    private const string HostPresetsType = "presets";
+    /// <summary>页面退出全屏的消息类型。</summary>
+    private const string PlayerFullscreenExitType = "fullscreen-exit";
 
     /// <summary>宿主告知桥接地址的消息类型。</summary>
     private const string HostBridgeInfoType = "bridge-info";
@@ -87,6 +86,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     private ResolvedRoom? _currentRoom;
     private IRecordingSession? _recordingSession;
     private int _activeSessionId;
+
+    /// <summary>为 <see langword="true"/> 时抑制"切换预设即解析"（刷新列表时使用）。</summary>
+    private bool _suppressPresetAutoApply;
 
     /// <summary>初始化视图模型。</summary>
     /// <param name="dependencies">组合根注入的依赖。</param>
@@ -127,7 +129,17 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             Presets.Add(preset);
         }
 
-        SelectedPreset = Presets.Count > 0 ? Presets[0] : null;
+        // 启动时只回填选中项，不触发解析：用户点"解析房间"或切换预设才发请求。
+        _suppressPresetAutoApply = true;
+        try
+        {
+            SelectedPreset = Presets.Count > 0 ? Presets[0] : null;
+        }
+        finally
+        {
+            _suppressPresetAutoApply = false;
+        }
+
         UpdateRoomUrlHint();
 
         ResolveCommand = new AsyncRelayCommand(_ => ResolveAsync(), HandleCommandErrorAsync, _ => !IsBusy);
@@ -141,8 +153,8 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         OpenRecordingFolderCommand = new RelayCommand(_ => OpenRecordingFolder());
         OpenLogFolderCommand = new RelayCommand(_ => OpenFolder(AppPaths.LogDirectory));
         OpenSettingsCommand = new RelayCommand(_ => OpenSettings());
-        ApplyPresetCommand = new AsyncRelayCommand(parameter => ApplyPresetAsync(parameter), HandleCommandErrorAsync, parameter => parameter is not null);
-        DeletePresetCommand = new RelayCommand(parameter => DeletePreset(parameter), parameter => parameter is not null);
+        DeleteSelectedPresetCommand = new AsyncRelayCommand(_ => DeleteSelectedPresetAsync(), HandleCommandErrorAsync, _ => SelectedPreset is not null);
+        SavePresetCommand = new AsyncRelayCommand(_ => SavePresetAsync(), HandleCommandErrorAsync, _ => _roomInput.Trim().Length > 0);
     }
 
     /// <summary>视图模型依赖集合（由组合根构造）。</summary>
@@ -170,6 +182,15 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>页面消息到达事件（宿主 → 页面方向的发送由该事件提供通道）。</summary>
     public event EventHandler<string>? SendMessageRequested;
+
+    /// <summary>播放页进入/退出全屏（宿主据此放大播放区域）。</summary>
+    public event EventHandler<bool>? FullscreenChanged;
+
+    /// <summary>
+    /// 由宿主回传最终生效的全屏状态，便于界面提示与页面保持一致。
+    /// </summary>
+    /// <param name="isFullscreen">是否全屏。</param>
+    public void NotifyFullscreenChanged(bool isFullscreen) => FullscreenChanged?.Invoke(this, isFullscreen);
 
     /// <summary>属性变更通知。</summary>
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -216,24 +237,30 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>打开设置窗口命令。</summary>
     public ICommand OpenSettingsCommand { get; }
 
-    /// <summary>应用预设命令（参数为预设对象）。</summary>
-    public ICommand ApplyPresetCommand { get; }
+    /// <summary>把当前平台与房间号保存为预设。</summary>
+    public ICommand SavePresetCommand { get; }
 
-    /// <summary>删除预设命令（参数为预设对象）。</summary>
-    public ICommand DeletePresetCommand { get; }
+    /// <summary>删除下拉中选中的预设。</summary>
+    public ICommand DeleteSelectedPresetCommand { get; }
 
     /// <summary>预设列表（下拉可选、可删除）。</summary>
     public ObservableCollection<RoomPreset> Presets { get; } = [];
 
-    /// <summary>当前选中的预设。</summary>
+    /// <summary>当前选中的预设；切换时自动填入平台与房间号并开始解析。</summary>
     public RoomPreset? SelectedPreset
     {
         get => _selectedPreset;
         set
         {
-            if (SetField(ref _selectedPreset, value))
+            if (!SetField(ref _selectedPreset, value))
             {
-                OnPropertyChanged(nameof(HasSelectedPreset));
+                return;
+            }
+
+            OnPropertyChanged(nameof(HasSelectedPreset));
+            if (value is not null && !_suppressPresetAutoApply)
+            {
+                _ = ApplyPresetAsync(value);
             }
         }
     }
@@ -460,6 +487,14 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                 case PlayerRefreshNeededType:
                     AppendLog("播放页请求重新解析：" + message);
                     _ = ReResolveAsync();
+                    break;
+
+                case PlayerFullscreenEnterType:
+                    FullscreenChanged?.Invoke(this, true);
+                    break;
+
+                case PlayerFullscreenExitType:
+                    FullscreenChanged?.Invoke(this, false);
                     break;
 
                 default:
@@ -760,7 +795,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     {
         try
         {
-            SettingsViewModel settings = new(_presetStore, _resolveMpvPath, _logger, LogLines);
+            SettingsViewModel settings = new(_resolveMpvPath, _logger, LogLines);
             settings.Load(_options);
             AppendLog("打开设置窗口。");
 
@@ -779,7 +814,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
             _options = updated;
             _saveOptions(_options);
-            settings.SavePresets();
 
             _extremeTargetMs = NormalizeTarget(_options.Playback.ExtremeTargetMs);
             _volume = Math.Clamp(_options.Playback.Volume, 0, 100);
@@ -804,28 +838,34 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         }
     }
 
-    /// <summary>刷新预设列表（以存储内容为准）。</summary>
+    /// <summary>刷新预设列表（以存储内容为准，且不触发自动解析）。</summary>
     private void RefreshPresets()
     {
-        Presets.Clear();
-        foreach (RoomPreset preset in _presetStore.Items)
+        bool previous = _suppressPresetAutoApply;
+        _suppressPresetAutoApply = true;
+        try
         {
-            Presets.Add(preset);
-        }
+            Presets.Clear();
+            foreach (RoomPreset preset in _presetStore.Items)
+            {
+                Presets.Add(preset);
+            }
 
-        SelectedPreset = Presets.Count > 0 ? Presets[0] : null;
+            SelectedPreset = Presets.Count > 0 ? Presets[0] : null;
+            (DeleteSelectedPresetCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+            (SavePresetCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        }
+        finally
+        {
+            _suppressPresetAutoApply = previous;
+        }
     }
 
-    /// <summary>选中预设后填入平台与房间号并立即解析。</summary>
-    /// <param name="parameter">预设对象。</param>
+    /// <summary>切换预设：填入平台与房间号并立即解析。</summary>
+    /// <param name="preset">预设。</param>
     /// <returns>异步任务。</returns>
-    private async Task ApplyPresetAsync(object? parameter)
+    private async Task ApplyPresetAsync(RoomPreset preset)
     {
-        if (parameter is not RoomPreset preset)
-        {
-            return;
-        }
-
         PlatformOption? option = Platforms.FirstOrDefault(item => item.Id == preset.Platform);
         if (option is not null)
         {
@@ -833,30 +873,69 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         }
 
         RoomInput = preset.RoomInput;
-        AppendLog("载入预设：" + preset.Name);
+        AppendLog("载入预设：" + preset.Name + " → " + preset.RoomInput);
         await ResolveAsync().ConfigureAwait(true);
     }
 
-    /// <summary>删除预设（同时更新存储）。</summary>
-    /// <param name="parameter">预设对象。</param>
-    private void DeletePreset(object? parameter)
+    /// <summary>把当前平台与房间号保存为预设（同名同平台会覆盖）。</summary>
+    /// <returns>异步任务。</returns>
+    private async Task SavePresetAsync()
     {
-        if (parameter is not RoomPreset preset)
+        string roomInput = _roomInput.Trim();
+        if (roomInput.Length == 0)
+        {
+            StatusMessage = "请先填写房间号或链接，再保存为预设。";
+            return;
+        }
+
+        string defaultName = string.IsNullOrWhiteSpace(_roomAnchor) || _roomAnchor == "-"
+            ? roomInput
+            : _roomAnchor;
+        string? name = InputDialog.Show(System.Windows.Application.Current?.MainWindow, "保存预设", "预设名称（便于在下拉里识别）", defaultName);
+        if (string.IsNullOrWhiteSpace(name))
         {
             return;
         }
 
-        if (_presetStore.Remove(preset.Name))
+        if (!_presetStore.Add(new RoomPreset(name.Trim(), SelectedPlatform, roomInput)))
         {
-            AppendLog("已删除预设：" + preset.Name);
-        }
-        else
-        {
-            AppendLog("删除预设失败：" + preset.Name);
+            StatusMessage = "保存预设失败，请检查名称与房间号。";
+            AppendLog("保存预设失败：" + name);
+            return;
         }
 
         RefreshPresets();
-        StatusMessage = "已删除预设「" + preset.Name + "」。";
+        RoomPreset? saved = Presets.FirstOrDefault(item => string.Equals(item.Name, name.Trim(), StringComparison.Ordinal));
+        _suppressPresetAutoApply = true;
+        try
+        {
+            SelectedPreset = saved;
+        }
+        finally
+        {
+            _suppressPresetAutoApply = false;
+        }
+
+        StatusMessage = "已保存预设「" + name.Trim() + "」。";
+        AppendLog("已保存预设：" + name.Trim());
+        await Task.CompletedTask.ConfigureAwait(true);
+    }
+
+    /// <summary>删除下拉中选中的预设。删除后不自动解析下一条。</summary>
+    /// <returns>异步任务。</returns>
+    private async Task DeleteSelectedPresetAsync()
+    {
+        RoomPreset? preset = SelectedPreset;
+        if (preset is null)
+        {
+            return;
+        }
+
+        bool removed = _presetStore.Remove(preset.Name);
+        RefreshPresets();
+        StatusMessage = removed ? "已删除预设「" + preset.Name + "」。" : "删除预设失败：" + preset.Name;
+        AppendLog(StatusMessage);
+        await Task.CompletedTask.ConfigureAwait(true);
     }
 
     private void PersistPlaybackSettings()

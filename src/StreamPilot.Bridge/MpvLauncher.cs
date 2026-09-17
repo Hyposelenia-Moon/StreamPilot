@@ -12,6 +12,7 @@ using StreamPilot.Core.Logging;
 /// 取代参考项目的外部 PowerShell 脚本（mpv-bridge.ps1）：
 /// <list type="bullet">
 ///   <item>路径解析顺序：显式配置 → 程序目录 tools/ → PATH → 常见安装位置；</item>
+///   <item>只传播放必需的参数（窗口标题与防盗链 Referer），画质、缓存、倍速等一律交给用户自己的 mpv 配置；</item>
 ///   <item>进程调用处理启动失败、启动超时与异常退出；</item>
 ///   <item>不等待进程退出（不阻塞 UI），只做启动确认。</item>
 /// </list>
@@ -21,24 +22,8 @@ public sealed class MpvLauncher
     /// <summary>启动确认超时（毫秒）。</summary>
     public const int StartupConfirmTimeoutMs = 10000;
 
-    /// <summary>低延迟 mpv 参数（与参考项目经验值一致）。</summary>
-    private static readonly string[] LowLatencyArguments =
-    [
-        "--cache=no",
-        "--cache-pause=no",
-        "--demuxer-readahead-secs=0",
-        "--demuxer-max-bytes=512K",
-        "--demuxer-max-back-bytes=0",
-        "--speed=1.08",
-        "--audio-pitch-correction=yes",
-    ];
-
-    /// <summary>通用 mpv 参数。</summary>
-    private static readonly string[] CommonArguments =
-    [
-        "--force-window=yes",
-        "--keep-open=no",
-    ];
+    /// <summary>默认窗口标题前缀（未拿到主播信息时使用）。</summary>
+    private const string DefaultTitle = "StreamPilot";
 
     /// <summary>常见 mpv 安装位置（作为 PATH 之外的回退）。</summary>
     private static readonly string[] FallbackRelativePaths =
@@ -127,14 +112,12 @@ public sealed class MpvLauncher
     /// <param name="url">直播流地址。</param>
     /// <param name="title">窗口标题附加信息，可为 <see langword="null"/>。</param>
     /// <param name="referer">可选 Referer，可为 <see langword="null"/>。</param>
-    /// <param name="playbackOptions">播放配置（mpv 路径与附加参数）。</param>
-    /// <param name="bridgeOptions">桥接配置（是否使用低延迟参数）。</param>
+    /// <param name="playbackOptions">播放配置（用于解析 mpv 路径）。</param>
     /// <returns>启动成功返回 <see langword="true"/>。</returns>
-    public bool Launch(string url, string? title, string? referer, PlaybackOptions playbackOptions, BridgeOptions bridgeOptions)
+    public bool Launch(string url, string? title, string? referer, PlaybackOptions playbackOptions)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(url);
         ArgumentNullException.ThrowIfNull(playbackOptions);
-        ArgumentNullException.ThrowIfNull(bridgeOptions);
 
         string? executable = ResolveExecutable(playbackOptions.MpvPath);
         if (executable is null)
@@ -146,22 +129,15 @@ public sealed class MpvLauncher
             return false;
         }
 
-        List<string> arguments = [];
-        arguments.AddRange(CommonArguments);
-        if (bridgeOptions.UseLowLatencyMpvArguments)
-        {
-            arguments.AddRange(LowLatencyArguments);
-        }
+        // 只传"不传就播不了"的参数：标题与防盗链 Referer。其余交给用户自己的 mpv 配置。
+        List<string> arguments =
+        [
+            "--title=" + BuildTitle(title),
+        ];
 
-        arguments.Add("--title=" + BuildTitle(title));
         if (!string.IsNullOrWhiteSpace(referer))
         {
             arguments.Add("--http-header-fields=Referer: " + referer);
-        }
-
-        foreach (string extra in SplitExtraArguments(playbackOptions.MpvArguments))
-        {
-            arguments.Add(extra);
         }
 
         arguments.Add("--");
@@ -194,7 +170,7 @@ public sealed class MpvLauncher
             _logger.Info(_moduleName, "已启动 mpv 外挂播放。", new Dictionary<string, object?>
             {
                 ["executable"] = Path.GetFileName(executable),
-                ["lowLatency"] = bridgeOptions.UseLowLatencyMpvArguments,
+                ["hasReferer"] = !string.IsNullOrWhiteSpace(referer),
             });
             return true;
         }
@@ -205,7 +181,7 @@ public sealed class MpvLauncher
     }
 
     private static string BuildTitle(string? title) =>
-        string.IsNullOrWhiteSpace(title) ? "StreamPilot" : "StreamPilot - " + title;
+        string.IsNullOrWhiteSpace(title) ? DefaultTitle : DefaultTitle + " - " + title;
 
     /// <summary>
     /// 展开配置中的 mpv 路径：支持绝对路径、相对程序目录的路径、以及仅文件名（由 PATH 查找）。
@@ -234,16 +210,6 @@ public sealed class MpvLauncher
         {
             yield return fromPath;
         }
-    }
-
-    private static IEnumerable<string> SplitExtraArguments(string? extra)
-    {
-        if (string.IsNullOrWhiteSpace(extra))
-        {
-            return [];
-        }
-
-        return extra.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
     private static string? FindOnPath(string fileName)

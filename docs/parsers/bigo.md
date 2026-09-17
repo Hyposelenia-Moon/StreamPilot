@@ -19,30 +19,36 @@
 响应结构：
 
 ```json
-{ "msg": "", "data": { "clientBigoId": 0, "hls_src": "https://.../index.m3u8",
-                       "roomType": 0, "roomTopic": "", "nickName": "", "roomStatus": 0 } }
+{ "msg": "", "data": { "clientBigoId": "abc", "hls_src": "https://.../index.m3u8",
+                       "roomType": "0", "roomTopic": "", "nick_name": "", "roomStatus": 0,
+                       "needLogin": false } }
 ```
+
+> 字段名是 `nick_name`（下划线），`siteId`/`roomId` 在匿名响应里恒为空字符串。
 
 ## 候选映射
 
 - 仅 `hls_src` 一个候选 → `StreamFormat.HlsTs`、`Codec = Avc`、`Quality = Unknown`、
   `HttpReferer = https://www.bigo.tv/`；
-- `Title = roomTopic`、`Anchor = nickName`、`Category` 为空。
+- `Title = roomTopic`、`Anchor = nick_name`、`Category` 为空。
 
 ## 失败判定
 
 | 状态 | 判定 |
 |------|------|
-| 未开播 | `roomStatus == 0`；或 `hls_src` 为空/缺失 |
+| 未开播 | `hls_src` 为空/缺失，且 `needLogin` 不为真 |
+| 被拒绝 | `hls_src` 为空且 `needLogin == true`（匿名读不到直播信息，绝不是"房间不存在"） |
 | 房间不存在 | 响应缺少 `data` |
-| 解析错误 | `data` 存在但结构不可识别 |
+| 解析错误 | 响应不是合法 JSON |
 | 网络错误 | 由 `HttpTextClient` 抛出 |
 
-> 参考实现（`lsar`）解析了 `roomStatus` 却从未使用；本项目把它纳入未开播判定，但保持宽容：
-> 只有字面量 `0` 才判定为未开播，避免因平台新增状态值而误报。
+> 判定顺序是"**有地址即开播**"：`roomStatus` 在匿名请求下恒为 `0`，
+> 参考实现（`lsar`）解析了它却从未使用；把它当唯一依据会把在播房间误判为未开播。
 
 ## 已知限制
 
+- **需要登录**：匿名请求可能返回 `needLogin: true` 且不带主播名/HLS 地址，此时会得到
+  `Rejected`（"Bigo 要求登录后才能读取直播信息"），而不是"未开播"；
 - **地区限制**：Bigo 对部分地区（含中国大陆 IP）拒绝访问，此时会得到 `NetworkError` 或 `ParseError`；
 - 不提供画质/多线路信息（接口只返回单个 HLS 地址）；
 - 不解析"轮播"状态。

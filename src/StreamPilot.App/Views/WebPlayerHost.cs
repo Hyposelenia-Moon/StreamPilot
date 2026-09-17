@@ -52,6 +52,15 @@ public sealed class WebPlayerHost : UserControl, IAsyncDisposable
     /// <summary>内核初始化失败时触发（参数为面向用户的错误说明）。</summary>
     public event EventHandler<string>? InitializationFailed;
 
+    /// <summary>
+    /// 页面内的全屏元素出现或消失时触发（参数为当前是否处于全屏）。
+    /// </summary>
+    /// <remarks>
+    /// <see cref="CoreWebView2.ContainsFullScreenElement"/> 由内核维护且只读；宿主只能监听它的变化，
+    /// 再自行把播放区域放大到整个窗口，否则页面全屏后画面尺寸不变。
+    /// </remarks>
+    public event EventHandler<bool>? FullscreenElementChanged;
+
     /// <summary>页面是否已完成加载。</summary>
     public bool IsPageLoaded { get; private set; }
 
@@ -107,6 +116,7 @@ public sealed class WebPlayerHost : UserControl, IAsyncDisposable
 
         core.WebMessageReceived += OnWebMessageReceived;
         core.NavigationCompleted += OnNavigationCompleted;
+        core.ContainsFullScreenElementChanged += OnContainsFullScreenElementChanged;
         _webView.NavigationStarting += OnNavigationStarting;
 
         _initialized = true;
@@ -136,6 +146,21 @@ public sealed class WebPlayerHost : UserControl, IAsyncDisposable
         return true;
     }
 
+    /// <summary>
+    /// 把页面全屏元素的变化转成宿主事件，交由窗口决定如何放大播放区域。
+    /// </summary>
+    /// <param name="sender">事件源。</param>
+    /// <param name="args">内核事件参数（未使用）。</param>
+    private void OnContainsFullScreenElementChanged(object? sender, object args)
+    {
+        bool isFullscreen = _webView.CoreWebView2?.ContainsFullScreenElement ?? false;
+        _logger.Info(_moduleName, "播放页全屏元素状态变化。", new Dictionary<string, object?>
+        {
+            ["fullscreen"] = isFullscreen,
+        });
+        FullscreenElementChanged?.Invoke(this, isFullscreen);
+    }
+
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
@@ -151,6 +176,7 @@ public sealed class WebPlayerHost : UserControl, IAsyncDisposable
             {
                 _webView.CoreWebView2.WebMessageReceived -= OnWebMessageReceived;
                 _webView.CoreWebView2.NavigationCompleted -= OnNavigationCompleted;
+                _webView.CoreWebView2.ContainsFullScreenElementChanged -= OnContainsFullScreenElementChanged;
             }
 
             _webView.NavigationStarting -= OnNavigationStarting;

@@ -5,7 +5,6 @@ using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Windows;
-using StreamPilot.App.Services;
 using StreamPilot.Core.Configuration;
 using StreamPilot.Core.Logging;
 using StreamPilot.Core.Models;
@@ -14,7 +13,7 @@ using WinFormsFolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 using WinFormsOpenFileDialog = System.Windows.Forms.OpenFileDialog;
 
 /// <summary>
-/// 设置窗口的视图模型：承载全部可编辑配置项、预设管理与 mpv 路径探测。
+/// 设置窗口的视图模型：承载全部可编辑配置项与 mpv 路径探测。
 /// </summary>
 /// <remarks>
 /// 只负责表单状态与校验，不做任何持久化（保存由调用方通过 <see cref="TryBuildOptions"/> 取回结果后写入），
@@ -22,14 +21,11 @@ using WinFormsOpenFileDialog = System.Windows.Forms.OpenFileDialog;
 /// </remarks>
 public sealed class SettingsViewModel : INotifyPropertyChanged
 {
-    private readonly PresetStore _presetStore;
     private readonly Func<string?, string?> _resolveMpvPath;
     private readonly IStructuredLogger _logger;
     private readonly string _moduleName = "App.Settings";
 
     private string _mpvPath = string.Empty;
-    private string _mpvArguments = string.Empty;
-    private bool _useLowLatencyMpvArguments = true;
     private int _extremeTargetMs = PlaybackRequest.DefaultExtremeTargetMs;
     private int _volume = 70;
     private bool _autoPlayOnResolve = true;
@@ -51,32 +47,24 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private bool _verboseDiagnostics;
     private int _logRetainDays = 5;
     private string _statusMessage = string.Empty;
-    private PresetItem? _selectedPreset;
 
     /// <summary>初始化设置视图模型。</summary>
-    /// <param name="presetStore">预设存储。</param>
     /// <param name="resolveMpvPath">mpv 路径解析函数（返回解析后的绝对路径，未找到返回 <see langword="null"/>）。</param>
     /// <param name="logger">结构化日志。</param>
     /// <param name="logLines">与主界面共享的"最近事件"滚动列表，可为 <see langword="null"/>。</param>
-    public SettingsViewModel(PresetStore presetStore, Func<string?, string?> resolveMpvPath, IStructuredLogger logger, ObservableCollection<string>? logLines = null)
+    public SettingsViewModel(Func<string?, string?> resolveMpvPath, IStructuredLogger logger, ObservableCollection<string>? logLines = null)
     {
-        ArgumentNullException.ThrowIfNull(presetStore);
         ArgumentNullException.ThrowIfNull(resolveMpvPath);
         ArgumentNullException.ThrowIfNull(logger);
-        _presetStore = presetStore;
         _resolveMpvPath = resolveMpvPath;
         _logger = logger;
 
-        Platforms = SettingsPlatforms.CreateOptions();
-        Presets = [];
         LogLines = logLines ?? [];
 
         BrowseMpvCommand = new RelayCommand(_ => BrowseMpv());
         DetectMpvCommand = new RelayCommand(_ => DetectMpv());
         ClearMpvCommand = new RelayCommand(_ => ClearMpv());
         ClearLogLinesCommand = new RelayCommand(_ => LogLines.Clear(), _ => LogLines.Count > 0);
-        AddPresetCommand = new RelayCommand(_ => AddPreset());
-        RemovePresetCommand = new RelayCommand(_ => RemovePreset(), _ => SelectedPreset is not null);
         BrowseRecordingDirectoryCommand = new RelayCommand(_ => BrowseRecordingDirectory());
         OpenConfigFolderCommand = new RelayCommand(_ => OpenFolder(Path.GetDirectoryName(AppPaths.ConfigFile) ?? AppPaths.UserDataDirectory));
         OpenLogFolderCommand = new RelayCommand(_ => OpenFolder(AppPaths.LogDirectory));
@@ -85,12 +73,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     /// <inheritdoc />
     public event PropertyChangedEventHandler? PropertyChanged;
-
-    /// <summary>可选平台列表。</summary>
-    public IReadOnlyList<PlatformOption> Platforms { get; }
-
-    /// <summary>预设列表（可编辑）。</summary>
-    public ObservableCollection<PresetItem> Presets { get; }
 
     /// <summary>最近事件（与主界面共享同一份滚动列表）。</summary>
     public ObservableCollection<string> LogLines { get; }
@@ -106,12 +88,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     /// <summary>清空最近事件列表。</summary>
     public RelayCommand ClearLogLinesCommand { get; }
-
-    /// <summary>新增空白预设行。</summary>
-    public RelayCommand AddPresetCommand { get; }
-
-    /// <summary>删除选中预设。</summary>
-    public RelayCommand RemovePresetCommand { get; }
 
     /// <summary>选择录制输出目录。</summary>
     public RelayCommand BrowseRecordingDirectoryCommand { get; }
@@ -129,19 +105,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public string EffectiveRecordingDirectory =>
         string.IsNullOrWhiteSpace(RecordingDirectory) ? AppPaths.DefaultRecordingDirectory : RecordingDirectory;
 
-    /// <summary>当前选中的预设行（用于删除）。</summary>
-    public PresetItem? SelectedPreset
-    {
-        get => _selectedPreset;
-        set
-        {
-            if (SetField(ref _selectedPreset, value))
-            {
-                RemovePresetCommand.RaiseCanExecuteChanged();
-            }
-        }
-    }
-
     /// <summary>窗口底部状态提示。</summary>
     public string StatusMessage
     {
@@ -154,20 +117,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         get => _mpvPath;
         set => SetField(ref _mpvPath, value ?? string.Empty);
-    }
-
-    /// <summary>mpv 启动参数（空格分隔）。</summary>
-    public string MpvArguments
-    {
-        get => _mpvArguments;
-        set => SetField(ref _mpvArguments, value ?? string.Empty);
-    }
-
-    /// <summary>是否使用内置低延迟 mpv 参数。</summary>
-    public bool UseLowLatencyMpvArguments
-    {
-        get => _useLowLatencyMpvArguments;
-        set => SetField(ref _useLowLatencyMpvArguments, value);
     }
 
     /// <summary>默认追帧档位（毫秒）。</summary>
@@ -314,15 +263,13 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         set => SetField(ref _logRetainDays, value);
     }
 
-    /// <summary>从现有配置载入表单，并从存储载入预设。</summary>
+    /// <summary>从现有配置载入表单。</summary>
     /// <param name="options">当前配置。</param>
     public void Load(StreamPilotOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
 
         MpvPath = options.Playback.MpvPath;
-        MpvArguments = options.Playback.MpvArguments;
-        UseLowLatencyMpvArguments = options.Bridge.UseLowLatencyMpvArguments;
         ExtremeTargetMs = NormalizeTarget(options.Playback.ExtremeTargetMs);
         Volume = Clamp(options.Playback.Volume, 0, 100, 70);
         AutoPlayOnResolve = options.Playback.AutoPlayOnResolve;
@@ -349,13 +296,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         VerboseDiagnostics = options.Logging.VerboseDiagnostics;
         LogRetainDays = Clamp(options.Logging.RetainedFileCount, 1, 90, 5);
 
-        Presets.Clear();
-        foreach (RoomPreset preset in _presetStore.Items)
-        {
-            Presets.Add(PresetItem.FromPreset(preset));
-        }
-
-        StatusMessage = Presets.Count == 0 ? "还没有预设，可在「预设」页签新增。" : $"已载入 {Presets.Count} 条预设。";
+        StatusMessage = "修改后点「保存」生效；点「取消」不会写入任何内容。";
     }
 
     /// <summary>
@@ -375,15 +316,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             return false;
         }
 
-        foreach (PresetItem item in Presets)
-        {
-            if (item.ToPreset() is null)
-            {
-                StatusMessage = "存在未填写完整（名称或房间号为空）的预设行。已保留原值。";
-                return false;
-            }
-        }
-
         string recordingDirectory = RecordingDirectory.Trim();
         string resolvedMpv = MpvPath.Trim();
 
@@ -392,7 +324,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             Playback = baseOptions.Playback with
             {
                 MpvPath = resolvedMpv,
-                MpvArguments = MpvArguments.Trim(),
                 ExtremeTargetMs = NormalizeTarget(ExtremeTargetMs),
                 Volume = Clamp(Volume, 0, 100, 70),
                 AutoPlayOnResolve = AutoPlayOnResolve,
@@ -428,7 +359,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 PreferredPort = BridgePort,
                 MaxPort = Math.Max(BridgePort, BridgePort + (BridgeConstants.MaxPort - BridgeConstants.DefaultPort)),
                 AutoStart = BridgeAutoStart,
-                UseLowLatencyMpvArguments = UseLowLatencyMpvArguments,
             },
             Logging = baseOptions.Logging with
             {
@@ -438,33 +368,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         };
 
         return true;
-    }
-
-    /// <summary>把表单中的预设写回存储（返回是否有变更）。</summary>
-    /// <returns>有变更返回 <see langword="true"/>。</returns>
-    public bool SavePresets()
-    {
-        List<string> existingNames = [];
-        foreach (RoomPreset preset in _presetStore.Items)
-        {
-            existingNames.Add(preset.Name);
-        }
-
-        foreach (string name in existingNames)
-        {
-            _presetStore.Remove(name);
-        }
-
-        bool any = false;
-        foreach (PresetItem item in Presets)
-        {
-            if (item.ToPreset() is { } preset && _presetStore.Add(preset))
-            {
-                any = true;
-            }
-        }
-
-        return any;
     }
 
     private void ClearMpv()
@@ -525,26 +428,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         StatusMessage = "已定位 mpv：" + resolved;
     }
 
-    private void AddPreset()
-    {
-        Presets.Add(new PresetItem(string.Empty, PlatformId.Bilibili, string.Empty));
-        SelectedPreset = Presets[^1];
-        StatusMessage = "已新增一行预设，请填写名称与房间号后保存。";
-    }
-
-    private void RemovePreset()
-    {
-        if (SelectedPreset is null)
-        {
-            return;
-        }
-
-        int index = Presets.IndexOf(SelectedPreset);
-        Presets.Remove(SelectedPreset);
-        SelectedPreset = Presets.Count == 0 ? null : Presets[Math.Clamp(index, 0, Presets.Count - 1)];
-        StatusMessage = "已删除该预设（保存后生效）。";
-    }
-
     private void BrowseRecordingDirectory()
     {
         using WinFormsFolderBrowserDialog dialog = new()
@@ -597,20 +480,4 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         OnPropertyChanged(propertyName);
         return true;
     }
-}
-
-/// <summary>设置窗口使用的平台下拉选项。</summary>
-internal static class SettingsPlatforms
-{
-    /// <summary>创建平台选项列表。</summary>
-    /// <returns>平台选项。</returns>
-    public static IReadOnlyList<PlatformOption> CreateOptions() =>
-    [
-        new PlatformOption(PlatformId.Bilibili, "哔哩哔哩", "https://live.bilibili.com/"),
-        new PlatformOption(PlatformId.Douyin, "抖音", "https://live.douyin.com/"),
-        new PlatformOption(PlatformId.Huya, "虎牙", "https://www.huya.com/"),
-        new PlatformOption(PlatformId.Douyu, "斗鱼", "https://www.douyu.com/"),
-        new PlatformOption(PlatformId.Yy, "YY", "https://www.yy.com/"),
-        new PlatformOption(PlatformId.Bigo, "Bigo Live", "https://www.bigo.tv/"),
-    ];
 }

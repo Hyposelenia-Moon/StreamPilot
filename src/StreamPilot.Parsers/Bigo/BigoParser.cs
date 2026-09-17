@@ -11,8 +11,9 @@ using StreamPilot.Core.Parsers;
 /// </summary>
 /// <remarks>
 /// 调用官方站点内部工作室接口换取 <c>hls_src</c>：Bigo 只暴露一条 HLS 地址，画质固定为未知。
-/// 参考实现解析了 <c>roomStatus</c> 却未使用；此处按"<c>0</c> 或（状态缺失且无地址）视为未开播"判定
-/// （见 docs/adr/0003-parser-contract.md 第 5 节）。
+/// 判定顺序为"有地址即开播"——匿名请求下 <c>roomStatus</c> 常年为 <c>0</c>，
+/// 拿它当唯一依据会把在播房间误判为未开播；接口声明需要登录时单独归类为被拒绝，
+/// 而不是笼统地说"未开播"（见 docs/adr/0003-parser-contract.md 第 5 节）。
 /// </remarks>
 internal sealed class BigoParser : PlatformParserBase
 {
@@ -34,9 +35,6 @@ internal sealed class BigoParser : PlatformParserBase
     /// <summary>输入校验的操作名。</summary>
     private const string ValidateOperation = "validate";
 
-    /// <summary>Bigo 的"未开播"房间状态值。</summary>
-    private const int RoomStatusOffline = 0;
-
     /// <summary>data 字段名。</summary>
     private const string DataField = "data";
 
@@ -50,10 +48,16 @@ internal sealed class BigoParser : PlatformParserBase
     private const string RoomTopicField = "roomTopic";
 
     /// <summary>nickName 字段名。</summary>
-    private const string NickNameField = "nickName";
+    private const string NickNameField = "nick_name";
+
+    /// <summary>needLogin 字段名。</summary>
+    private const string NeedLoginField = "needLogin";
 
     /// <summary>无 HLS 地址时的提示。</summary>
     private const string NoStreamMessage = "Bigo 未返回 HLS 地址（可能未开播，或该地区被 Bigo 限制）。";
+
+    /// <summary>接口要求登录时的提示。</summary>
+    private const string LoginRequiredMessage = "Bigo 要求登录后才能读取直播信息（当前网络或地区也受限）。";
 
     /// <summary>响应不是合法 JSON 时的提示。</summary>
     private const string InvalidJsonMessage = "Bigo 工作室接口返回的响应不是合法 JSON。";
@@ -172,13 +176,16 @@ internal sealed class BigoParser : PlatformParserBase
         }
     }
 
-    /// <summary>读取工作室信息并加入候选；未开播或没有 HLS 地址时按未开播处理。</summary>
+    /// <summary>读取工作室信息并加入候选；有 HLS 地址即视为开播。</summary>
     /// <param name="builder">候选构造器。</param>
     /// <param name="studio">响应中的 data 对象。</param>
     /// <param name="title">直播间标题，缺失时为空字符串。</param>
     /// <param name="anchor">主播名，缺失时为空字符串。</param>
-    /// <remarks><c>roomStatus</c> 为 <c>0</c>，或状态缺失且 <c>hls_src</c> 为空时，抛出带 <c>NotLive</c> 分类的解析异常。</remarks>
-    private void CollectCandidates(
+    /// <remarks>
+    /// 判定顺序：<c>hls_src</c> 非空即为开播（此时忽略 <c>roomStatus</c>，匿名请求下它恒为 0）；
+    /// 没有地址时，<c>needLogin</c> 为真按被拒绝归类，其余按未开播归类。
+    /// </remarks>
+    internal void CollectCandidates(
         StreamCandidateBuilder builder,
         JsonElement studio,
         out string title,
@@ -187,15 +194,19 @@ internal sealed class BigoParser : PlatformParserBase
         title = ReadString(studio, RoomTopicField) ?? string.Empty;
         anchor = ReadString(studio, NickNameField) ?? string.Empty;
 
-        if (ReadInt32(studio, RoomStatusField) == RoomStatusOffline)
-        {
-            throw Fail(ResolveFailure.NotLive, StudioInfoOperation, ResolveMessages.NotLive);
-        }
-
         string? hlsSrc = ReadString(studio, HlsSrcField);
         if (string.IsNullOrWhiteSpace(hlsSrc))
         {
-            throw Fail(ResolveFailure.NotLive, StudioInfoOperation, NoStreamMessage);
+            bool needLogin = ReadBoolean(studio, NeedLoginField) ?? false;
+            Logger.Info(ModuleName, "Bigo 未返回播放地址。", new Dictionary<string, object?>
+            {
+                ["roomStatus"] = ReadInt32(studio, RoomStatusField) ?? -1,
+                ["needLogin"] = needLogin,
+            });
+
+            throw needLogin
+                ? Fail(ResolveFailure.Rejected, StudioInfoOperation, LoginRequiredMessage)
+                : Fail(ResolveFailure.NotLive, StudioInfoOperation, NoStreamMessage);
         }
 
         _ = builder.TryAdd(
@@ -235,6 +246,21 @@ internal sealed class BigoParser : PlatformParserBase
     {
         JsonElement value = GetPropertyOrUndefined(element, name);
         return value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out int result) ? result : null;
+    }
+
+    /// <summary>读取布尔属性（Bigo 用真布尔返回 needLogin）。</summary>
+    /// <param name="element">父元素。</param>
+    /// <param name="name">属性名。</param>
+    /// <returns>布尔值；缺失或类型不符时返回 <see langword="null"/>。</returns>
+    private static bool? ReadBoolean(JsonElement element, string name)
+    {
+        JsonElement value = GetPropertyOrUndefined(element, name);
+        return value.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            _ => null,
+        };
     }
 
     /// <summary>从地址中推导 CDN 主机名。</summary>

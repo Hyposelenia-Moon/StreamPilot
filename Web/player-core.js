@@ -143,6 +143,8 @@ const OUTBOUND_MESSAGE_TYPES = Object.freeze({
   ERROR: 'error',
   RECONNECTING: 'reconnecting',
   REFRESH_NEEDED: 'refresh-needed',
+  FULLSCREEN_ENTER: 'fullscreen-enter',
+  FULLSCREEN_EXIT: 'fullscreen-exit',
 });
 
 /**

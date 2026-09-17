@@ -172,7 +172,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     {
         cancellationToken.ThrowIfCancellationRequested();
         PlaybackOptions options = _playbackOptionsProvider() ?? new PlaybackOptions();
-        return Task.FromResult(_mpvLauncher.Launch(url, title, referer, options, _bridgeOptions));
+        return Task.FromResult(_mpvLauncher.Launch(url, title, referer, options));
     }
 
     /// <inheritdoc />

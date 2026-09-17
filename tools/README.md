@@ -25,21 +25,16 @@ tools\
 
 ## mpv 启动参数
 
-默认使用低延迟参数（见 `docs/architecture/playback-strategy.md` 与 `src/StreamPilot.Bridge/MpvLauncher.cs`）：
+StreamPilot 只传**不传就播不了**的参数：
 
 ```
---cache=no --cache-pause=no --demuxer-readahead-secs=0 --demuxer-max-bytes=512K
---demuxer-max-back-bytes=0 --speed=1.08 --audio-pitch-correction=yes
---force-window=yes --keep-open=no --title=StreamPilot - {主播/标题}
+--title=StreamPilot - {主播/标题}
+--http-header-fields=Referer: {平台 Referer}   # 仅需要防盗链的平台（B站 / 抖音 / YY / Bigo）
 ```
 
-需要 Referer 的平台（B站 / 抖音）会自动追加 `--http-header-fields=Referer: ...`。
-
-在设置面板的“mpv 附加参数”中可追加参数（按空格分隔），例如：
-
-```
---profile=low-latency --vo=gpu-next --hwdec=auto-safe
-```
+缓存、画质、倍速、渲染器等一律由**用户自己的 mpv 配置**决定（`mpv.conf`、`input.conf` 或
+内置的 `--profile`）。这样做的原因是：外挂播放的画质与延迟调优属于用户偏好，
+程序预设参数会覆盖掉用户在 mpv 里的调整（见 `src/StreamPilot.Bridge/MpvLauncher.cs`）。
 
 ## ffmpeg
 
