@@ -11,15 +11,19 @@
 
 一键运行：`powershell -NoProfile -ExecutionPolicy Bypass -File build/test.ps1`（四个阶段依次执行，任一失败即返回非零退出码）。
 
+> C# 测试工程除了四个工程引用，还用 `<Compile Include>` 链接编译 App 层三个无 WPF 依赖的纯逻辑文件
+> （`App/ViewModels/PlatformOption.cs`、`App/Services/PlatformDetector.cs`、`App/Services/PresetStore.cs`），
+> 这样平台识别与预设持久化可以直接单测，而不必把 WPF 拖进测试进程（见[依赖规则](../architecture/dependency-rules.md)第 1 节）。
+
 ### 实测结果（.NET SDK 10.0.401）
 
 | 阶段 | 结果 |
 |------|------|
 | `dotnet build StreamPilot.slnx`（Debug 与 Release） | 0 警告 / 0 错误（`TreatWarningsAsErrors=true`） |
-| C# 单元测试 | **131 / 131 通过** |
+| C# 单元测试 | **146 / 146 通过** |
 | 播放策略前端测试 | **51 / 51 通过** |
 | 静态红线自检 | 通过 |
-| 离线结构分析 | 101 文件 / 23282 行 / 156 类型 / 749 方法，无结构性问题 |
+| 离线结构分析 | 105 文件 / 24086 行 / 161 类型 / 782 方法，无结构性问题 |
 
 > 离线结构分析的定位：在没有 SDK 的环境里提供可复现的前置检查（括号配对、命名空间规则、重复类型、空 catch、CS1998、未引用私有字段、方法行数、XML 注释 `--`）。
 > **它不替代编译器**：本项目的首次真实编译仍发现了 22 处问题，因此有 SDK 时必须以 `dotnet build` 为准。
@@ -59,6 +63,8 @@
 | `Recording.Hls.HlsPlaylistParser` / `TsStreamRecorder.AlignToPacketBoundary` | media/master 播放列表、ENDLIST、空内容、TS 整包对齐、前导垃圾、不足一包 | `HlsPlaylistTests`（7 个） |
 | `Bridge.LoopbackOnlyGuard` / `RelayRegistry` / `BridgeHost` | 回环前缀校验、通配拒绝、端口越界、注册/解析/释放、未知令牌、容量上限、按地址释放、未启动时注册失败、**中继上游请求必须携带 User-Agent（缺 UA 时 B站 CDN 回 403，见 [ADR 0006](../adr/0006-relay-upstream-headers.md)）** | `BridgeTests`（9 个） |
 | `Web.player-core`（播放策略） | 见 `docs/architecture/playback-strategy.md` 第 7 节 | `player-core.test.js`（50 个，含画质/档位/暂停/缓冲失控/状态行优先级与分段/**状态行实际延迟与括号形态**/**追帧开关（追帧 / 停止追帧）**/**控制条抗重叠约束**） |
+| `App.Services.PlatformDetector`（纯函数） | 六个平台各自的直播间链接与分享短链识别（`v.douyin.com` / `b23.tv` 等）、分享文案里夹带链接、大小写混合、无 scheme 的裸域名、纯房间号与空输入返回 `null`、`DetectOrFallback` 回退给定平台、相似域名（`myy.com`/`huya.com.evil.example`）不误判、六个平台都带可识别域名 | `PlatformDetectionTests`（7 个） |
+| `App.Services.PresetStore` / `RoomPreset` | **平台字段写盘与读回（六个平台各自保留）**、同名跨平台共存与同平台同名覆盖、空白名称/房间号拒绝、超长名称截断、超过 `MaxPresets` 淘汰最旧、损坏文件回退空列表并记 Warn、旧文件缺 `platform` 读为 `Unknown`、文件不存在为空列表 | `PresetStoreTests`（9 个） |
 
 **未覆盖（需联网或人工验证，属集成测试范畴）**：
 

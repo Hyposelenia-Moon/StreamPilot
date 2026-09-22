@@ -4,6 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using WpfApplication = System.Windows.Application;
 using WpfButton = System.Windows.Controls.Button;
+using WpfComboBox = System.Windows.Controls.ComboBox;
 using WpfHorizontalAlignment = System.Windows.HorizontalAlignment;
 using WpfOrientation = System.Windows.Controls.Orientation;
 using WpfTextBox = System.Windows.Controls.TextBox;
@@ -84,6 +85,20 @@ internal static class DialogLayout
         WpfTextBox box = new();
         AutomationProperties.SetAutomationId(box, automationId);
         return box;
+    }
+
+    /// <summary>创建一个字段下拉框（自动化标识用于集成测试定位）。</summary>
+    /// <remarks>
+    /// 不自带模板：外观与命中行为全部来自 App.xaml 的隐式 ComboBox 样式
+    /// （该模板里内容层的 Border 已设 <c>IsHitTestVisible="False"</c>，点击不会被内容吃掉）。
+    /// </remarks>
+    /// <param name="automationId">自动化标识。</param>
+    /// <returns>下拉框。</returns>
+    public static WpfComboBox CreateComboBox(string automationId)
+    {
+        WpfComboBox combo = new();
+        AutomationProperties.SetAutomationId(combo, automationId);
+        return combo;
     }
 
     /// <summary>创建字段标签（次要文字样式）。</summary>

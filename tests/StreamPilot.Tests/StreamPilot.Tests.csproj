@@ -4,7 +4,7 @@
     测试工程为普通 Exe：当前构建环境无法还原 xunit/NUnit 等测试包，
     因此使用自研极简测试运行器（见 docs/adr/0001-technology-stack.md 决策 5）。
     运行方式：dotnet run -p tests/StreamPilot.Tests
-   退出码：全部通过为 0，存在失败为 1。
+    退出码：全部通过为 0，存在失败为 1。
   -->
 
   <PropertyGroup>
@@ -21,6 +21,24 @@
     <ProjectReference Include="..\..\src\StreamPilot.Parsers\StreamPilot.Parsers.csproj" />
     <ProjectReference Include="..\..\src\StreamPilot.Recording\StreamPilot.Recording.csproj" />
     <ProjectReference Include="..\..\src\StreamPilot.Bridge\StreamPilot.Bridge.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      App 层里"无 WPF 依赖"的纯逻辑按源码链接进来编译，供单元测试直接调用。
+      原因：App 是 net10.0-windows + WPF 的 WinExe，普通测试工程既不能引用它的目标框架，
+      也不该为了测两个纯函数把 WPF 拖进测试进程；这里只链接源文件，不产生工程引用，
+      依赖方向（docs/architecture/dependency-rules.md 第 1 节）不因此改变。
+    -->
+    <Compile Include="..\..\src\StreamPilot.App\ViewModels\PlatformOption.cs">
+      <Link>App\ViewModels\PlatformOption.cs</Link>
+    </Compile>
+    <Compile Include="..\..\src\StreamPilot.App\Services\PlatformDetector.cs">
+      <Link>App\Services\PlatformDetector.cs</Link>
+    </Compile>
+    <Compile Include="..\..\src\StreamPilot.App\Services\PresetStore.cs">
+      <Link>App\Services\PresetStore.cs</Link>
+    </Compile>
   </ItemGroup>
 
 </Project>

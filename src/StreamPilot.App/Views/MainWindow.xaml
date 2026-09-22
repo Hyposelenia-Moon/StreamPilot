@@ -65,7 +65,7 @@
                   <Button Grid.Column="1" Content="新增预设" Command="{Binding SavePresetCommand}"
                           Style="{StaticResource PrimaryButton}" Margin="0,0,8,0"
                           AutomationProperties.AutomationId="AddPresetButton"
-                          ToolTip="把「直播源」里的房间号或链接存成预设" />
+                          ToolTip="填写主播名称、直播链接与平台，解析成功后保存为预设（粘贴链接时自动识别平台）" />
                   <Button Grid.Column="2" Command="{Binding RefreshPresetStatusCommand}" Margin="0"
                           ToolTip="重新检测预设是否开播">
                     <TextBlock>

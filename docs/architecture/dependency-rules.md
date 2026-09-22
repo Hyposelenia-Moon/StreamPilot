@@ -17,6 +17,11 @@ StreamPilot.Bridge    ──▶ StreamPilot.Core
 StreamPilot.Tests     ──▶ Core / Parsers / Recording / Bridge
 ```
 
+> 附加说明：`StreamPilot.Tests` 还用 `<Compile Include>` **按源码链接**编译了 App 层三个"无 WPF 依赖"的
+> 纯逻辑文件（`ViewModels/PlatformOption.cs`、`Services/PlatformDetector.cs`、`Services/PresetStore.cs`），
+> 用于测试平台识别与预设持久化。这是源文件链接而不是工程引用：测试进程不会因此引入 WPF，
+> 也不构成上图中的反向依赖（App 不依赖 Tests）。App 层其余代码（视图、视图模型、宿主）不参与测试编译。
+
 硬性规则：
 
 1. `Core` **不得**引用任何其他 `StreamPilot.*` 工程。

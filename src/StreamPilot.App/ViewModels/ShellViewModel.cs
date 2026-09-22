@@ -114,8 +114,8 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>「新增预设」对话框里解析直播链接的超时时间。</summary>
     private static readonly TimeSpan PresetLinkResolveTimeout = TimeSpan.FromSeconds(20);
 
-    /// <summary>「新增预设」默认平台未配置时的提示（对话内显示，不关闭）。</summary>
-    private const string PresetPlatformHint = "无法识别平台：请粘贴直播间链接，或在设置里指定默认平台。";
+    /// <summary>「新增预设」对话框里平台为空时的提示（对话内显示，不关闭）。</summary>
+    private const string PresetPlatformHint = "无法识别平台：请在对话框的「平台」里选择该直播间所属的平台。";
 
     /// <summary>「新增预设」解析失败提示的前缀。</summary>
     private const string PresetResolveFailurePrefix = "解析失败：";
@@ -197,6 +197,16 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>最近一次解析实际使用的平台；识别不出时为 <see cref="PlatformId.Unknown"/>。</summary>
     private PlatformId _effectivePlatform = PlatformId.Unknown;
+
+    /// <summary>
+    /// 点击预设时记下的"平台 + 当时的输入文本"。
+    /// </summary>
+    /// <remarks>
+    /// 预设里存的是平台返回的房间号（例如 <c>660000</c>），单看房间号无法识别平台，
+    /// 所以点预设后必须按预设自己的平台解析，否则会落到设置里的默认平台（默认是 B 站）。
+    /// 记下输入文本是为了让这条记录随用户改动输入自动失效（见 <see cref="PresetPlatformForInput"/>）。
+    /// </remarks>
+    private (PlatformId Platform, string Input)? _presetPlatformOverride;
 
     private bool _isCheckingPresets;
     private CancellationTokenSource? _presetCheckCancellation;
@@ -702,8 +712,13 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         IsBusy = true;
         try
         {
-            PlatformId? autoDetected = DetectPlatform(_roomInput);
-            PlatformId effective = autoDetected ?? _options.DefaultPlatform;
+            /*
+              平台优先级：预设里显式保存的平台 > 按输入域名识别 > 设置里的「默认平台」。
+              预设的平台是用户当初明确选的（对话框里手选或按链接识别后确认），识别只是"默认值"，
+              不能反过来覆盖用户的选择；输入被改动后预设记录自动失效，优先级自然回到识别。
+            */
+            PlatformId? presetPlatform = PresetPlatformForInput(_roomInput);
+            PlatformId effective = presetPlatform ?? PlatformDetector.Detect(_roomInput) ?? _options.DefaultPlatform;
             if (effective == PlatformId.Unknown)
             {
                 _effectivePlatform = PlatformId.Unknown;
@@ -1098,39 +1113,22 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 根据输入链接的域名识别平台。
+    /// 取"点击预设"记下的平台。
     /// </summary>
+    /// <param name="input">当前房间输入。</param>
+    /// <returns>预设对应的平台；没有记录、或输入已被用户改动时返回 <see langword="null"/>。</returns>
     /// <remarks>
-    /// 用户经常直接粘贴别家平台的链接，因此主界面不再提供平台下拉，
-    /// 统一按链接域名识别；房间号无法从域名识别时由调用方回落到默认平台。
+    /// 只在输入与预设内容逐字一致时生效：用户改了输入框就不再沿用该预设的平台，
+    /// 回到"按域名识别，识别不出用默认平台"的常规路径。
     /// </remarks>
-    /// <param name="input">房间号或直播间链接。</param>
-    /// <returns>识别出的平台；链接为空、不是链接或域名不匹配时返回 <see langword="null"/>。</returns>
-    private static PlatformId? DetectPlatform(string input)
+    private PlatformId? PresetPlatformForInput(string input)
     {
-        string trimmed = input.Trim();
-        if (!trimmed.Contains("://", StringComparison.Ordinal)
-            || !Uri.TryCreate(trimmed, UriKind.Absolute, out Uri? uri))
+        if (_presetPlatformOverride is not { } preset)
         {
             return null;
         }
 
-        foreach (PlatformOption option in PlatformOption.All)
-        {
-            if (!Uri.TryCreate(option.UrlPrefix, UriKind.Absolute, out Uri? baseUri))
-            {
-                continue;
-            }
-
-            bool sameHost = uri.Host.Equals(baseUri.Host, StringComparison.OrdinalIgnoreCase)
-                || uri.Host.EndsWith("." + baseUri.Host, StringComparison.OrdinalIgnoreCase);
-            if (sameHost)
-            {
-                return option.Id;
-            }
-        }
-
-        return null;
+        return string.Equals(preset.Input, input.Trim(), StringComparison.Ordinal) ? preset.Platform : null;
     }
 
     /// <summary>切换当前平台并刷新界面提示。</summary>
@@ -1651,9 +1649,14 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         }
     }
 
-    /// <summary>点击预设：填入平台与房间号并自动解析（自动播放由设置里的开关决定，不再重复下发）。</summary>
+    /// <summary>点击预设：按预设自己的平台解析该房间（自动播放由设置里的开关决定，不再重复下发）。</summary>
     /// <param name="item">被点击的预设项。</param>
     /// <returns>异步任务。</returns>
+    /// <remarks>
+    /// 预设里存的是房间号（例如虎牙的 <c>660000</c>），单看房间号无法识别平台，
+    /// 因此这里先记下"该预设的平台 + 输入文本"，交给 <see cref="ResolveAsync"/> 使用；
+    /// 不这样做的话，非 B 站的预设会被当成 B 站房间去解析。
+    /// </remarks>
     private async Task ApplyPresetAsync(PresetItemViewModel? item)
     {
         if (item is null)
@@ -1667,34 +1670,38 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             SelectedPlatformOption = option;
         }
 
+        _presetPlatformOverride = (item.Platform, item.RoomInput);
         RoomInput = item.RoomInput;
-        AppendLog("载入预设：" + item.Preset.Name + " → " + item.RoomInput);
+        AppendLog("载入预设：" + item.Preset.Name + " → " + item.RoomInput
+            + "（" + ResolvePlatformName(item.Platform) + "）");
         _automaticReResolveCount = 0;
         await ResolveAsync().ConfigureAwait(true);
     }
 
     /// <summary>
-    /// 新增预设：弹出两字段对话框（主播名称 + 直播链接），解析成功后保存并在列表里选中它。
+    /// 新增预设：弹出三字段对话框（主播名称 + 直播链接 + 平台），解析成功后保存并在列表里选中它。
     /// </summary>
     /// <remarks>
-    /// 预设内容全部来自对话框，不读取「直播源」卡片里当前的输入；
-    /// 解析走与「解析房间」相同的 <see cref="IRoomResolver"/> 流程（按链接域名识别平台）。
+    /// 预设内容全部来自对话框，不读取「直播源」卡片里当前的输入；平台取对话框里选中的值
+    /// （链接能识别出平台时对话框会自动改选，用户也可以手动指定），
+    /// 解析走与「解析房间」相同的 <see cref="IRoomResolver"/> 流程。
     /// 解析失败或超时一律不保存：地址不可用的预设只会让用户在列表里反复点到解析失败。
     /// </remarks>
     /// <returns>异步任务。</returns>
     private async Task SavePresetAsync()
     {
-        PresetDialog.Show(System.Windows.Application.Current?.MainWindow, AddPresetFromDialogAsync);
+        PresetDialog.Show(System.Windows.Application.Current?.MainWindow, SelectedPlatform, AddPresetFromDialogAsync);
         await Task.CompletedTask.ConfigureAwait(true);
     }
 
     /// <summary>
-    /// 「新增预设」对话框的校验回调：解析直播链接，成功则保存预设并返回 <see langword="null"/>。
+    /// 「新增预设」对话框的校验回调：按对话框选定的平台解析直播链接，成功则保存预设并返回 <see langword="null"/>。
     /// </summary>
     /// <param name="anchorName">主播名称（作为预设名）。</param>
     /// <param name="link">直播链接或房间号。</param>
+    /// <param name="platform">用户在对话框里选定的平台。</param>
     /// <returns>失败原因；成功返回 <see langword="null"/>。</returns>
-    private async Task<string?> AddPresetFromDialogAsync(string anchorName, string link)
+    private async Task<string?> AddPresetFromDialogAsync(string anchorName, string link, PlatformId platform)
     {
         string name = anchorName.Trim();
         string input = link.Trim();
@@ -1713,7 +1720,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             return $"主播名称最长 {PresetStore.MaxNameLength} 字，请缩短。";
         }
 
-        ResolvedRoom? room = await ResolvePresetLinkAsync(input).ConfigureAwait(true);
+        ResolvedRoom? room = await ResolvePresetLinkAsync(input, platform).ConfigureAwait(true);
         if (room is null)
         {
             return PresetResolveFailureMessage();
@@ -1736,10 +1743,11 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>解析"新增预设"对话框里的直播链接；带超时保护，绝不无限等待。</summary>
     /// <param name="input">直播链接或房间号。</param>
+    /// <param name="platform">用户选定的平台。</param>
     /// <returns>解析出的房间；失败或超时返回 <see langword="null"/>。</returns>
-    private async Task<ResolvedRoom?> ResolvePresetLinkAsync(string input)
+    private async Task<ResolvedRoom?> ResolvePresetLinkAsync(string input, PlatformId platform)
     {
-        RoomQuery? query = BuildPresetQuery(input);
+        RoomQuery? query = BuildPresetQuery(input, platform);
         if (query is null)
         {
             return null;
@@ -1775,28 +1783,37 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         }
     }
 
-    /// <summary>构造"新增预设"对话框里的解析请求（平台按链接域名识别，识别不出时用默认平台）。</summary>
+    /// <summary>
+    /// 构造"新增预设"对话框里的解析请求。
+    /// </summary>
     /// <param name="input">直播链接或房间号。</param>
+    /// <param name="platform">用户在对话框里选定的平台；为 <see cref="PlatformId.Unknown"/> 时按链接域名识别并回退默认平台。</param>
     /// <returns>解析请求；平台无法确定时返回 <see langword="null"/>。</returns>
-    private RoomQuery? BuildPresetQuery(string input)
+    /// <remarks>
+    /// 用户选定的平台优先：对话框已经按链接域名自动改选过，手动改选则是用户的明确意图，
+    /// 此时不再用识别结果覆盖它；只有拿不到任何平台（含默认平台也没配）时才在对话框内提示。
+    /// </remarks>
+    private RoomQuery? BuildPresetQuery(string input, PlatformId platform)
     {
-        bool looksLikeUrl = input.Contains("://", StringComparison.Ordinal)
-            || input.Contains('/', StringComparison.Ordinal);
-        PlatformId? detected = DetectPlatform(input);
-        PlatformId platform = detected ?? _options.DefaultPlatform;
-        if (platform == PlatformId.Unknown)
+        PlatformId effective = platform == PlatformId.Unknown
+            ? PlatformDetector.DetectOrFallback(input, _options.DefaultPlatform)
+            : platform;
+        if (effective == PlatformId.Unknown)
         {
             _presetResolveFailure = PresetPlatformHint;
             return null;
         }
 
+        bool looksLikeUrl = input.Contains("://", StringComparison.Ordinal)
+            || input.Contains('/', StringComparison.Ordinal);
+
         RoomQuery query = looksLikeUrl
-            ? RoomQuery.FromUrl(platform, input)
-            : RoomQuery.FromRoomId(platform, input);
+            ? RoomQuery.FromUrl(effective, input)
+            : RoomQuery.FromRoomId(effective, input);
 
         return query with
         {
-            Cookie = _options.Platforms.ForPlatform(platform),
+            Cookie = _options.Platforms.ForPlatform(effective),
         };
     }
 
