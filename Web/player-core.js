@@ -196,8 +196,44 @@ const AUTOPLAY_BLOCKED_HINT = '浏览器暂时拦住了自动播放，点一下�
 /** 播放状态文案：画面已经在播（底部状态行与 `status` 上报共用）。 */
 const MODE_HINT_PLAYING = '播放中';
 
-/** 未连接时的状态行文案（页面初始化与停止播放后使用）。 */
+/** 未连接时的状态行文案（页面初始化时使用）。 */
 const STATUS_IDLE_TEXT = '未连接';
+
+/** 状态行文案：用户点了「暂停播放」（不销毁会话，保留地址与缓冲）。 */
+const STATUS_PAUSED_TEXT = '已暂停（保留当前地址）';
+
+/** 状态行文案：用户点了「停止播放」（画面已关闭）。 */
+const STATUS_STOPPED_TEXT = '已停止播放（画面已关闭）';
+
+/** 重连状态行文案的固定前缀。 */
+const STATUS_RECONNECTING_PREFIX = '重连中（第 ';
+
+/** 重连状态行文案的固定后缀。 */
+const STATUS_RECONNECTING_SUFFIX = ' 次）…';
+
+/** 重连次数的计数起点（第 1 次重连）。 */
+const FIRST_RECONNECT_ATTEMPT = 1;
+
+/*
+ * 状态行的会话阶段：由页面维护、由纯函数消费。
+ *
+ * 为什么要把它与"播放中遥测"分开：遥测每 `TELEMETRY_INTERVAL_MS`（500 ms）刷新一次状态行，
+ * 只允许更新数值（实测延迟 / 缓冲），一旦让它改写"用户暂停 / 正在重连 / 已停止"这类操作态文案，
+ * 用户点了「暂停播放」后 0.5 秒内文案就被刷回「播放中 · N ms（…）」——按钮写着「继续播放」，
+ * 状态行却说在播放。阶段因此集中在一处判定（{@link resolvePlaybackStatusText}），页面只负责调用。
+ */
+const PLAYBACK_PHASES = Object.freeze({
+  /** 没有会话：页面初始化，或停止后回到空态。 */
+  IDLE: 'idle',
+  /** 有会话且在播放：状态行交给遥测数值刷新。 */
+  PLAYING: 'playing',
+  /** 用户点了「暂停播放」：文案固定为 {@link STATUS_PAUSED_TEXT}。 */
+  PAUSED: 'paused',
+  /** 正在等待重连：文案固定为「重连中（第 N 次）…」。 */
+  RECONNECTING: 'reconnecting',
+  /** 用户点了「停止播放」：文案固定为 {@link STATUS_STOPPED_TEXT}。 */
+  STOPPED: 'stopped',
+});
 
 /** 状态行分段之间的间隔符（"已连接"、"250 ms"这类分段共用一个写法）。 */
 const STATUS_SEGMENT_SEPARATOR = ' · ';
@@ -306,6 +342,11 @@ const OUTBOUND_MESSAGE_TYPES = Object.freeze({
   FULLSCREEN_ENTER: 'fullscreen-enter',
   FULLSCREEN_EXIT: 'fullscreen-exit',
   QUALITY: 'quality',
+  /**
+   * 页面在底部档位控件里改了追帧档位：宿主据此更新并持久化，下次播放沿用。
+   * 与宿主侧的 `TargetType` 同名，宿主按 `extremeTargetMs` 字段取值。
+   */
+  TARGET: 'target',
   REQUEST_PLAY: 'request-play',
   TOGGLE_PAUSE: 'toggle-pause',
   /** 页面请求停止播放：销毁播放器、释放会话与地址，宿主据此回收中继。 */
@@ -800,12 +841,67 @@ function chaseStatusLabel(run) {
  *    取不到就不显示该段，绝不写死档位数字冒充实测；
  *  - 括号分段永远存在且放在最后（{@link chaseStatusLabel}），追帧中给出当前模式与目标档位，
  *    停止追帧给出 `未开启追帧`。
+ *
+ * 本函数只负责"播放中"这一支；用户暂停 / 重连 / 停止 / 未连接这些操作态由
+ * {@link resolvePlaybackStatusText} 判定，页面不得绕开它直接把本函数的结果写进状态行。
  * @param {{mode?:string,extremeTargetMs?:number,extremeTargetSeconds?:number,autoChaseEnabled?:boolean,lastLatencyMs?:number}} run 运行对象。
  * @returns {string} 中文状态。
  */
 function formatPlaybackStatusText(run) {
   const chaseSegment = STATUS_PARENTHESIS_OPEN + chaseStatusLabel(run) + STATUS_PARENTHESIS_CLOSE;
   return joinStatusSegments([MODE_HINT_PLAYING, formatLatencySegment(readActualLatencyMs(run))]) + chaseSegment;
+}
+
+/**
+ * 重连状态行文案。
+ * @param {*} attempt 第几次重连（从 1 开始）；缺失或非法时按第 1 次。
+ * @returns {string} 形如 `重连中（第 2 次）…` 的文案。
+ */
+function formatReconnectingStatusText(attempt) {
+  const numeric = Math.round(Number(attempt));
+  const normalized = Number.isFinite(numeric) && numeric >= FIRST_RECONNECT_ATTEMPT
+    ? numeric
+    : FIRST_RECONNECT_ATTEMPT;
+  return STATUS_RECONNECTING_PREFIX + normalized + STATUS_RECONNECTING_SUFFIX;
+}
+
+/**
+ * 计算状态行里"页面自己的那一份"文案（**操作态优先，播放中遥测垫底**）。
+ *
+ * 这是页面播放态文案的唯一判定入口，遥测每轮（{@link TELEMETRY_INTERVAL_MS}）都调它，
+ * 因此它必须保证"数值刷新不会覆盖操作态"：
+ *  1. 用户暂停（`pausedByUser`）→ {@link STATUS_PAUSED_TEXT}；
+ *  2. 停止（阶段为 STOPPED 或运行对象已标记 `stopped`）→ {@link STATUS_STOPPED_TEXT}；
+ *  3. 重连中 → `重连中（第 N 次）…`（{@link formatReconnectingStatusText}）；
+ *  4. 未连接（阶段为 IDLE 或没有运行对象）→ {@link STATUS_IDLE_TEXT}；
+ *  5. 播放中 → {@link formatPlaybackStatusText}（实测延迟 + 追帧括号分段），只有这一支会被遥测改写。
+ * 宿主消息（`host-status`）比以上全部更高，由 {@link resolveStatusLine} 负责覆盖与超时回落，
+ * 完整顺序是：宿主消息 > 用户暂停 > 重连 / 停止 / 未连接 > 播放中遥测。
+ * @param {{mode?:string,extremeTargetMs?:number,extremeTargetSeconds?:number,autoChaseEnabled?:boolean,lastLatencyMs?:number,stopped?:boolean}|null} run 运行对象。
+ * @param {{statusPhase?:string,pausedByUser?:boolean,reconnectAttempt?:number}|null} session 页面会话态（{@link PLAYBACK_PHASES}）。
+ * @returns {string} 状态行文案。
+ */
+function resolvePlaybackStatusText(run, session) {
+  const page = session && typeof session === 'object' ? session : {};
+  const phase = typeof page.statusPhase === 'string' ? page.statusPhase : PLAYBACK_PHASES.IDLE;
+
+  if (page.pausedByUser === true || phase === PLAYBACK_PHASES.PAUSED) {
+    return STATUS_PAUSED_TEXT;
+  }
+
+  if (phase === PLAYBACK_PHASES.STOPPED || Boolean(run && run.stopped)) {
+    return STATUS_STOPPED_TEXT;
+  }
+
+  if (phase === PLAYBACK_PHASES.RECONNECTING) {
+    return formatReconnectingStatusText(page.reconnectAttempt);
+  }
+
+  if (phase !== PLAYBACK_PHASES.PLAYING || !run) {
+    return STATUS_IDLE_TEXT;
+  }
+
+  return formatPlaybackStatusText(run);
 }
 
 /**
@@ -1111,6 +1207,12 @@ const StreamPilotPlayerCore = {
   AUTOPLAY_BLOCKED_HINT,
   MODE_HINT_PLAYING,
   STATUS_IDLE_TEXT,
+  STATUS_PAUSED_TEXT,
+  STATUS_STOPPED_TEXT,
+  STATUS_RECONNECTING_PREFIX,
+  STATUS_RECONNECTING_SUFFIX,
+  FIRST_RECONNECT_ATTEMPT,
+  PLAYBACK_PHASES,
   STATUS_SEGMENT_SEPARATOR,
   LATENCY_UNIT_SUFFIX,
   STATUS_PARENTHESIS_OPEN,
@@ -1146,6 +1248,8 @@ const StreamPilotPlayerCore = {
   shouldMuteAtVolume,
   isAutoplayBlocked,
   formatPlaybackStatusText,
+  formatReconnectingStatusText,
+  resolvePlaybackStatusText,
   isValidLatencyMs,
   formatLatencySegment,
   readActualLatencyMs,

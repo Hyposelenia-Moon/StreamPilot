@@ -372,7 +372,8 @@
 
     /*
       音量条固定 90px：它是控制条里最宽的单件（原 140px）。
-      缩短后控制条在 860px 宽的窗口起就只占一行，「全屏」与其它按钮同行；
+      缩短后控制条在 1120px 宽（画质档位名带 HDR / 高帧率 后缀、下拉被 max-width: 220px 收敛）起只占一行，
+      画质是普通档位名（最宽「1080P 高码率」）时 1024px 起即单行，「全屏」与其它按钮同行；
       改回更宽会让「全屏」被挤到下一行、看起来像右下角多出一块。
       音量读数另有 #volumeLabel 文字，缩短滑块不影响读数。
     */
@@ -501,6 +502,13 @@
         hostStatus: null,
         /** 页面自己的播放状态文案：宿主消息过期后回落到它。 */
         playbackText: core.STATUS_IDLE_TEXT,
+        /**
+         * 状态行的会话阶段（core.PLAYBACK_PHASES）：决定状态行显示操作态文案还是播放中遥测。
+         * 操作态（暂停 / 重连 / 停止）必须由它表达，否则遥测每 500 ms 就会把文案刷回「播放中」。
+         */
+        statusPhase: core.PLAYBACK_PHASES.IDLE,
+        /** 当前是第几次重连（从 1 开始）；不在重连中时为 0。 */
+        reconnectAttempt: 0,
         /** "宿主状态消息到期 → 回落播放状态"的定时器句柄。 */
         statusFallbackTimer: null,
         eventSequence: 0,
@@ -563,6 +571,20 @@
         if (hostChannel) {
           hostChannel.post(payload);
         }
+      }
+
+      /**
+       * 上报追帧档位变化：宿主据此更新并持久化，下次播放沿用。
+       *
+       * 空闲（还没开始播放）时没有运行对象可热切换，但档位同样要上报：
+       * 否则用户在空闲时改的档位只留在页面里，宿主仍按旧档位开播。
+       * @param {number} targetMs 目标延迟（毫秒）。
+       * @param {object|null} run 当前运行对象；空闲时为 null。
+       */
+      function reportTargetChange(targetMs, run) {
+        report(outbound.TARGET, '追帧档位：' + targetMs + ' ms', run, run ? run.currentCandidate : null, {
+          extremeTargetMs: targetMs,
+        });
       }
 
       /**
@@ -654,10 +676,25 @@
       }
 
       /**
+       * 切换状态行的会话阶段并立刻刷新状态行。
+       *
+       * 显示什么文案**只**由纯函数 `core.resolvePlaybackStatusText(run, state)` 决定：
+       * 用户暂停 > 停止 / 重连 > 未连接 > 播放中遥测。页面在这里只改阶段、不拼文案，
+       * 因此不存在"页面一套、遥测回调另一套"的漂移。
+       * @param {string} phase {@link core.PLAYBACK_PHASES} 之一。
+       * @param {object|null} run 当前运行对象。
+       */
+      function applyPlaybackPhase(phase, run) {
+        state.statusPhase = phase;
+        setStatus(core.resolvePlaybackStatusText(run, state));
+      }
+
+      /**
        * 用最近一次遥测的**真实延迟**刷新状态行（显示形如"播放中 · 318 ms（极限追帧 250 ms）"）。
        *
-       * 延迟与状态文案的拼接逻辑在纯函数 `core.formatPlaybackStatusText` / `core.formatLatencySegment` 里，
-       * 页面只负责把实测值写进运行对象。取不到有效测量值时该分段整体不显示，不写占位数字。
+       * 本函数每 `core.TELEMETRY_INTERVAL_MS` 被调一次，**只允许更新数值**：
+       * 实测延迟由 `run.lastLatencyMs` 带进来，暂停 / 重连 / 停止这些操作态文案由
+       * `core.resolvePlaybackStatusText` 按会话阶段原样保留（纯函数被前端用例覆盖）。
        * @param {object} run 运行对象（带 lastLatencyMs / autoChaseEnabled）。
        */
       function refreshPlaybackStatus(run) {
@@ -665,7 +702,7 @@
           return;
         }
 
-        setStatus(core.formatPlaybackStatusText(run));
+        setStatus(core.resolvePlaybackStatusText(run, state));
       }
 
       /**
@@ -1118,7 +1155,9 @@
         const firstFrameMs = Math.round(performance.now() - startedAt);
         elements.hint.classList.add('hidden');
         updatePauseButton();
-        setStatus(core.formatPlaybackStatusText(run));
+        // 首帧到达：会话回到"播放中"，重连计数归零，状态行从此由遥测数值刷新。
+        state.reconnectAttempt = 0;
+        applyPlaybackPhase(core.PLAYBACK_PHASES.PLAYING, run);
         logToHost(core.LOG_LEVELS.INFO, '首帧 ' + firstFrameMs + ' ms（' + candidate.host + '）');
         report(outbound.STATUS, '播放已开始', run, candidate, { firstFrameMs: firstFrameMs, mode: run.mode });
         startTelemetry(run);
@@ -1315,7 +1354,9 @@
         report(outbound.RECONNECTING, '重连中（第 ' + (reconnectCount + 1) + ' 次）：' + reason, run, candidate, {
           reconnectCount: reconnectCount + 1,
         });
-        setStatus('重连中（第 ' + (reconnectCount + 1) + ' 次）…');
+        // 重连是操作态：状态行由纯函数固定成「重连中（第 N 次）…」，之后的遥测刷新不会改写它。
+        state.reconnectAttempt = reconnectCount + 1;
+        applyPlaybackPhase(core.PLAYBACK_PHASES.RECONNECTING, run);
 
         if (run.recoveryTimer !== null) {
           window.clearTimeout(run.recoveryTimer);
@@ -1568,6 +1609,9 @@
         state.refreshRequested = false;
         state.pausedByUser = false;
         state.resumedAt = 0;
+        // 新会话从"播放中"阶段开始（首帧到达后由遥测刷新延迟数值），重连计数归零。
+        state.statusPhase = core.PLAYBACK_PHASES.PLAYING;
+        state.reconnectAttempt = 0;
         const normalized = core.buildPlaybackPlan(
           payload,
           canPlayFlv(),
@@ -1704,7 +1748,7 @@
         }
 
         syncChaseButton();
-        setStatus(core.formatPlaybackStatusText(run));
+        setStatus(core.resolvePlaybackStatusText(run, state));
         const message = enabling
           ? '已开启自动追帧（目标延迟 ' + run.extremeTargetMs + ' ms）'
           : '已停止自动追帧（画面以正常倍速播放，不再自动拉回目标延迟）';
@@ -1743,7 +1787,8 @@
           }
 
           updatePauseButton();
-          setStatus('已暂停（保留当前地址）');
+          // 用户暂停是操作态：状态行固定显示暂停文案，遥测只更新数值、不再改它。
+          applyPlaybackPhase(core.PLAYBACK_PHASES.PAUSED, run);
           logToHost(core.LOG_LEVELS.INFO, '已暂停播放，会话与地址保留');
           report(outbound.STATUS, '已暂停播放', run, run ? run.currentCandidate : null);
           return;
@@ -1769,8 +1814,9 @@
         }
 
         updatePauseButton();
+        // 回到播放中：状态行立刻回到「播放中 · N ms（…）」，延迟数值等下一轮遥测刷新。
+        applyPlaybackPhase(core.PLAYBACK_PHASES.PLAYING, run);
         elements.video.play().then(function onResumed() {
-          setStatus('已继续播放');
           logToHost(core.LOG_LEVELS.INFO, '已从当前位置继续播放');
           report(outbound.STATUS, '已继续播放', run, run ? run.currentCandidate : null);
         }).catch(function onFailed(error) {
@@ -1836,7 +1882,6 @@
 
         report(outbound.REQUEST_STOP, '用户点了「停止播放」', run, run ? run.currentCandidate : null);
         handleStop();
-        setStatus('已停止播放（画面已关闭）');
         logToHost(core.LOG_LEVELS.INFO, '已停止播放并销毁播放器，画面已关闭');
       }
 
@@ -1868,7 +1913,9 @@
         // 会话已结束：追帧按钮回到「追帧」，避免停播后仍显示「停止追帧」。
         syncChaseButton();
         showEmptyState();
-        setStatus(core.STATUS_IDLE_TEXT);
+        // 停止同样是操作态：文案固定为「已停止播放（画面已关闭）」，不会再被遥测或初始化文案覆盖。
+        state.reconnectAttempt = 0;
+        applyPlaybackPhase(core.PLAYBACK_PHASES.STOPPED, null);
       }
 
       /** 更新音量：界面与视频元素用同一份夹取后的百分比；有声音时同时记住它供"点画面切换静音"使用。 */
@@ -2005,20 +2052,22 @@
           }
 
           const run = state.run;
-          if (!run || !applyExtremeTargetValue(run, milliseconds)) {
-            state.targetMs = core.normalizeExtremeTargetSeconds(milliseconds) * 1000;
-            return;
+          let targetMs;
+          if (run && applyExtremeTargetValue(run, milliseconds)) {
+            applyPlayerTargetConfig(run);
+            if (chaseToLiveEdge(core.CHASE_KEEP_DEFAULT_SECONDS)) {
+              report(outbound.STATUS, '追帧档位已切换为 ' + run.extremeTargetMs + ' ms', run, run.currentCandidate);
+            }
+
+            targetMs = run.extremeTargetMs;
+          }
+          else {
+            // 空闲（未开始播放）或档位没变：没有可热切换的运行对象，只记下页面档位值。
+            targetMs = core.normalizeExtremeTargetSeconds(milliseconds) * 1000;
           }
 
-          applyPlayerTargetConfig(run);
-          if (chaseToLiveEdge(core.CHASE_KEEP_DEFAULT_SECONDS)) {
-            report(outbound.STATUS, '追帧档位已切换为 ' + run.extremeTargetMs + ' ms', run, run.currentCandidate);
-          }
-
-          state.targetMs = run.extremeTargetMs;
-          report(outbound.TARGET, '追帧档位：' + run.extremeTargetMs + ' ms', run, run.currentCandidate, {
-            extremeTargetMs: run.extremeTargetMs,
-          });
+          state.targetMs = targetMs;
+          reportTargetChange(targetMs, run);
         });
 
         elements.pauseBtn.addEventListener('click', function onPauseClick() {

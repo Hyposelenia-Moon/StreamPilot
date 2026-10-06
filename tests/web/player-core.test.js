@@ -92,6 +92,24 @@ function findBlockEnd(text, openBrace) {
   throw new Error('CSS 里有没配对的 {');
 }
 
+/**
+ * 从播放页 HTML 里取出某个函数声明的主体（`{` 到配对 `}` 之间）。
+ *
+ * 用于断言"某条分支是否真的走到了上报"：只做字符串包含判断看不出提前 return 把上报跳过的情况。
+ * @param {string} text 播放页 HTML 或脚本全文。
+ * @param {string} marker 函数声明片段，例如 `function onTargetChange()`。
+ * @returns {string} 函数主体文本。
+ */
+function extractFunctionBody(text, marker) {
+  const start = text.indexOf(marker);
+  assert.notEqual(start, -1, '找不到函数 ' + marker);
+
+  const openBrace = text.indexOf('{', start);
+  assert.notEqual(openBrace, -1, '函数 ' + marker + ' 后面没有函数体');
+
+  return text.slice(openBrace + 1, findBlockEnd(text, openBrace));
+}
+
 test('normalizeExtremeTargetSeconds 只接受 150/200/250，其他值回落 0.25s', () => {
   assert.equal(core.normalizeExtremeTargetSeconds(150), 0.15);
   assert.equal(core.normalizeExtremeTargetSeconds(200), 0.2);
@@ -402,6 +420,40 @@ test('OUTBOUND_MESSAGE_TYPES 包含画质消息', () => {
   assert.equal(core.OUTBOUND_MESSAGE_TYPES.QUALITY, 'quality');
 });
 
+test('OUTBOUND_MESSAGE_TYPES 含 TARGET，且每个消息类型的取值都不为 undefined', () => {
+  const types = core.OUTBOUND_MESSAGE_TYPES;
+
+  // 页面用 outbound.TARGET 上报档位：少一个键就会发出 type: undefined，宿主入口直接丢弃（档位持久化静默失效）。
+  assert.notEqual(types.TARGET, undefined, 'TARGET 必须存在，否则上报的是 type: undefined');
+  assert.equal(types.TARGET, 'target', '消息名与宿主 ShellViewModel.TargetType 必须逐字一致');
+
+  for (const [name, value] of Object.entries(types)) {
+    assert.equal(value === undefined, false, name + ' 的消息类型不能是 undefined');
+    assert.equal(typeof value, 'string', name + ' 的消息类型必须是字符串');
+    assert.ok(value.length > 0, name + ' 的消息类型不能是空串');
+  }
+});
+
+test('播放页改档位必须上报宿主：空闲与播放中两个分支都发出 target 消息', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+
+  const handler = extractFunctionBody(html, 'function onTargetChange()');
+  assert.equal(handler.includes('reportTargetChange(targetMs, run);'), true, '改档后必须上报宿主');
+  assert.equal(
+    handler.indexOf('reportTargetChange(targetMs, run);') > handler.indexOf('else {'),
+    true,
+    '上报要在 if/else 之外，空闲分支（还没有 run）同样要走到');
+  assert.equal(
+    (handler.match(/return;/g) || []).length,
+    1,
+    '除非法档位那一个提前 return 之外，不允许再有让上报被跳过的出口');
+
+  const reporter = extractFunctionBody(html, 'function reportTargetChange(targetMs, run)');
+  assert.equal(reporter.includes('report(outbound.TARGET'), true, '上报用的消息类型必须是 outbound.TARGET');
+  assert.equal(reporter.includes('extremeTargetMs: targetMs'), true, '宿主按 extremeTargetMs 字段取值');
+  assert.equal(reporter.includes('run ? run.currentCandidate : null'), true, '空闲时没有候选可选，不能抛错');
+});
+
 test('画质下拉只显示平台档位名，不追加码率后缀', () => {
   assert.equal(core.normalizeQualities([{ key: '4000', label: '蓝光4M', bitrateKbps: 4000 }], '4000').items[0].label, '蓝光4M');
   assert.equal(core.normalizeQualities([{ key: '20000', label: '蓝光20M', bitrateKbps: 20000 }], '20000').items[0].label, '蓝光20M');
@@ -689,11 +741,33 @@ test('音量条必须足够短，「全屏」才能留在同一行', () => {
 
   // 实测依据（无头 Edge 真实渲染，node tests/web/layout-probe/run-probe.js）：
   // 音量条 140px 时，900px 窗口下控制条仍要两行、「全屏」被挤到第二行；
-  // 缩到 90px 后 860px 起即为单行且无重叠。锁住上限，防止宽度被调宽导致复发。
+  // 缩到 90px 后（探针已按真实运行态填好档位 / 画质下拉，含最宽的 HDR 档位名）：
+  // 1120px 起单行、1024–620px 两行、560px 起三行，14 个宽度 × 3 快照全部 0 处重叠。
+  // 锁住上限，防止宽度被调宽导致复发。
   assert.ok(Number.isFinite(volumeWidthPx), '#volume 必须显式声明宽度，否则滑块会按浏览器默认宽度撑开控制条');
   assert.ok(
     volumeWidthPx <= MAX_VOLUME_SLIDER_WIDTH_PX,
     '音量条宽度 ' + volumeWidthPx + 'px 不得超过 ' + MAX_VOLUME_SLIDER_WIDTH_PX + 'px，否则「全屏」会被挤到下一行');
+});
+
+test('布局探针必须按真实运行态填充档位与画质下拉，并保留三种快照', () => {
+  const probe = fs.readFileSync(path.join(__dirname, 'layout-probe', 'probe.js'), 'utf8');
+
+  // 空下拉的自然宽度比真实运行态窄一截，"860px 起单行"正是在空下拉下测出来的偏乐观结论。
+  assert.equal(probe.includes('renderSelectOptions();'), true, '探针测量前必须填下拉，否则几何结论不代表运行态');
+  assert.equal(probe.includes("getElementById('targetSelect')"), true, '档位下拉必须按页面的 renderTargets 填充');
+  assert.equal(probe.includes("getElementById('qualitySelect')"), true, '画质下拉必须按页面的 renderQualities 填充');
+  assert.equal(probe.includes("'250 ms'"), true, '档位下拉要填页面同款文案「150/200/250 ms」');
+  assert.equal(probe.includes("'1080P 高码率'"), true, '画质下拉要填平台真实档位名，宽度才与运行态一致');
+  assert.equal(probe.includes("'1080P 原画（HDR 高帧率）'"), true, '画质下拉要覆盖最宽的真实档位名（HDR / 高帧率后缀）');
+
+  // 三种快照（追帧 / 停止追帧 / 停止追帧 + 长状态行）必须保留。
+  assert.equal(probe.includes("const CHASE_LABEL_SHORT = '追帧';"), true);
+  assert.equal(probe.includes("const CHASE_LABEL_LONG = '停止追帧';"), true);
+  assert.equal(probe.includes('STATUS_LONG_TEXT'), true, '长状态行快照必须保留');
+  assert.equal(probe.includes('lines='), true, '探针输出必须直接给出行数');
+  assert.equal(probe.includes('fsSameLineAsPlay='), true, '探针输出必须直接给出「全屏」是否与播放控制同行');
+  assert.equal(probe.includes('collisions='), true, '探针输出必须直接给出碰撞对');
 });
 
 test('底部控制条允许换行且不得用绝对定位把控件叠在一起', () => {
@@ -812,6 +886,148 @@ test('状态行优先级：没有宿主消息或消息非法时一律显示播�
   assert.equal(core.resolveStatusLine({ message: '就绪' }, '未连接', 1).text, '未连接', '缺少时间戳同样按过期处理');
   assert.equal(core.resolveStatusLine({ message: '就绪', level: 'boom', receivedAt: 0 }, '未连接', 1).level, 'info', '未知级别回落 info');
   assert.equal(core.resolveStatusLine(null, undefined, 1000).text, '', '没有播放状态时给出空串而不是 undefined');
+});
+
+test('resolvePlaybackStatusText 逐字给出各会话阶段的文案（操作态优先）', () => {
+  const phases = core.PLAYBACK_PHASES;
+  assert.equal(core.STATUS_PAUSED_TEXT, '已暂停（保留当前地址）');
+  assert.equal(core.STATUS_STOPPED_TEXT, '已停止播放（画面已关闭）');
+  assert.equal(core.STATUS_IDLE_TEXT, '未连接');
+
+  const run = { mode: 'extreme', extremeTargetMs: 250, lastLatencyMs: 318 };
+  assert.equal(
+    core.resolvePlaybackStatusText(run, { statusPhase: phases.PLAYING, pausedByUser: false }),
+    '播放中 · 318 ms（极限追帧 250 ms）',
+    '播放中：延迟用遥测实测值，括号里是当前模式与目标档位');
+  assert.equal(
+    core.resolvePlaybackStatusText(run, { statusPhase: phases.PAUSED, pausedByUser: true }),
+    '已暂停（保留当前地址）');
+  assert.equal(
+    core.resolvePlaybackStatusText(run, { statusPhase: phases.PLAYING, pausedByUser: true }),
+    '已暂停（保留当前地址）',
+    '用户暂停优先于播放态：阶段没来得及切换时也必须是暂停文案');
+  assert.equal(
+    core.resolvePlaybackStatusText(run, { statusPhase: phases.RECONNECTING, reconnectAttempt: 2 }),
+    '重连中（第 2 次）…');
+  assert.equal(
+    core.resolvePlaybackStatusText(run, { statusPhase: phases.STOPPED }),
+    '已停止播放（画面已关闭）');
+  assert.equal(
+    core.resolvePlaybackStatusText({ mode: 'stable', stopped: true }, { statusPhase: phases.PLAYING }),
+    '已停止播放（画面已关闭）',
+    '运行对象已被标记停止时，即使阶段还是播放中也必须给停止文案');
+  assert.equal(
+    core.resolvePlaybackStatusText(null, { statusPhase: phases.IDLE }),
+    '未连接');
+  assert.equal(
+    core.resolvePlaybackStatusText(run, null),
+    '未连接',
+    '会话态缺失时按未连接处理，不得回落到播放中');
+
+  assert.equal(core.formatReconnectingStatusText(1), '重连中（第 1 次）…');
+  assert.equal(core.formatReconnectingStatusText(3), '重连中（第 3 次）…');
+  assert.equal(core.formatReconnectingStatusText(undefined), '重连中（第 1 次）…', '次数缺失时按第 1 次，不显示 NaN');
+  assert.equal(core.FIRST_RECONNECT_ATTEMPT, 1);
+  assert.equal(
+    core.STATUS_RECONNECTING_PREFIX + 2 + core.STATUS_RECONNECTING_SUFFIX,
+    '重连中（第 2 次）…',
+    '重连文案的前后缀常量必须与纯函数拼接结果一致');
+});
+
+test('遥测每 500 ms 刷新只更新数值，不覆盖暂停 / 重连 / 停止文案', () => {
+  const phases = core.PLAYBACK_PHASES;
+  const run = { mode: 'extreme', extremeTargetMs: 250, lastLatencyMs: 318, autoChaseEnabled: true };
+
+  const pausedSession = { statusPhase: phases.PAUSED, pausedByUser: true, reconnectAttempt: 0 };
+  assert.equal(core.resolvePlaybackStatusText(run, pausedSession), '已暂停（保留当前地址）');
+  run.lastLatencyMs = 5120;
+  assert.equal(
+    core.resolvePlaybackStatusText(run, pausedSession),
+    '已暂停（保留当前地址）',
+    '暂停后缓冲再涨，状态行也不得被刷回「播放中」');
+
+  const reconnectingSession = { statusPhase: phases.RECONNECTING, pausedByUser: false, reconnectAttempt: 2 };
+  assert.equal(core.resolvePlaybackStatusText(run, reconnectingSession), '重连中（第 2 次）…');
+  run.lastLatencyMs = 40;
+  assert.equal(
+    core.resolvePlaybackStatusText(run, reconnectingSession),
+    '重连中（第 2 次）…',
+    '重连期间遥测刷新不得覆盖重连文案');
+
+  const stoppedSession = { statusPhase: phases.STOPPED, pausedByUser: false, reconnectAttempt: 0 };
+  run.stopped = true;
+  assert.equal(core.resolvePlaybackStatusText(run, stoppedSession), '已停止播放（画面已关闭）');
+  run.lastLatencyMs = 12;
+  assert.equal(
+    core.resolvePlaybackStatusText(run, stoppedSession),
+    '已停止播放（画面已关闭）',
+    '停止后遥测刷新不得覆盖停止文案');
+
+  const playingRun = { mode: 'extreme', extremeTargetMs: 250, lastLatencyMs: 318 };
+  const playingSession = { statusPhase: phases.PLAYING, pausedByUser: false, reconnectAttempt: 0 };
+  assert.equal(core.resolvePlaybackStatusText(playingRun, playingSession), '播放中 · 318 ms（极限追帧 250 ms）');
+  playingRun.lastLatencyMs = 420;
+  assert.equal(
+    core.resolvePlaybackStatusText(playingRun, playingSession),
+    '播放中 · 420 ms（极限追帧 250 ms）',
+    '播放中这一支才允许被遥测改写，且只改延迟数值');
+});
+
+test('继续播放后回到播放中遥测文案，宿主消息仍优先并能回落到暂停文案', () => {
+  const phases = core.PLAYBACK_PHASES;
+  const run = { mode: 'extreme', extremeTargetMs: 250, lastLatencyMs: 318 };
+  const session = { statusPhase: phases.PAUSED, pausedByUser: true, reconnectAttempt: 0 };
+  assert.equal(core.resolvePlaybackStatusText(run, session), '已暂停（保留当前地址）');
+
+  // 点「继续播放」：页面把阶段切回 PLAYING 并复位 pausedByUser（见 Web/player.html 的 resumePlayback）。
+  session.statusPhase = phases.PLAYING;
+  session.pausedByUser = false;
+  assert.equal(
+    core.resolvePlaybackStatusText(run, session),
+    '播放中 · 318 ms（极限追帧 250 ms）',
+    '恢复播放后必须回到「播放中 · N ms（…）」');
+
+  // 宿主消息优先级最高：暂停中文案被覆盖，超时后回落到的仍是暂停文案（而不是「播放中」）。
+  const pausedSession = { statusPhase: phases.PAUSED, pausedByUser: true, reconnectAttempt: 0 };
+  const pausedText = core.resolvePlaybackStatusText(run, pausedSession);
+  const hold = core.getHostStatusHoldMs('info');
+  const host = { message: '已新增预设「测试」', level: 'info', receivedAt: 1000 };
+
+  const covered = core.resolveStatusLine(host, pausedText, 1000 + hold - 1);
+  assert.equal(covered.text, '已新增预设「测试」', '宿主消息必须能覆盖暂停文案');
+  assert.equal(covered.source, core.STATUS_LINE_SOURCES.HOST);
+
+  const fallback = core.resolveStatusLine(host, pausedText, 1000 + hold);
+  assert.equal(fallback.text, '已暂停（保留当前地址）', '宿主消息超时后回落到暂停文案');
+  assert.equal(fallback.source, core.STATUS_LINE_SOURCES.PLAYBACK);
+  assert.equal(fallback.level, core.LOG_LEVELS.INFO);
+});
+
+test('播放页只调用纯函数决定状态行，不在页面里重写操作态文案', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+
+  assert.equal(html.includes('core.resolvePlaybackStatusText(run, state)'), true, '状态行文案必须来自纯函数');
+  assert.equal(html.includes('applyPlaybackPhase(core.PLAYBACK_PHASES.PAUSED, run)'), true, '暂停要切到暂停阶段');
+  assert.equal(html.includes('applyPlaybackPhase(core.PLAYBACK_PHASES.RECONNECTING, run)'), true, '重连要切到重连阶段');
+  assert.equal(html.includes('applyPlaybackPhase(core.PLAYBACK_PHASES.PLAYING, run)'), true, '首帧 / 继续播放要切回播放阶段');
+  assert.equal(html.includes('applyPlaybackPhase(core.PLAYBACK_PHASES.STOPPED, null)'), true, '停止要切到停止阶段');
+  assert.equal(html.includes('state.reconnectAttempt = reconnectCount + 1;'), true, '重连次数要记进会话态');
+
+  // 操作态文案只有一处来源：页面里不得再各写一份。
+  assert.equal(html.includes("setStatus('已暂停（保留当前地址）')"), false, '暂停文案必须来自纯函数常量');
+  assert.equal(html.includes("setStatus('已停止播放（画面已关闭）')"), false, '停止文案必须来自纯函数常量');
+  assert.equal(html.includes("setStatus('重连中（第 '"), false, '重连文案必须来自纯函数');
+  assert.equal(/setStatus\(core\.formatPlaybackStatusText/.test(html), false, '页面不得绕开阶段判定直接写「播放中」文案');
+
+  const refreshBody = extractFunctionBody(html, 'function refreshPlaybackStatus(run)');
+  assert.equal(refreshBody.includes('core.resolvePlaybackStatusText(run, state)'), true, '遥测刷新必须走阶段判定');
+  assert.equal(refreshBody.includes('formatPlaybackStatusText'), false, '遥测刷新不得直接把文案写成「播放中」');
+
+  const pauseBody = extractFunctionBody(html, 'function togglePausePlayback(paused)');
+  assert.equal(pauseBody.includes('applyPlaybackPhase(core.PLAYBACK_PHASES.PAUSED, run)'), true);
+
+  const stopBody = extractFunctionBody(html, 'function handleStop()');
+  assert.equal(stopBody.includes('applyPlaybackPhase(core.PLAYBACK_PHASES.STOPPED, null)'), true);
 });
 
 test('宿主状态消息不得占用顶部状态行，页面也不再有日志面板', () => {
