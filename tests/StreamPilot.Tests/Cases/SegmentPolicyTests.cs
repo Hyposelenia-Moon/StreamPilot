@@ -124,7 +124,9 @@ public sealed class SegmentPolicyTests
 
         Assert.Equal(480, options.MaxDurationMinutes);
         Assert.Equal(8 * RecordingLimits.MinutesPerHour, options.MaxDurationMinutes);
-        Assert.Equal(RecordingLimits.DefaultMaxRecordingMinutes, RecordingLimits.DefaultMaxRecordingMinutes);
+        // 录制器的时长上限判断口径改为"归一化媒体时间"，但 8 小时的取值必须与配置默认值同源，避免两处漂移。
+        Assert.Equal(options.MaxDurationMinutes, FlvStreamRecorder.DefaultMaxDurationMinutes);
+        Assert.Equal(RecordingLimits.DefaultMaxRecordingMinutes, FlvStreamRecorder.DefaultMaxDurationMinutes);
     }
 
     /// <summary>最小分片字节数判定。</summary>

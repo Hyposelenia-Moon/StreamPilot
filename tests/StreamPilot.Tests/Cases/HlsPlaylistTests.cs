@@ -99,7 +99,7 @@ public sealed class HlsPlaylistTests
         Assert.Throws<ArgumentException>(() => HlsPlaylistParser.Parse("   ", new Uri("https://cdn.example/x.m3u8")));
     }
 
-    /// <summary>TS 对齐：只保留完整的 188 字节包。</summary>
+    /// <summary>TS 对齐：只保留完整的 188 字节包，且从文件起始处开始（偏移为 0）。</summary>
     [TestMethod("TS 对齐：按 188 字节整包截断")]
     public void AlignsToPacketBoundary()
     {
@@ -108,25 +108,36 @@ public sealed class HlsPlaylistTests
         payload[TsStreamRecorder.TsPacketSize] = TsStreamRecorder.TsSyncByte;
         payload[TsStreamRecorder.TsPacketSize * 2] = TsStreamRecorder.TsSyncByte;
 
-        Assert.Equal(TsStreamRecorder.TsPacketSize * 3, TsStreamRecorder.AlignToPacketBoundary(payload));
+        (int offset, int length) = TsStreamRecorder.AlignToPacketBoundary(payload);
+        Assert.Equal(0, offset, "首字节即同步字节时偏移必须为 0");
+        Assert.Equal(TsStreamRecorder.TsPacketSize * 3, length);
     }
 
-    /// <summary>TS 对齐：跳过前导垃圾直到第一个同步字节。</summary>
-    [TestMethod("TS 对齐：跳过前导垃圾")]
+    /// <summary>TS 对齐：跳过前导垃圾直到第一个同步字节（偏移必须等于垃圾长度）。</summary>
+    [TestMethod("TS 对齐：跳过前导垃圾并给出偏移")]
     public void SkipsLeadingGarbage()
     {
         byte[] payload = new byte[(TsStreamRecorder.TsPacketSize * 2) + 5];
         payload[3] = TsStreamRecorder.TsSyncByte;
         payload[3 + TsStreamRecorder.TsPacketSize] = TsStreamRecorder.TsSyncByte;
 
-        Assert.Equal(TsStreamRecorder.TsPacketSize * 2, TsStreamRecorder.AlignToPacketBoundary(payload));
+        (int offset, int length) = TsStreamRecorder.AlignToPacketBoundary(payload);
+        Assert.Equal(3, offset, "偏移必须跳过前导垃圾");
+        Assert.Equal(TsStreamRecorder.TsPacketSize * 2, length);
+        Assert.Equal(TsStreamRecorder.TsSyncByte, payload[offset], "对齐后首个字节必须是同步字节");
     }
 
-    /// <summary>TS 对齐：不足一包或无同步字节时返回 0。</summary>
+    /// <summary>TS 对齐：不足一包或无同步字节时返回零偏移与零长度。</summary>
     [TestMethod("TS 对齐：不足一包或无同步字节")]
     public void ReturnsZeroWhenUnusable()
     {
-        Assert.Equal(0, TsStreamRecorder.AlignToPacketBoundary(new byte[10]));
-        Assert.Equal(0, TsStreamRecorder.AlignToPacketBoundary(new byte[TsStreamRecorder.TsPacketSize * 2]));
+        (int tooShortOffset, int tooShortLength) = TsStreamRecorder.AlignToPacketBoundary(new byte[10]);
+        Assert.Equal(0, tooShortOffset);
+        Assert.Equal(0, tooShortLength);
+
+        (int noSyncOffset, int noSyncLength) =
+            TsStreamRecorder.AlignToPacketBoundary(new byte[TsStreamRecorder.TsPacketSize * 2]);
+        Assert.Equal(0, noSyncOffset);
+        Assert.Equal(0, noSyncLength);
     }
 }

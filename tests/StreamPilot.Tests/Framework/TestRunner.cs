@@ -65,7 +65,15 @@ public static class TestRunner
                     object? returned = method.Invoke(instance, null);
                     if (returned is Task task)
                     {
-                        task.GetAwaiter().GetResult();
+                        try
+                        {
+                            task.GetAwaiter().GetResult();
+                        }
+                        catch (Exception exception)
+                        {
+                            // 异步用例的断言失败要按"用例失败"上报，而不是让整个运行器崩溃。
+                            throw new TargetInvocationException(exception);
+                        }
                     }
 
                     stopwatch.Stop();

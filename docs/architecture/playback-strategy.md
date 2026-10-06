@@ -308,6 +308,32 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
 - **#statusLine 只在自己这一行被裁掉**：`white-space: nowrap` + `overflow: hidden` + `text-overflow: ellipsis` + `max-width: 100%`，
   它是 footer 列布局里的独立一行，变长只会出现省略号，不会顶掉或盖住控制条。
 
+#### 10.1.1 实测口径（无头 Edge，`node tests/web/layout-probe/run-probe.js`）
+
+**测量前提**：探针测量前会把 `#targetSelect` / `#qualitySelect` 填成真实运行态的选项
+（页面运行时 `renderTargets` / `renderQualities` 必然会填），下拉宽度由**最宽的选项**决定：
+
+- 档位下拉：`150 ms` / `200 ms` / `250 ms`（与 `renderTargets` 逐字一致）；
+- 画质下拉：各平台真实档位名，最宽形态为 `1080P 原画（HDR 高帧率）`（受 `max-width: 220px` 收敛）。
+
+**空下拉的结论不可用**：下拉为空时控件比真实运行态窄一截，早先"860px 起单行"就是这么测出来的偏乐观结论。
+探针保留三种快照（「追帧」/「停止追帧」/ 停止追帧 + 长状态行），在 14 个宽度（1280 → 480）下逐档测量：
+
+| 宽度（px） | 行数（最宽档位名） | 行数（普通档位名） | 「全屏」与播放控制同行 | 碰撞对 |
+|------------|--------------------|--------------------|------------------------|--------|
+| 1280 | 1 | 1 | 是 | 无 |
+| 1120 | 1 | 1 | 是 | 无 |
+| 1024 | 2 | 1 | 最宽口径否 / 普通口径是 | 无 |
+| 960 – 620 | 2 | 2 | 否（「全屏」换到第二行并独占行尾） | 无 |
+| 560 | 3 | 2 | 否 | 无 |
+| 480 | 3 | 3 | 否 | 无 |
+
+- **0 重叠**：14 个宽度 × 3 快照共 **42 次测量，碰撞对恒为空**（`collisions=none`）；
+- **单行阈值是区间而不是定值**：普通档位名（最宽 `1080P 高码率`）时 **1024 px 起单行**，
+  带 HDR / 高帧率 后缀的最宽档位名（下拉顶到 `max-width: 220px`）时后移到 **1120 px**；
+- 普通档位名一列是把 `probe.js` 的 `QUALITY_OPTION_LABELS` 里两条带后缀的选项去掉后重跑的结果；
+  行数、是否同行、碰撞对直接由探针输出开头的 `lines=` / `fsSameLineAsPlay=` / `collisions=` 给出。
+
 ## 11. 状态行显示实际延迟
 
 画面下方状态行（`#statusLine`）在播放状态下显示形如 `播放中 · 318 ms（极限追帧 250 ms）`：
@@ -321,6 +347,34 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
 - 括号分段取值由 `core.chaseStatusLabel(run)` 给出（常量 `core.CHASE_STATUS_LABELS`）：正在追帧时是当前模式与
   目标档位（`modeLabel`，如 `极限追帧 250 ms`），停止追帧时是固定的 `未开启追帧`
   （此时不显示模式与档位）——两种状态都有标记，只标注一侧时"追帧到底开没开"无法确认。
+
+### 11.1 状态行优先级：遥测只能改数值，不能改操作态
+
+状态行是**两级**判定，两级都是纯函数（都被 `tests/web/player-core.test.js` 逐字覆盖）：
+
+| 级别 | 判定函数 | 决定什么 |
+|------|----------|----------|
+| 1（最高） | `core.resolveStatusLine(hostStatus, playbackText, now)` | 宿主消息（`host-status`）覆盖显示，按级别保留 6/12/20 s 后回落到 `playbackText` |
+| 2 | `core.resolvePlaybackStatusText(run, session)` | 页面自己那一份文案：用户暂停 > 停止 / 重连 / 未连接 > 播放中遥测 |
+
+合并后的完整顺序是：**宿主消息 > 用户暂停 > 重连 / 停止 / 未连接 > 播放中遥测**。
+判定 2 的输入是页面会话态 `{ statusPhase, pausedByUser, reconnectAttempt }`
+（阶段常量 `core.PLAYBACK_PHASES`：`idle` / `playing` / `paused` / `reconnecting` / `stopped`），输出逐字为：
+
+| 会话态 | 文案 |
+|--------|------|
+| 用户暂停（`pausedByUser` 或阶段 `paused`） | `已暂停（保留当前地址）` |
+| 阶段 `stopped`（或运行对象已标记 `stopped`） | `已停止播放（画面已关闭）` |
+| 阶段 `reconnecting` | `重连中（第 N 次）…`（`core.formatReconnectingStatusText`） |
+| 阶段 `idle` 或没有运行对象 | `未连接` |
+| 阶段 `playing` | `core.formatPlaybackStatusText(run)`：`播放中 · N ms（…）` |
+
+**为什么必须收敛到纯函数**：遥测每 500 ms 刷一次状态行，一旦让回调自己拼文案，用户点「暂停播放」后
+不到 0.5 秒状态行就会被刷回 `播放中 · N ms（…）`——按钮写着「继续播放」、状态行却说在播放。
+现在 `player.html` 的遥测回调只做一件事：把实测延迟写进 `run.lastLatencyMs`，
+再调 `core.resolvePlaybackStatusText(run, state)` 取文案（页面侧只有 `applyPlaybackPhase` 一处改阶段），
+因此暂停 / 重连 / 停止期间数值照常刷新，文案保持不变；恢复播放后自动回到 `播放中 · N ms（…）`。
+宿主消息仍由第 1 级覆盖，超时后回落到的正是第 2 级给的文案（暂停时回落成暂停文案，而不是「播放中」）。
 
 ## 12. 桥接中继的稳定性约束
 

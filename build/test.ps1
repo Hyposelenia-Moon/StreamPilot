@@ -19,6 +19,10 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $failed = $false
 
+# Node 探测放在最前：第 2 阶段（-SkipWeb 时可跳过）与第 4 阶段（离线结构分析）都要用它，
+# 各自独立判断可用性；只在其中一个分支里赋值会让另一个阶段读到 $null 而误报失败。
+$node = Get-Command node -ErrorAction SilentlyContinue
+
 function Write-Section {
     param([string]$Title)
     Write-Host ''
@@ -64,23 +68,23 @@ else {
     }
 }
 
-if (-not $SkipWeb) {
-    Write-Section '2/4 Player-core JS tests (node --test)'
-    $node = Get-Command node -ErrorAction SilentlyContinue
-    if (-not $node) {
-        Write-Host 'SKIPPED: node is not available.' -ForegroundColor Yellow
+Write-Section '2/4 Player-core JS tests (node --test)'
+if ($SkipWeb) {
+    Write-Host 'SKIPPED: -SkipWeb was specified.' -ForegroundColor Yellow
+}
+elseif ($null -eq $node) {
+    Write-Host 'SKIPPED: node is not available.' -ForegroundColor Yellow
+    $failed = $true
+}
+else {
+    $testFile = Join-Path $root 'tests\web\player-core.test.js'
+    & $node.Source --test $testFile
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host 'Player-core tests FAILED.' -ForegroundColor Red
         $failed = $true
     }
     else {
-        $testFile = Join-Path $root 'tests\web\player-core.test.js'
-        & $node.Source --test $testFile
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host 'Player-core tests FAILED.' -ForegroundColor Red
-            $failed = $true
-        }
-        else {
-            Write-Host 'Player-core tests passed.' -ForegroundColor Green
-        }
+        Write-Host 'Player-core tests passed.' -ForegroundColor Green
     }
 }
 
@@ -95,8 +99,12 @@ if (-not $SkipStatic) {
 
 Write-Section '4/4 Offline C# structural analysis'
 $analyzer = Join-Path $PSScriptRoot 'analyze-csharp.mjs'
-if ($null -eq $node -or -not (Test-Path $analyzer)) {
-    Write-Host 'SKIPPED: node or analyzer script is not available.' -ForegroundColor Yellow
+if ($null -eq $node) {
+    Write-Host 'SKIPPED: node is not available.' -ForegroundColor Yellow
+    $failed = $true
+}
+elseif (-not (Test-Path $analyzer)) {
+    Write-Host "SKIPPED: analyzer script is not available: $analyzer" -ForegroundColor Yellow
     $failed = $true
 }
 else {

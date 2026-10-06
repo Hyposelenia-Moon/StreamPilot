@@ -1433,10 +1433,14 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     }
 
     /// <summary>按存储内容重建预设列表（不触发开播检查）。</summary>
-    /// <param name="selectName">重建后要选中的预设显示名；为空时尽量保持原有选中项。</param>
-    private void RefreshPresetItems(string? selectName = null)
+    /// <param name="selectPreset">重建后要选中的预设；为空时尽量保持原有选中项。</param>
+    /// <remarks>
+    /// 选中恢复按身份（平台 + 名称）匹配，不按名称：同名跨平台的预设只按名称取第一个，
+    /// 会把用户的选中项串到另一个平台的那条上。
+    /// </remarks>
+    private void RefreshPresetItems(RoomPreset? selectPreset = null)
     {
-        string? keepName = selectName ?? _selectedPresetItem?.Preset.Name;
+        RoomPreset? keepPreset = selectPreset ?? _selectedPresetItem?.Preset;
 
         foreach (PresetItemViewModel previous in _presetItemSubscriptions)
         {
@@ -1452,7 +1456,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             item.PropertyChanged += OnPresetItemPropertyChanged;
             _presetItemSubscriptions.Add(item);
             PresetItems.Add(item);
-            if (restored is null && keepName is not null && string.Equals(preset.Name, keepName, StringComparison.Ordinal))
+            if (restored is null && preset.HasSameIdentity(keepPreset))
             {
                 restored = item;
             }
@@ -1733,7 +1737,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         }
 
         // 重建列表并把新预设设为选中项，用户在列表里能立刻看到它。
-        RefreshPresetItems(name);
+        RefreshPresetItems(preset);
         StatusMessage = $"已新增预设「{name}」（{ResolvePlatformName(room.Platform)}），"
             + $"正在后台检测它是否开播（当前共 {PresetItems.Count} 个）。";
         AppendLog("已新增预设：" + name + " → " + preset.RoomInput);
@@ -1842,7 +1846,8 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             return;
         }
 
-        bool removed = _presetStore.Remove(item.Preset.Name);
+        // 按完整身份（平台 + 名称）删：同名跨平台的另一条不能被一起删掉。
+        bool removed = _presetStore.Remove(item.Preset);
         RefreshPresetItems();
 
         // 删掉的正是当前卡片对应的房间时才清空：卡片显示的是"当前正在看的房间"，

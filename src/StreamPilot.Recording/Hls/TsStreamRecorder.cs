@@ -23,22 +23,42 @@ public sealed class TsStreamRecorder
     /// <summary>直播播放列表的刷新间隔（秒）。</summary>
     public const int PlaylistRefreshSeconds = 10;
 
+    /// <summary>收尾（关闭末分片并登记元数据）的超时秒数。</summary>
+    /// <remarks>
+    /// 收尾必须使用独立且有界的令牌：取消录制时上层令牌已经取消，若继续沿用会在 flush 之前
+    /// 立刻抛 <see cref="OperationCanceledException"/>，导致末分片登记不上、文件句柄不释放（SP-03）。
+    /// 本地磁盘 flush 通常在 100 毫秒以内完成，10 秒留出两个数量级余量（慢盘、杀毒软件实时扫描），
+    /// 同时保证停止录制时的等待一定有界。
+    /// </remarks>
+    public const int FinalizeTimeoutSeconds = 10;
+
     private readonly IStructuredLogger _logger;
     private readonly string _moduleName = "Recording.Hls";
     private readonly SegmentPolicy _policy;
     private readonly DateTimeOffset _startedAt;
+    private readonly int _playlistRefreshSeconds;
 
     /// <summary>初始化 TS 录制器。</summary>
     /// <param name="segmentPolicy">分片策略。</param>
     /// <param name="startedAt">录制开始时间。</param>
     /// <param name="logger">结构化日志。</param>
-    public TsStreamRecorder(SegmentPolicy segmentPolicy, DateTimeOffset startedAt, IStructuredLogger logger)
+    /// <param name="playlistRefreshSeconds">
+    /// 播放列表刷新间隔（秒）；为 <see langword="null"/> 时使用 <see cref="PlaylistRefreshSeconds"/>。
+    /// 自动化测试可传入更短（含 0）的间隔，从而在不等候真实刷新周期的前提下覆盖
+    /// "取消/上游失败发生在刷新播放列表时"的必达收尾路径。
+    /// </param>
+    public TsStreamRecorder(
+        SegmentPolicy segmentPolicy,
+        DateTimeOffset startedAt,
+        IStructuredLogger logger,
+        int? playlistRefreshSeconds = null)
     {
         ArgumentNullException.ThrowIfNull(segmentPolicy);
         ArgumentNullException.ThrowIfNull(logger);
         _policy = segmentPolicy;
         _startedAt = startedAt;
         _logger = logger;
+        _playlistRefreshSeconds = Math.Max(0, playlistRefreshSeconds ?? PlaylistRefreshSeconds);
     }
 
     /// <summary>
@@ -53,7 +73,14 @@ public sealed class TsStreamRecorder
     /// <param name="onSegmentCompleted">分片完成回调，可为 <see langword="null"/>。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>录制结果。</returns>
-    /// <exception cref="Core.Errors.RecordingException">播放列表或分片下载失败时抛出。</exception>
+    /// <remarks>
+    /// 收尾（关闭末分片 + 登记末分片 + 计算最终结果）是必达的：正常结束、播放列表 ENDLIST、
+    /// 上游失败、取消都会执行，且使用独立的 <see cref="FinalizeTimeoutSeconds"/> 超时令牌，
+    /// 不受已经取消的上层令牌影响。因此返回结果与回调登记的分片始终一致（不会出现"有分片但字节数为 0"）。
+    /// 收尾失败时抛出分类为 <see cref="Core.Errors.RecordingErrorCategory.OutputUnavailable"/> 的异常，
+    /// 与录制过程中的上游失败（分类 <see cref="Core.Errors.RecordingErrorCategory.MalformedStream"/>）区分。
+    /// </remarks>
+    /// <exception cref="Core.Errors.RecordingException">播放列表拉取/刷新失败或收尾失败时抛出。</exception>
     public async Task<FlvRecordingResult> RecordFragmentsAsync(
         HttpClient client,
         HlsPlaylist playlist,
@@ -74,61 +101,86 @@ public sealed class TsStreamRecorder
             throw new ArgumentException("播放列表地址必须是绝对地址。", nameof(playlistUri));
         }
 
-        if (playlist.IsMasterPlaylist && playlist.VariantUris.Count > 0)
-        {
-            // master 播放列表：切换到第一个 variant 的 media 播放列表，
-            // 之后周期性刷新该 variant 的播放列表（分片地址由解析器解析为绝对地址）。
-            playlistUri = new Uri(playlist.VariantUris[0], UriKind.Absolute);
-            playlist = await FetchMediaPlaylistAsync(client, playlistUri.ToString(), referer, cancellationToken).ConfigureAwait(false);
-        }
-
         Directory.CreateDirectory(outputDirectory);
 
         TsRecordingState state = new();
 
-        // 只刷新 media 播放列表；含 ENDLIST 的播放列表（点播/已结束）读完即结束，不刷新。
-        bool refreshable = !playlist.IsMasterPlaylist && !playlist.IsEndList;
+        bool refreshable = false;
+        RecordingStopReason reason = RecordingStopReason.StreamEnded;
+        Exception? finalizeFailure = null;
 
-        while (true)
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            await AppendPlaylistAsync(client, playlist, room, outputDirectory, referer, state, onSegmentCompleted, cancellationToken).ConfigureAwait(false);
-
-            if (!refreshable)
+            if (playlist.IsMasterPlaylist && playlist.VariantUris.Count > 0)
             {
-                break;
+                // master 播放列表：切换到第一个 variant 的 media 播放列表，
+                // 之后周期性刷新该 variant 的播放列表（分片地址由解析器解析为绝对地址）。
+                playlistUri = new Uri(playlist.VariantUris[0], UriKind.Absolute);
+                playlist = await FetchMediaPlaylistAsync(client, playlistUri.ToString(), referer, cancellationToken).ConfigureAwait(false);
             }
 
-            if (state.LastSegmentUri is null || playlist.SegmentUris.Count == 0)
+            // 只刷新 media 播放列表；含 ENDLIST 的播放列表（点播/已结束）读完即结束，不刷新。
+            refreshable = !playlist.IsMasterPlaylist && !playlist.IsEndList;
+
+            while (true)
             {
-                _logger.Warn(_moduleName, "直播播放列表未提供可用分片，结束录制。", new Dictionary<string, object?>
+                cancellationToken.ThrowIfCancellationRequested();
+                await AppendPlaylistAsync(client, playlist, room, outputDirectory, referer, state, onSegmentCompleted, cancellationToken).ConfigureAwait(false);
+
+                if (!refreshable)
                 {
-                    ["roomId"] = room.RoomId,
-                });
-                break;
-            }
+                    break;
+                }
 
-            await Task.Delay(TimeSpan.FromSeconds(PlaylistRefreshSeconds), cancellationToken).ConfigureAwait(false);
-
-            HlsPlaylist refreshed = await FetchMediaPlaylistAsync(client, playlistUri.ToString(), referer, cancellationToken).ConfigureAwait(false);
-            if (refreshed.SegmentUris.Count == 0)
-            {
-                _logger.Warn(_moduleName, "刷新后的播放列表为空，结束录制。", new Dictionary<string, object?>
+                if (state.LastSegmentUri is null || playlist.SegmentUris.Count == 0)
                 {
-                    ["roomId"] = room.RoomId,
-                });
-                break;
+                    _logger.Warn(_moduleName, "直播播放列表未提供可用分片，结束录制。", new Dictionary<string, object?>
+                    {
+                        ["roomId"] = room.RoomId,
+                    });
+                    break;
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(_playlistRefreshSeconds), cancellationToken).ConfigureAwait(false);
+
+                HlsPlaylist refreshed = await FetchMediaPlaylistAsync(client, playlistUri.ToString(), referer, cancellationToken).ConfigureAwait(false);
+                if (refreshed.SegmentUris.Count == 0)
+                {
+                    _logger.Warn(_moduleName, "刷新后的播放列表为空，结束录制。", new Dictionary<string, object?>
+                    {
+                        ["roomId"] = room.RoomId,
+                    });
+                    break;
+                }
+
+                playlist = refreshed;
+                refreshable = !refreshed.IsMasterPlaylist && !refreshed.IsEndList;
             }
 
-            playlist = refreshed;
-            refreshable = !refreshed.IsMasterPlaylist && !refreshed.IsEndList;
+            // refreshable 为 true 说明是直播流被用户/上层取消；为 false 说明播放列表已 ENDLIST（直播结束）。
+            reason = refreshable ? RecordingStopReason.UserStopped : RecordingStopReason.StreamEnded;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // 取消不是失败：停止原因归一为用户主动停止，收尾由下面的 finally 负责。
+            reason = RecordingStopReason.UserStopped;
+        }
+        finally
+        {
+            // 必达收尾：正常结束、ENDLIST、上游失败、取消都要关闭末分片并登记元数据，
+            // 否则文件句柄不释放、末分片丢失、上层元数据停留在全 0（SP-03）。
+            finalizeFailure = await FinalizeAsync(state, onSegmentCompleted, room).ConfigureAwait(false);
         }
 
-        RecordingSegment? closing = await CloseCurrentSegmentAsync(state, onSegmentCompleted, cancellationToken).ConfigureAwait(false);
-        _ = closing;
+        if (finalizeFailure is not null)
+        {
+            // 收尾失败属于"输出侧"问题，用独立分类上抛，使上层能与上游导致的录制失败区分。
+            throw new Core.Errors.RecordingException(
+                Core.Errors.RecordingErrorCategory.OutputUnavailable,
+                "TS 录制收尾失败：末分片未能写入文件。",
+                finalizeFailure);
+        }
 
-        // refreshable 为 true 说明是直播流被用户/上层取消；为 false 说明播放列表已 ENDLIST（直播结束）。
-        RecordingStopReason reason = refreshable ? RecordingStopReason.UserStopped : RecordingStopReason.StreamEnded;
         return new FlvRecordingResult(
             state.Segments,
             state.TotalBytes,
@@ -185,7 +237,7 @@ public sealed class TsStreamRecorder
                 continue;
             }
 
-            int usableBytes = AlignToPacketBoundary(payload);
+            (int payloadOffset, int usableBytes) = AlignToPacketBoundary(payload);
             if (usableBytes == 0)
             {
                 _logger.Warn(_moduleName, "HLS 分片不含完整 TS 包，已跳过。", new Dictionary<string, object?>
@@ -206,7 +258,8 @@ public sealed class TsStreamRecorder
                 OpenNewSegment(state, room, outputDirectory);
             }
 
-            await state.FileStream!.WriteAsync(payload.AsMemory(0, usableBytes), cancellationToken).ConfigureAwait(false);
+            // 必须从对齐后的偏移开始写：前导垃圾既不是 TS 包，也不该出现在文件里。
+            await state.FileStream!.WriteAsync(payload.AsMemory(payloadOffset, usableBytes), cancellationToken).ConfigureAwait(false);
             state.CurrentBytes += usableBytes;
             state.CurrentDurationSeconds += segmentDuration;
             state.TimestampMs += (long)Math.Round(segmentDuration * 1000);
@@ -305,25 +358,28 @@ public sealed class TsStreamRecorder
     }
 
     /// <summary>
-    /// 计算可安全写入的字节数（只保留完整的 188 字节 TS 包，丢弃跨分片残留）。
+    /// 计算可安全写入的区间（从首个同步字节开始的完整 188 字节 TS 包，丢弃前导垃圾与跨分片残留）。
     /// </summary>
     /// <param name="payload">分片原始字节。</param>
-    /// <returns>可写入的字节数。</returns>
-    public static int AlignToPacketBoundary(ReadOnlySpan<byte> payload)
+    /// <returns>
+    /// 可写入区间的起始偏移与长度；不足一个完整 TS 包时返回 <c>(0, 0)</c>。
+    /// 调用方必须从 <c>Offset</c> 开始写入，否则会把前导垃圾写进文件。
+    /// </returns>
+    public static (int Offset, int Length) AlignToPacketBoundary(ReadOnlySpan<byte> payload)
     {
         if (payload.Length < TsPacketSize)
         {
-            return 0;
+            return (0, 0);
         }
 
         int firstSync = FindFirstSync(payload);
         if (firstSync < 0)
         {
-            return 0;
+            return (0, 0);
         }
 
         int usable = payload.Length - firstSync;
-        return usable - (usable % TsPacketSize);
+        return (firstSync, usable - (usable % TsPacketSize));
     }
 
     private static int FindFirstSync(ReadOnlySpan<byte> payload)

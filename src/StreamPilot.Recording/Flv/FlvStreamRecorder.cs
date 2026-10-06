@@ -21,25 +21,37 @@ public sealed class FlvStreamRecorder
     /// <summary>默认的最长录制时长（分钟，8 小时；与 <see cref="RecordingLimits.DefaultMaxRecordingMinutes"/> 一致）。</summary>
     public const int DefaultMaxDurationMinutes = RecordingLimits.DefaultMaxRecordingMinutes;
 
-    /// <summary>重连退避序列（秒），超出长度后复用最后一项。</summary>
-    private static readonly int[] ReconnectBackoffSeconds = [2, 4, 8, 15, 30];
+    /// <summary>默认重连退避序列（秒），超出长度后复用最后一项。</summary>
+    public static IReadOnlyList<int> DefaultReconnectBackoffSeconds { get; } = [2, 4, 8, 15, 30];
 
     private readonly IStructuredLogger _logger;
     private readonly string _moduleName = "Recording.Flv";
     private readonly SegmentPolicy _policy;
     private readonly DateTimeOffset _startedAt;
+    private readonly int[] _reconnectBackoffSeconds;
 
     /// <summary>初始化 FLV 录制器。</summary>
     /// <param name="segmentPolicy">分片策略。</param>
     /// <param name="startedAt">录制开始时间。</param>
     /// <param name="logger">结构化日志。</param>
-    public FlvStreamRecorder(SegmentPolicy segmentPolicy, DateTimeOffset startedAt, IStructuredLogger logger)
+    /// <param name="reconnectBackoffSeconds">
+    /// 重连退避序列（秒）；为 <see langword="null"/> 或空时使用 <see cref="DefaultReconnectBackoffSeconds"/>。
+    /// 自动化测试可传入全零序列，从而在不等候真实退避的前提下覆盖重连预算逻辑。
+    /// </param>
+    public FlvStreamRecorder(
+        SegmentPolicy segmentPolicy,
+        DateTimeOffset startedAt,
+        IStructuredLogger logger,
+        IReadOnlyList<int>? reconnectBackoffSeconds = null)
     {
         ArgumentNullException.ThrowIfNull(segmentPolicy);
         ArgumentNullException.ThrowIfNull(logger);
         _policy = segmentPolicy;
         _startedAt = startedAt;
         _logger = logger;
+        _reconnectBackoffSeconds = reconnectBackoffSeconds is { Count: > 0 }
+            ? [.. reconnectBackoffSeconds]
+            : [.. DefaultReconnectBackoffSeconds];
     }
 
     /// <summary>
@@ -82,9 +94,10 @@ public sealed class FlvStreamRecorder
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // 连接失败时 TryOpenSourceAsync 内部已完成退避与重连计数；
-                // 超过上限会抛出 RecordingException，由下方 catch 统一收尾。
+                // 打开动作在重连预算内循环重试：只有真正连上（或预算耗尽抛错）才会返回，
+                // 因此此处取到的必然是可用流，不会因"首帧未连上"而误判 Failed。
                 await TryOpenSourceAsync(source, session, maxReconnectAttempts, cancellationToken).ConfigureAwait(false);
+                session.BeginConnection();
 
                 FlvTagReader reader = new(GetCurrentStream(session));
                 while (true)
@@ -159,10 +172,10 @@ public sealed class FlvStreamRecorder
         }
     }
 
-    private static async Task DelayAsync(int reconnectCount, CancellationToken cancellationToken)
+    private async Task DelayAsync(int reconnectCount, CancellationToken cancellationToken)
     {
-        int index = Math.Clamp(reconnectCount - 1, 0, ReconnectBackoffSeconds.Length - 1);
-        await Task.Delay(TimeSpan.FromSeconds(ReconnectBackoffSeconds[index]), cancellationToken).ConfigureAwait(false);
+        int index = Math.Clamp(reconnectCount - 1, 0, _reconnectBackoffSeconds.Length - 1);
+        await Task.Delay(TimeSpan.FromSeconds(_reconnectBackoffSeconds[index]), cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task<FlvTag?> ReadWithStallTimeoutAsync(
@@ -190,36 +203,49 @@ public sealed class FlvStreamRecorder
                 "直播流未连接。");
     }
 
+    /// <summary>
+    /// 在重连预算内反复尝试建立连接，直到成功取到可读流或预算耗尽。
+    /// </summary>
+    /// <param name="source">流数据源。</param>
+    /// <param name="session">会话状态。</param>
+    /// <param name="maxReconnectAttempts">最大重连次数（不含首次连接）。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <exception cref="Core.Errors.RecordingException">重连预算耗尽仍无法连接时抛出。</exception>
     private async Task TryOpenSourceAsync(
         IStreamSource source,
         SessionState session,
         int maxReconnectAttempts,
         CancellationToken cancellationToken)
     {
-        try
+        while (true)
         {
-            session.CurrentStream = await source.OpenAsync(cancellationToken).ConfigureAwait(false);
-            return;
-        }
-        catch (Core.Errors.RecordingException exception)
-        {
-            if (session.ReconnectCount >= maxReconnectAttempts)
+            cancellationToken.ThrowIfCancellationRequested();
+            try
             {
-                _logger.LogError(LogLevel.Error, _moduleName, "连接直播流失败且重连次数已用尽。", exception, new Dictionary<string, object?>
+                session.CurrentStream = await source.OpenAsync(cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            catch (Core.Errors.RecordingException exception)
+            {
+                if (session.ReconnectCount >= maxReconnectAttempts)
+                {
+                    _logger.LogError(LogLevel.Error, _moduleName, "连接直播流失败且重连次数已用尽。", exception, new Dictionary<string, object?>
+                    {
+                        ["roomId"] = session.RoomId,
+                        ["reconnectCount"] = session.ReconnectCount,
+                    });
+                    throw;
+                }
+
+                session.ReconnectCount++;
+                _logger.Warn(_moduleName, "连接直播流失败，准备重连。", new Dictionary<string, object?>
                 {
                     ["roomId"] = session.RoomId,
                     ["reconnectCount"] = session.ReconnectCount,
+                    ["detail"] = exception.Message,
                 });
-                throw;
+                await DelayAsync(session.ReconnectCount, cancellationToken).ConfigureAwait(false);
             }
-
-            session.ReconnectCount++;
-            _logger.Warn(_moduleName, "连接直播流失败，准备重连。", new Dictionary<string, object?>
-            {
-                ["reconnectCount"] = session.ReconnectCount,
-                ["detail"] = exception.Message,
-            });
-            await DelayAsync(session.ReconnectCount, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -268,7 +294,7 @@ public sealed class FlvStreamRecorder
         }
 
         await session.Writer.WriteTagAsync(tag, cancellationToken).ConfigureAwait(false);
-        session.SessionDurationMs = Math.Max(session.SessionDurationMs, tag.TimestampMs);
+        session.AdvanceMediaDuration(tag.TimestampMs);
     }
 
     /// <summary>
@@ -390,8 +416,61 @@ public sealed class FlvStreamRecorder
         /// <summary>重连次数。</summary>
         public int ReconnectCount { get; set; }
 
-        /// <summary>会话内最大时间戳（毫秒），即已录制时长。</summary>
-        public long SessionDurationMs { get; set; }
+        /// <summary>本次会话已结算连接的累计媒体时长（毫秒）。</summary>
+        public long CompletedMediaDurationMs { get; set; }
+
+        /// <summary>当前连接首个数据标签的上游时间戳（毫秒）；尚未收到数据标签时为 <see langword="null"/>。</summary>
+        public long? ConnectionBaseTimestampMs { get; set; }
+
+        /// <summary>当前连接内已推进的媒体时长（毫秒），从 0 开始且单调不减。</summary>
+        public long ConnectionMediaDurationMs { get; set; }
+
+        /// <summary>
+        /// 会话时长（毫秒）：已结算连接的媒体时长 + 当前连接内推进的媒体时长。
+        /// </summary>
+        /// <remarks>
+        /// 该值由上游时间戳归一化而来（见 <see cref="AdvanceMediaDuration"/>），与上游绝对时间戳的
+        /// 起点解耦：真实 CDN 的 FLV 首帧时间戳常常非 0（例如 28800100 毫秒），若不归一化会被
+        /// 误当成"已录制时长"，导致刚开始录制就命中时长上限而丢数据。
+        /// </remarks>
+        public long SessionDurationMs => CompletedMediaDurationMs + ConnectionMediaDurationMs;
+
+        /// <summary>
+        /// 开始一次新连接：结算上一条连接的媒体时长，并重置连接内的归一化基准。
+        /// </summary>
+        /// <remarks>会话总时长在该调用前后保持不变（只是把"当前连接"并入"已结算"）。</remarks>
+        public void BeginConnection()
+        {
+            CompletedMediaDurationMs += ConnectionMediaDurationMs;
+            ConnectionBaseTimestampMs = null;
+            ConnectionMediaDurationMs = 0;
+        }
+
+        /// <summary>
+        /// 用一个上游标签时间戳推进会话媒体时长。
+        /// </summary>
+        /// <param name="timestampMs">上游标签时间戳（毫秒）。</param>
+        /// <remarks>
+        /// 首个数据标签只确定本连接的基准（本连接媒体时长从 0 开始）；
+        /// 时间戳回跳（含重连后归零）时整体平移基准，使媒体时长保持单调不减且不重复计时。
+        /// </remarks>
+        public void AdvanceMediaDuration(int timestampMs)
+        {
+            if (ConnectionBaseTimestampMs is null)
+            {
+                ConnectionBaseTimestampMs = timestampMs;
+                return;
+            }
+
+            long offsetMs = timestampMs - ConnectionBaseTimestampMs.Value;
+            if (offsetMs >= ConnectionMediaDurationMs)
+            {
+                ConnectionMediaDurationMs = offsetMs;
+                return;
+            }
+
+            ConnectionBaseTimestampMs = timestampMs - ConnectionMediaDurationMs;
+        }
     }
 }
 

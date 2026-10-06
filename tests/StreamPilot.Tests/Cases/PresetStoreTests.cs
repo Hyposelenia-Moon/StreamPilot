@@ -73,6 +73,57 @@ public sealed class PresetStoreTests
         Assert.Equal("222", douyin!.RoomInput, "抖音那份不应被改动");
     }
 
+    /// <summary>同名跨平台预设按身份删除：删掉一个平台的，另一个平台的同名预设仍在（正常/回归）。</summary>
+    [TestMethod("预设存储：删除按平台 + 名称，同名跨平台不误删")]
+    public void RemovesOnlyTheMatchingPlatformTwin()
+    {
+        using TempDirectory directory = new();
+        PresetStore store = CreateStore(directory, new RecordingLogger());
+
+        Assert.True(store.Add(new RoomPreset("同名主播", PlatformId.Huya, "111")), "虎牙同名预设应保存成功");
+        Assert.True(store.Add(new RoomPreset("同名主播", PlatformId.Douyin, "222")), "抖音同名预设应保存成功");
+        Assert.Equal(2, store.Items.Count, "同名跨平台必须能共存");
+
+        Assert.True(store.Remove(new RoomPreset("同名主播", PlatformId.Huya, "111")), "删虎牙那条应成功");
+
+        Assert.Equal(1, store.Items.Count, "只有虎牙那条该被删掉");
+        Assert.Null(FindPreset(store, PlatformId.Huya), "虎牙那条应已删除");
+        RoomPreset? douyin = FindPreset(store, PlatformId.Douyin);
+        Assert.NotNull(douyin, "另一个平台的同名预设不能被一起删掉");
+        Assert.Equal("222", douyin!.RoomInput, "留下的必须是抖音那条（房间号不能被换掉）");
+
+        // 删除结果必须落盘：只改内存的话重启后预设会"复活"。
+        PresetStore reloaded = CreateStore(directory, new RecordingLogger());
+        reloaded.Load();
+        Assert.Equal(1, reloaded.Items.Count, "删除必须写盘");
+        Assert.Equal(PlatformId.Douyin, reloaded.Items[0].Platform);
+
+        // 目标已不存在：再删一次应返回 false，且不得连带删掉别人。
+        Assert.False(store.Remove(new RoomPreset("同名主播", PlatformId.Huya, "111")), "删除不存在的预设应返回 false");
+        Assert.Equal(1, store.Items.Count, "删除失败时不得改动其余预设");
+    }
+
+    /// <summary>身份只看平台 + 名称：房间号变了仍能删除；空白名称匹配不到任何预设（边界）。</summary>
+    [TestMethod("预设存储：删除忽略房间号且拒绝空白名称")]
+    public void RemoveMatchesIdentityIgnoringRoomInput()
+    {
+        using TempDirectory directory = new();
+        PresetStore store = CreateStore(directory, new RecordingLogger());
+
+        Assert.True(store.Add(new RoomPreset("主播甲", PlatformId.Huya, "111")), "虎牙预设应保存成功");
+        Assert.True(store.Add(new RoomPreset("主播甲", PlatformId.Douyin, "222")), "抖音预设应保存成功");
+
+        // 同一个平台同名预设换了房间号（短号跳转后房间号会变），按旧房间号也要能删掉。
+        Assert.True(store.Remove(new RoomPreset("主播甲", PlatformId.Huya, "999")), "房间号不参与身份判定");
+
+        Assert.Equal(1, store.Items.Count);
+        Assert.NotNull(FindPreset(store, PlatformId.Douyin), "抖音那条不能被牵连");
+
+        // 空白名称归一化后为空串，不能匹配到任何一条（否则会误删整个列表）。
+        Assert.False(store.Remove(new RoomPreset("   ", PlatformId.Douyin, "222")), "空白名称应被拒绝");
+        Assert.Equal(1, store.Items.Count, "空白名称不能删掉任何预设");
+    }
+
     /// <summary>名称为空白或房间输入为空白时拒绝保存，且不产生文件（异常）。</summary>
     [TestMethod("预设存储：空白名称与空白房间号被拒绝")]
     public void RejectsBlankNameOrRoomInput()

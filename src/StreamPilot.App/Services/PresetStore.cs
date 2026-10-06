@@ -13,7 +13,23 @@ using StreamPilot.Core.Models;
 /// <param name="Name">显示名（例如主播名）。</param>
 /// <param name="Platform">所属平台。</param>
 /// <param name="RoomInput">房间号或直播间链接。</param>
-public sealed record RoomPreset(string Name, PlatformId Platform, string RoomInput);
+/// <remarks>
+/// 预设的**身份**是 <see cref="Platform"/> + <see cref="Name"/>：同一个主播可能同时在多个平台开播，
+/// 因此"同名"不等于"同一条"；而 <see cref="RoomInput"/> 会随房间号变化（短号跳转、用户换房间），
+/// 不能参与身份判定。新增/覆盖/删除/选中恢复都用同一套身份口径，否则同名跨平台会互相串台。
+/// </remarks>
+public sealed record RoomPreset(string Name, PlatformId Platform, string RoomInput)
+{
+    /// <summary>
+    /// 判断两条预设是否为同一条（身份 = 平台 + 名称）。
+    /// </summary>
+    /// <param name="other">另一条预设。</param>
+    /// <returns>指向同一条预设返回 <see langword="true"/>。</returns>
+    public bool HasSameIdentity(RoomPreset? other) =>
+        other is not null
+        && Platform == other.Platform
+        && string.Equals(Name, other.Name, StringComparison.Ordinal);
+}
 
 /// <summary>
 /// 预设列表的持久化存取（<c>%LOCALAPPDATA%\StreamPilot\presets.json</c>）。
@@ -103,44 +119,62 @@ public sealed class PresetStore
     public bool Add(RoomPreset preset)
     {
         ArgumentNullException.ThrowIfNull(preset);
-        string name = preset.Name.Trim();
+        string name = NormalizeName(preset.Name);
         string roomInput = preset.RoomInput.Trim();
         if (name.Length == 0 || roomInput.Length == 0)
         {
             return false;
         }
 
-        if (name.Length > MaxNameLength)
-        {
-            name = name[..MaxNameLength];
-        }
-
+        RoomPreset normalized = new(name, preset.Platform, roomInput);
         lock (_gate)
         {
-            _presets.RemoveAll(item => item.Platform == preset.Platform && string.Equals(item.Name, name, StringComparison.Ordinal));
+            // 覆盖口径与删除口径必须完全一致（平台 + 名称），否则同名跨平台会互相误覆盖 / 误删。
+            _presets.RemoveAll(item => item.HasSameIdentity(normalized));
             while (_presets.Count >= MaxPresets)
             {
                 _presets.RemoveAt(0);
             }
 
-            _presets.Add(new RoomPreset(name, preset.Platform, roomInput));
+            _presets.Add(normalized);
         }
 
         return Save();
     }
 
-    /// <summary>删除指定名称的预设。</summary>
-    /// <param name="name">显示名。</param>
-    /// <returns>删除成功返回 <see langword="true"/>。</returns>
-    public bool Remove(string name)
+    /// <summary>删除指定预设：按完整身份（平台 + 名称）匹配。</summary>
+    /// <param name="preset">目标预设；只有平台与名称参与匹配，房间号不参与。</param>
+    /// <returns>确实删掉了一条返回 <see langword="true"/>。</returns>
+    /// <remarks>
+    /// 不能只按名称删：同一个主播可能同时在多个平台开播（列表里两条同名预设），
+    /// 只按名称删会把另一个平台的那条一起删掉；房间号会随短号跳转而变化，所以也不参与匹配。
+    /// </remarks>
+    public bool Remove(RoomPreset preset)
     {
+        ArgumentNullException.ThrowIfNull(preset);
+        string name = NormalizeName(preset.Name);
+        if (name.Length == 0)
+        {
+            return false;
+        }
+
+        RoomPreset identity = preset with { Name = name };
         bool removed;
         lock (_gate)
         {
-            removed = _presets.RemoveAll(item => string.Equals(item.Name, name, StringComparison.Ordinal)) > 0;
+            removed = _presets.RemoveAll(item => item.HasSameIdentity(identity)) > 0;
         }
 
         return removed && Save();
+    }
+
+    /// <summary>把显示名归一化到存储口径（去首尾空白、超长截断）。</summary>
+    /// <param name="name">原始显示名。</param>
+    /// <returns>归一化后的显示名；空白输入返回空串。</returns>
+    private static string NormalizeName(string name)
+    {
+        string trimmed = name.Trim();
+        return trimmed.Length > MaxNameLength ? trimmed[..MaxNameLength] : trimmed;
     }
 
     private bool Save()
