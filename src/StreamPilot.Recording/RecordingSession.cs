@@ -269,7 +269,11 @@ public sealed class RecordingSession : IRecordingSession
         }
         catch (Core.Errors.RecordingException exception)
         {
-            _logger.LogError(LogLevel.Error, _moduleName, "录制会话异常结束。", exception, new Dictionary<string, object?>
+            // 输出侧失败（收尾/落盘）与上游侧失败分开描述，便于日志与用户提示区分二者。
+            string message = exception.Category == Core.Errors.RecordingErrorCategory.OutputUnavailable
+                ? "录制输出/收尾失败，会话结束。"
+                : "录制会话异常结束。";
+            _logger.LogError(LogLevel.Error, _moduleName, message, exception, new Dictionary<string, object?>
             {
                 ["roomId"] = _request.Room.RoomId,
                 ["category"] = exception.Category.ToString(),
@@ -278,6 +282,8 @@ public sealed class RecordingSession : IRecordingSession
         }
         finally
         {
+            // 录制器的必达收尾（关闭末分片 + 登记元数据）已在等待其返回时完成，
+            // 因此这里写出的 sidecar 必然反映真实产物，不会出现"有分片但 totalBytes=0"（SP-03）。
             _metadataWriter.Complete(_stopReason);
             _status = _status with { IsRecording = false };
         }

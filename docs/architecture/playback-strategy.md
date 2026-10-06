@@ -244,16 +244,42 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
 - 档位名与码率由解析层提供（见 [ADR 0003](../adr/0003-parser-contract.md) 第 6.1 节），
   页面不自行编造档位名；显示时若档位名里已含码率（"蓝光4M"）就不再叠加，避免"蓝光4M · 4000 kbps"这种不一致。
 
-## 9. 追帧档位热切换
+## 9. 追帧档位切换
 
 - 档位入口是播放页底部「追帧档位」下拉（150 / 200 / 250 ms，默认 250），
-  **播放中**改动时页面回 `target` 消息给宿主（宿主只记住该值供下次播放沿用），
-  同时页面自己热改播放器配置并立即追帧（`configure(buildMpegtsConfig(...))`）；
+  **播放中**改动时页面回 `target` 消息给宿主（宿主只记住该值供下次播放沿用）；
+- **档位语义是"改配置"，不是"换地址"**：改的是目标延迟与由此推导的阈值，
+  候选地址、候选队列、会话号与中继都不变（换地址走 `quality` → 宿主重新解析 → 重发 `play`，见第 8 节）；
 - 宿主也可下发同名 `target` 消息要求页面切换（`docs/architecture/player-message-contract.md` 第 1.2.1 节）；
 - 没有活动会话时只保存档位，下次 `play` 时生效；
 - 状态文案只在画面下方的状态行显示（页面顶部不再有提示行）：`modeLabel` 同时接受
   `extremeTargetMs` 与 `extremeTargetSeconds`，避免字段缺失时静默回落成默认值
   （曾表现为"选了 250 仍显示 200"）。
+
+### 9.1 引擎配置适配层（`core.applyEngineConfig`）
+
+**根因（SP-01）**：过去页面把「换档位 / 停止追帧」实现成裸调用引擎实例上的 `configure(config)`，
+而**两家引擎的实例上都没有这个方法**：
+
+| 库 | 库内事实 | 结论 |
+|----|----------|------|
+| mpegts.js 1.8.2（`Web/mpegts.js`） | 全文 0 次 `configure`。追帧器 `LiveLatencyChaser` 持有 `_config` 引用并**在运行期**读 `liveBufferLatencyChasing` / `liveBufferLatencyMaxLatency` / `liveBufferLatencyMinRemain`，LiveSync 同样运行期读 `liveSyncMaxLatency` / `liveSyncPlaybackRate`；但这两者**只在构造时按 `_config` 决定是否创建**，`enableStashBuffer` / `stashInitialSize` 等 MSE 侧选项也只在创建时生效 | 改配置只覆盖"关闭"这一半，"从关闭改回开启"无效 → **必须受控重建** |
+| hls.js 1.6.16（`Web/hls.js`） | 全文 1 个 `configure`，且只属于 Transmuxer（worker 指令 `cmd:"configure"`）；Hls 实例原型上没有该方法。构造里 `this.config = mergeConfig(defaults, user)`，各控制器（含 LatencyController）保存的是**同一个对象引用**，运行期逐次读取 `maxLiveSyncPlaybackRate` / `liveMaxLatencyDurationCount` / `maxBufferLength` 等 | 改 `hls.config.*` 会真实生效，可立刻读回校验 → **热改** |
+
+因此适配层按能力表决策，两条路径都必须**确认生效**：
+
+| 动作 | 触发条件 | 做法 |
+|------|----------|------|
+| `hot-apply` | `ENGINE_CAPABILITIES[kind].hotConfig === true` 且运行中的实例有可写配置对象 | 逐键写入后**读回逐键比较**（`verifyConfigApplied`）；值不符或写入抛异常 → 降级重建 |
+| `rebuild` | 引擎不支持热改、或热改未生效、或运行中的实例缺配置对象 | 销毁旧实例 → 按新配置创建 → 重新挂载 → 恢复快照 |
+
+- `core.buildEngineConfig(run, candidate)` 是**唯一**的配置推导入口（按候选格式选 mpegts / hls 配置），
+  页面的薄调用层不再自己挑函数（挑错了就是"改了但没生效"）；
+- `core.snapshotRuntimeState(run, session, media)` / `core.restoreRuntimeState(...)`：重建跨越"销毁 / 创建"
+  保留 `currentCandidate`、`queue`、`sessionId`、`pausedByUser`、`statusPhase`、音量、追帧档位、模式与播放位置；
+  重建**不**清 `playbackStarted` / `everPlayed`，因此不会重复触发首帧逻辑、不会重复上报、状态行也不会闪回；
+- 只有 `{ok: true}` 才允许调用方 `setStatus` 与上报成功；失败一律上报 `warning` 并保持原状态
+  （调用方回滚 `autoChaseEnabled` / `extremeTargetMs`）。
 
 ## 10. 合并后的追帧开关（「追帧 / 停止追帧」）与暂停播放的区别
 
@@ -273,7 +299,7 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
 |------|----------|----------------------|----------|
 | 接口 | 无新消息类型：页面本地改配置，并回一条 `status` 说明（带 `autoChaseEnabled`） | 同左（同一条 `status`） | 页面回 `toggle-pause`，宿主回下发 `pause` |
 | 媒体元素 | 继续播放（**不调用** `video.pause()`） | 继续播放 | `video.pause()`，画面完全停住 |
-| 播放器 | 不销毁（`configure` 热改配置） | 不销毁 | 不销毁 |
+| 播放器 | 不销毁会话与地址；配置按第 9.1 节的适配层落地（hls.js 热改、mpegts.js 受控重建，重建保留全部会话状态） | 同左 | 不销毁 |
 | 地址 / 中继 | 不释放 | 不释放 | 不释放 |
 | 延迟走向 | 按实时速率增长（不再被拉回目标值） | 立刻拉回缓冲末端前 0.08 s，之后继续按目标延迟拉回 | 暂停期间缓冲继续增长，继续播放时可能先追帧 |
 | 恢复方式 | 再点一次按钮（文案变回「追帧」） | 再点一次按钮（文案变为「停止追帧」） | 「继续播放」 |

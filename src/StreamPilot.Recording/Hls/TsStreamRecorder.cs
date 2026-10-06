@@ -282,11 +282,65 @@ public sealed class TsStreamRecorder
         _policy.BeginSegment(state.TimestampMs);
     }
 
-    /// <summary>结束当前分片（写盘并登记元数据）。</summary>
+    /// <summary>
+    /// 必达收尾：在独立且有界的令牌下关闭当前分片、登记末分片并累计总字节数与总时长。
+    /// </summary>
     /// <param name="state">会话状态。</param>
     /// <param name="onSegmentCompleted">分片完成回调。</param>
-    /// <param name="cancellationToken">取消令牌。</param>
+    /// <param name="room">房间信息（仅用于日志上下文）。</param>
+    /// <returns>收尾失败的原因；收尾成功或没有待收尾分片时返回 <see langword="null"/>。</returns>
+    /// <remarks>
+    /// 收尾令牌独立于上层令牌：录制被取消时上层令牌已取消，继承它会让 flush 立刻抛异常，
+    /// 末分片永远登记不上（SP-03）。无论收尾成功与否，<see cref="CloseCurrentSegmentAsync"/>
+    /// 都会释放文件句柄，因此调用方在收尾后可以立刻改名或删除产物。
+    /// 收尾失败一律记 Error 日志并返回原因，绝不静默吞掉。
+    /// </remarks>
+    private async Task<Exception?> FinalizeAsync(
+        TsRecordingState state,
+        Action<RecordingSegment>? onSegmentCompleted,
+        ResolvedRoom room)
+    {
+        if (state.FileStream is null)
+        {
+            return null;
+        }
+
+        using CancellationTokenSource bounded = new(TimeSpan.FromSeconds(FinalizeTimeoutSeconds));
+        try
+        {
+            await CloseCurrentSegmentAsync(state, onSegmentCompleted, bounded.Token).ConfigureAwait(false);
+            return null;
+        }
+        catch (OperationCanceledException exception)
+        {
+            _logger.LogError(LogLevel.Error, _moduleName, "TS 录制收尾超时：末分片未登记。", exception, new Dictionary<string, object?>
+            {
+                ["roomId"] = room.RoomId,
+                ["segmentIndex"] = state.SegmentIndex,
+                ["finalizeTimeoutSeconds"] = FinalizeTimeoutSeconds,
+            });
+            return exception;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogError(LogLevel.Error, _moduleName, "TS 录制收尾失败：末分片未能落盘或句柄未能释放。", exception, new Dictionary<string, object?>
+            {
+                ["roomId"] = room.RoomId,
+                ["segmentIndex"] = state.SegmentIndex,
+            });
+            return exception;
+        }
+    }
+
+    /// <summary>
+    /// 结束当前分片：flush 落盘、登记元数据，并<b>无论如何</b>释放文件句柄。
+    /// </summary>
+    /// <param name="state">会话状态。</param>
+    /// <param name="onSegmentCompleted">分片完成回调。</param>
+    /// <param name="cancellationToken">flush 使用的令牌（必达收尾路径必须传独立的有界令牌）。</param>
     /// <returns>已完成的分片；没有正在写入的分片时返回 <see langword="null"/>。</returns>
+    /// <exception cref="OperationCanceledException">令牌在 flush 完成前被取消时抛出（句柄仍会被释放）。</exception>
+    /// <exception cref="IOException">落盘或释放句柄失败时抛出。</exception>
     private async Task<RecordingSegment?> CloseCurrentSegmentAsync(
         TsRecordingState state,
         Action<RecordingSegment>? onSegmentCompleted,
@@ -297,24 +351,48 @@ public sealed class TsStreamRecorder
             return null;
         }
 
-        RecordingSegment segment = await CompleteSegmentAsync(
-            state.FileStream,
-            state.CurrentPath,
-            state.CurrentBytes,
-            state.CurrentDurationSeconds,
-            cancellationToken).ConfigureAwait(false);
+        FileStream stream = state.FileStream;
+        string path = state.CurrentPath;
+        long bytes = state.CurrentBytes;
+        double durationSeconds = state.CurrentDurationSeconds;
+        try
+        {
+            RecordingSegment segment = await CompleteSegmentAsync(stream, path, bytes, durationSeconds, cancellationToken).ConfigureAwait(false);
+            state.Segments.Add(segment);
+            state.TotalBytes += segment.Bytes;
+            state.TotalDurationSeconds += segment.DurationSeconds;
+            onSegmentCompleted?.Invoke(segment);
+            return segment;
+        }
+        finally
+        {
+            // 释放句柄放在 finally：取消或落盘失败时同样必须关闭文件，否则产物被锁住（SP-03）。
+            await ReleaseSegmentStreamAsync(stream, path).ConfigureAwait(false);
+            state.FileStream = null;
+            state.CurrentPath = string.Empty;
+            state.CurrentBytes = 0;
+            state.CurrentDurationSeconds = 0;
+        }
+    }
 
-        state.Segments.Add(segment);
-        state.TotalBytes += segment.Bytes;
-        state.TotalDurationSeconds += segment.DurationSeconds;
-        onSegmentCompleted?.Invoke(segment);
-
-        await state.FileStream.DisposeAsync().ConfigureAwait(false);
-        state.FileStream = null;
-        state.CurrentPath = string.Empty;
-        state.CurrentBytes = 0;
-        state.CurrentDurationSeconds = 0;
-        return segment;
+    /// <summary>释放分片文件句柄；失败时记 Error 日志并抛出，绝不静默吞掉。</summary>
+    /// <param name="stream">分片文件流。</param>
+    /// <param name="path">分片路径（仅用于日志）。</param>
+    /// <exception cref="IOException">文件句柄未能正常关闭时抛出。</exception>
+    private async Task ReleaseSegmentStreamAsync(FileStream stream, string path)
+    {
+        try
+        {
+            await stream.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogError(LogLevel.Error, _moduleName, "关闭 TS 分片文件失败：文件句柄可能仍被占用。", exception, new Dictionary<string, object?>
+            {
+                ["fileName"] = Path.GetFileName(path),
+            });
+            throw;
+        }
     }
 
     /// <summary>TS 录制的会话状态。</summary>
