@@ -228,8 +228,15 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
 **状态行延迟分段（`formatLatencySegment` / `isValidLatencyMs` 的合法值 / `null` / `NaN` / 负数）**、
 **追帧开关（`shouldAutoChase` 的默认开启与显式停止、`chaseButtonLabel` 两侧文案、
 停止追帧对 mpegts.js / hls.js 配置的影响，且不改变缓冲策略）**、
-**状态行整条文案（`formatPlaybackStatusText` 的四种逐字形态，以及旧的 `· 追帧中` / `已停止追帧` 形态不再出现）**、播放页静态结构（顶部提示已彻底移除、
+**状态行整条文案（`formatPlaybackStatusText` 的四种逐字形态，以及旧的 `· 追帧中` / `已停止追帧` 形态不再出现）**、
+**引擎配置适配层（能力表判定、注入引擎替身后的热改 / 受控重建、成功-失败的上报差异、不重复重建、
+快照与恢复保留的必要状态、页面静态断言"不得再出现裸的引擎 configure 调用"）**、播放页静态结构（顶部提示已彻底移除、
 播放控制三键顺序为 开始 → 暂停/继续 → 停止、追帧相关按钮只剩合并后的 `#chaseBtn` 一个）。
+
+`dotnet run --project tests/StreamPilot.Tests` 里的 `RelaySafetyTests` 覆盖中继侧：
+目的地址白名单（协议 / 回环 / 私网 / 链路本地 / 未指定 / `localhost` 与整数形式回环字面量）、
+重定向后的最终地址被拒绝、等响应头超时与播放列表正文超时（判定 + `Warn` 日志 + 504 语义）、
+以及"长连接不被这两条超时误杀"（替身在超时窗口之后继续产出数据，断言仍能读完）。
 
 ## 8. 画质档位切换
 
@@ -309,6 +316,7 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
 这样旧会话与旧调用点不会因为字段缺失被误当成"已停止追帧"。
 
 停止追帧后写入播放器的配置（`core.buildMpegtsConfig(extreme, target, false)` / `core.buildHlsConfig(extreme, false)`）：
+落地方式见第 9.1 节的适配层（mpegts.js 受控重建、hls.js 热改 + 读回校验）。
 
 | 链路 | 停止追帧时 | 默认（自动追帧） |
 |------|------------|------------------|
@@ -402,11 +410,43 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
 因此暂停 / 重连 / 停止期间数值照常刷新，文案保持不变；恢复播放后自动回到 `播放中 · N ms（…）`。
 宿主消息仍由第 1 级覆盖，超时后回落到的正是第 2 级给的文案（暂停时回落成暂停文案，而不是「播放中」）。
 
-## 12. 桥接中继的稳定性约束
+## 12. 桥接中继的稳定性与安全约束
 
-- `BridgeHost` 的中继 `HttpClient`：`Timeout = InfiniteTimeSpan`（长连接不能被整体超时取消），
-  且 `PooledConnectionLifetime = InfiniteTimeSpan`，**连接池不再定时回收正在使用中的流连接**
-  （曾设为 10 分钟：中继拉的是直播长连接，回收会把正在读的流一起换掉，表现为固定时长的"看着看着断一下"）；
-- 断流判定只由 `PumpWithIdleTimeoutAsync` 的**空闲超时**（30 秒无新数据）负责，按"连续无数据"计时，
-  不会因为流的分片间隔而误判；
+### 12.1 超时分层（各自负责一段，互不牵连）
+
+| 环节 | 约束 | 具名常量 / 实现 |
+|------|------|------------------|
+| 建立上游连接 | 10 秒 | `UpstreamConnectTimeoutSeconds`（`SocketsHttpHandler.ConnectTimeout`） |
+| 等上游响应头 | 10 秒，超时回 **504** 并记 `Warn`（`operation=response-headers` / `playlist`） | `UpstreamHeaderTimeoutSeconds` + `SendUpstreamAsync` 的独立 `CancellationTokenSource` |
+| 读 HLS 播放列表正文 | 15 秒，超时回 **504** 并记 `Warn`（`operation=playlist-body`） | `PlaylistDownloadTimeoutSeconds` + `TryReadPlaylistAsync` 的独立 `CancellationTokenSource` |
+| FLV / TS 长连接正文 | **空闲看门狗**：连续 30 秒无新数据才断开并记 `Warn`；持续有数据就不计时 | `IdleTimeoutSeconds` + `PumpWithIdleTimeoutAsync` |
+
+- `HttpClient.Timeout = InfiniteTimeSpan` 这个选择**保留**，但理由要说对：中继拉的是直播长连接，
+  而 `HttpCompletionOption.ResponseHeadersRead` 下 `HttpClient.Timeout` **只约束到响应头为止**，
+  它并不会、也不该把直播流一起取消。**体读取的边界由空闲看门狗与上面两条独立 CTS 负责**；
+  （旧注释/旧文档把它写成"否则 HttpClient 会在 30 秒后连直播流一起取消"——这个理由不成立，已订正。）
+- 连接池的 `PooledConnectionLifetime = InfiniteTimeSpan`：**连接池不再定时回收正在使用中的流连接**
+  （曾设为 10 分钟：回收会把正在读的流一起换掉，表现为固定时长的"看着看着断一下"）；
 - 中继注册表的活跃时间在每次请求时刷新（`RelayRegistry.TryResolve`），长时间播放的地址不会被闲置淘汰。
+
+### 12.2 攻击面收敛（SP-02）
+
+- **中继只有 `GET /relay/{token}`**：注册一律走进程内的 `IPlaybackBridge.RegisterRelay`
+  （由 `PlaybackCoordinator` 在宿主进程内调用）。过去还有一条 `POST /relay` 注册路由，
+  它没有任何身份校验，且响应头是 `Access-Control-Allow-Origin: *`——本机任意网页都能把自己的
+  回环地址注册成"中继目标"再读回数据；播放页从不使用它，因此**直接关闭该路由**（非 GET 一律 404），
+  不引入令牌层（最小攻击面，不做过度设计）；
+- `Access-Control-Allow-Origin` 固定为播放页的实际来源 `https://appassets.local`
+  （`BridgeHost.PlayerPageOrigin`），并带 `Vary: Origin`；
+  `Access-Control-Allow-Private-Network: true` **保留**，但只在预检请求声明
+  `Access-Control-Request-Private-Network: true` 时返回；
+- **目的地址白名单**（`IsAllowedUpstreamUrl`，注册与**重定向后的最终地址**都过）：
+  只允许 `http` / `https`（中继是 HTTP 客户端，`rtmp`/`rtmps` 本来就拉不了，已移除），
+  拒绝回环 / 私网 / 链路本地 / 未指定地址的字面量与 `localhost` 主机名
+  （含 `::ffff:10.0.0.5` 这类 IPv4-mapped IPv6、`[::1]` 这类带方括号的 IPv6、以及
+  `2130706433` / `0x7f.1` 这类整数形式的回环）；CDN 都是公网域名，不受影响；
+- 判定只做**字面量**，不做 DNS 解析：解析结果会变，且解析-连接之间仍可能被改写（DNS rebinding），
+  凭它做安全决策只会给出虚假的保证。这里的目标是去掉"零成本访问本机与内网"。
+
+> 边界说明：桥接**只监听 `127.0.0.1`**（`LoopbackOnlyGuard`），不是公网监听，
+> 上述问题不是文件读取 / RCE，而是"本机任意页面可借中继访问内网与回环服务"。

@@ -299,8 +299,10 @@ function collectHeader(file, lines) {
 
 function collectTypes(file, lines) {
   const types = [];
+  // `record` 后面可以再跟 class/struct（`record struct X(...)`），
+  // 不显式吃掉这两个关键字时会把它们当成类型名，产生 "duplicate-type: struct" 这类假报警。
   const typeRegex = new RegExp(
-    `\\b(internal|public|private|protected|file)?\\s*(static\\s+|sealed\\s+|abstract\\s+|partial\\s+|readonly\\s+|ref\\s+)*(class|struct|interface|record|enum)\\s+([A-Za-z_]\\w*)`);
+    `\\b(internal|public|private|protected|file)?\\s*(static\\s+|sealed\\s+|abstract\\s+|partial\\s+|readonly\\s+|ref\\s+)*(class|struct|interface|enum|record(?:\\s+(?:class|struct))?)\\s+([A-Za-z_]\\w*)`);
 
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];

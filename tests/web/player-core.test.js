@@ -699,7 +699,14 @@ test('追帧与停止追帧合并为播放页底部的单个按钮', () => {
     '点「追帧」必须保留原一次性追帧的效果（开启后立刻追一次）');
   assert.equal(html.includes('refreshPlaybackStatus(run)'), true, '遥测每轮都要把实测延迟刷进状态行');
   assert.equal(html.includes('lastLatencyMs'), true, '实测延迟必须来自运行对象的遥测值');
-  assert.equal(html.includes('applyPlayerTargetConfig(run)'), true, '停止追帧必须走配置热改，而不是重建播放器');
+  assert.equal(
+    html.includes('applyPlayerTargetConfig(run, message'),
+    true,
+    '停止追帧必须走统一适配层入口（是否重建由能力表决定，见 applyEngineConfig）');
+  assert.equal(
+    /player\.configure\(/.test(html),
+    false,
+    'SP-01：全文不得再出现裸的 player.configure(...) 调用（两家引擎实例上都没有这个方法）');
 });
 
 test('追帧按钮必须预留最长文案的固定宽度，文案切换不再引起重排', () => {
@@ -1043,4 +1050,361 @@ test('宿主状态消息不得占用顶部状态行，页面也不再有日志�
   assert.equal(/<[^>]*id="[^"]*[Ll]og[^"]*"/.test(html), false, '日志面板 / 日志开关元素必须仍然不存在');
   assert.equal(html.includes('modeHint'), false, '顶部状态行必须仍然不存在');
   assert.equal(html.includes('id="statusLine"'), true, '画面下方的状态行仍是唯一状态显示位');
+});
+
+/*
+ * SP-01 回归：追帧开关与档位切换的"引擎适配层"。
+ *
+ * 这些用例注入**引擎替身**（带能力标志与方法调用记录），因此结构上能测到"配置到底有没有生效"：
+ * mpegts.js 没有覆盖两个方向的运行时配置入口 → 必须走受控重建；
+ * hls.js 的 `hls.config` 是共享对象 → 走热改并读回校验。
+ */
+
+/**
+ * 造一个能力替身：带方法调用记录与"写入是否被接受"的行为开关。
+ *
+ * 替身只在 `hotConfig: true` 时提供可写 `config`（普通对象包一层 Proxy 以便记录写入）；
+ * `verify: 'reject'` 用于模拟"引擎接受了调用但值没生效"，`writeThrows: true` 模拟写入直接抛异常。
+ * @param {{hotConfig?:boolean,config?:object,verify?:string,writeThrows?:boolean}} options 替身行为。
+ * @returns {{player:object,calls:Array<string>}} 替身与调用记录。
+ */
+function createEngineDouble(options) {
+  const settings = options || {};
+  const calls = [];
+  const player = {};
+  if (settings.hotConfig) {
+    const target = Object.assign({}, settings.config);
+    player.config = new Proxy(target, {
+      set(config, key, value) {
+        if (settings.writeThrows) {
+          throw new Error('写入配置被拒绝');
+        }
+
+        calls.push('set:' + String(key));
+        if (settings.verify === 'reject') {
+          // 记录调用但不落值：读回校验必须发现"值没生效"。
+          return true;
+        }
+
+        config[key] = value;
+        return true;
+      },
+    });
+  }
+
+  return { player: player, calls: calls };
+}
+
+/**
+ * 造一个重建回调替身：记录调用次数并返回指定实例。
+ * @param {object|null} rebuilt 重建后返回的实例。
+ * @returns {{rebuild:Function,calls:Array<string>}} 回调与调用记录。
+ */
+function createRebuildDouble(rebuilt) {
+  const calls = [];
+  return {
+    calls: calls,
+    rebuild: function rebuild() {
+      calls.push('rebuild');
+      return rebuilt;
+    },
+  };
+}
+
+test('发动机能力表：mpegts 必须重建，hls 可以热改（SP-01 的判定依据）', () => {
+  assert.equal(core.ENGINE_KINDS.MPEGTS, 'mpegts');
+  assert.equal(core.ENGINE_KINDS.HLS, 'hls');
+  assert.equal(core.canHotApplyEngineConfig(core.ENGINE_KINDS.MPEGTS), false, 'mpegts.js 没有覆盖两个方向的运行时配置入口');
+  assert.equal(core.canHotApplyEngineConfig(core.ENGINE_KINDS.HLS), true, 'hls.js 的 config 是共享对象，可直接改并读回');
+  assert.equal(core.canHotApplyEngineConfig('unknown'), false, '未知引擎按"不支持热改"处理');
+  assert.equal(core.canHotApplyEngineConfig(undefined), false);
+
+  // 候选格式 → 引擎：HLS 家族走 hls.js，其余走 mpegts.js（与页面创建播放器的分支一致）。
+  assert.equal(core.engineKindForCandidate({ format: 'flv' }), core.ENGINE_KINDS.MPEGTS);
+  assert.equal(core.engineKindForCandidate({ format: 'ts' }), core.ENGINE_KINDS.HLS);
+  assert.equal(core.engineKindForCandidate({ format: 'fmp4' }), core.ENGINE_KINDS.HLS);
+  assert.equal(core.engineKindForCandidate(null), core.ENGINE_KINDS.MPEGTS);
+});
+
+test('buildEngineConfig 按候选格式给出同一份推导（页面不再自己挑函数）', () => {
+  const run = { extreme: true, extremeTargetSeconds: 0.25, autoChaseEnabled: true };
+  const mpegtsConfig = core.buildEngineConfig(run, { format: 'flv' });
+  assert.deepEqual(mpegtsConfig, core.buildMpegtsConfig(true, 0.25, true));
+
+  const hlsConfig = core.buildEngineConfig(run, { format: 'fmp4' });
+  assert.deepEqual(hlsConfig, core.buildHlsConfig(true, true));
+
+  // 停止追帧后两份配置都要反映"不自动追帧"。
+  const stopped = core.buildEngineConfig({ extreme: true, extremeTargetSeconds: 0.25, autoChaseEnabled: false }, { format: 'flv' });
+  assert.equal(stopped.liveBufferLatencyChasing, false);
+  assert.equal(stopped.liveSync, false);
+  const stoppedHls = core.buildEngineConfig({ extreme: true, autoChaseEnabled: false }, { format: 'fmp4' });
+  assert.equal(stoppedHls.maxLiveSyncPlaybackRate, 1);
+});
+
+test('适配层：hls.js 走热改，写进 hls.config 并读回校验', () => {
+  const config = { maxLiveSyncPlaybackRate: 1, liveMaxLatencyDurationCount: Number.MAX_SAFE_INTEGER };
+  const engine = createEngineDouble({ hotConfig: true });
+  const rebuild = createRebuildDouble({});
+
+  const outcome = core.applyEngineConfig({
+    engineKind: core.ENGINE_KINDS.HLS,
+    player: engine.player,
+    config: config,
+    rebuild: rebuild.rebuild,
+  });
+
+  assert.equal(outcome.ok, true, '能读回校验的引擎必须走热改');
+  assert.equal(outcome.action, core.ENGINE_APPLY_ACTIONS.HOT_APPLY);
+  assert.equal(outcome.reason, core.ENGINE_APPLY_REASONS.HOT_APPLIED);
+  assert.equal(outcome.report, true, '确认生效后才允许上报成功');
+  assert.deepEqual(engine.calls, ['set:maxLiveSyncPlaybackRate', 'set:liveMaxLatencyDurationCount'], '必须真的写了配置');
+  assert.deepEqual(rebuild.calls, [], '热改路径不得重建播放器');
+  assert.equal(engine.player.config.maxLiveSyncPlaybackRate, 1, '读回校验的对象就是引擎自己的 config');
+});
+
+test('适配层：热改读回不一致时判为失败（不得假装成功）', () => {
+  const target = { maxLiveSyncPlaybackRate: 1 };
+  const engine = createEngineDouble({ hotConfig: true, config: target, verify: 'reject' });
+  const outcome = core.applyEngineConfig({
+    engineKind: core.ENGINE_KINDS.HLS,
+    player: engine.player,
+    config: { maxLiveSyncPlaybackRate: 1.5 },
+    rebuild: null,
+  });
+
+  assert.equal(outcome.ok, false, '写入被接受但值没生效时不得声称成功');
+  assert.equal(outcome.reason, core.ENGINE_APPLY_REASONS.VERIFY_FAILED);
+  assert.equal(outcome.report, false, '未生效时不得上报成功');
+  assert.equal(target.maxLiveSyncPlaybackRate, 1, '替身确实没有落值（前提校验）');
+});
+
+test('适配层：热改写入抛异常时判为失败，有重建回调则降级为重建', () => {
+  const config = { maxLiveSyncPlaybackRate: 1.5 };
+  const throwing = createEngineDouble({ hotConfig: true, config: config, writeThrows: true });
+
+  // 没有重建回调：失败即失败。
+  const failed = core.applyEngineConfig({
+    engineKind: core.ENGINE_KINDS.HLS,
+    player: throwing.player,
+    config: config,
+    rebuild: null,
+  });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.reason, core.ENGINE_APPLY_REASONS.HOT_APPLY_THREW);
+  assert.equal(failed.report, false);
+
+  // 有重建回调：从"写入抛异常"降级为重建，并如实报告动作是重建。
+  const rebuilt = createEngineDouble({ hotConfig: true });
+  const rebuild = createRebuildDouble(rebuilt.player);
+  const recovered = core.applyEngineConfig({
+    engineKind: core.ENGINE_KINDS.HLS,
+    player: throwing.player,
+    config: config,
+    rebuild: rebuild.rebuild,
+  });
+  assert.equal(recovered.ok, true);
+  assert.equal(recovered.action, core.ENGINE_APPLY_ACTIONS.REBUILD);
+  assert.equal(recovered.reason, core.ENGINE_APPLY_REASONS.REBUILT);
+  assert.deepEqual(rebuild.calls, ['rebuild']);
+  assert.equal(rebuilt.player.config.maxLiveSyncPlaybackRate, undefined, '重建实例的配置由创建方负责（替身未写）');
+});
+
+test('适配层：mpegts.js 必须走受控重建（不得去改私有 _config）', () => {
+  const engine = createEngineDouble({ hotConfig: false });
+  const rebuilt = createEngineDouble({ hotConfig: false });
+  const rebuild = createRebuildDouble(rebuilt.player);
+  const snapshot = { sessionId: 7, pausedByUser: true, statusPhase: 'paused', targetMs: 200 };
+
+  const outcome = core.applyEngineConfig({
+    engineKind: core.ENGINE_KINDS.MPEGTS,
+    player: engine.player,
+    config: core.buildMpegtsConfig(true, 0.2, false),
+    rebuild: rebuild.rebuild,
+    snapshot: snapshot,
+  });
+
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.action, core.ENGINE_APPLY_ACTIONS.REBUILD);
+  assert.equal(outcome.reason, core.ENGINE_APPLY_REASONS.REBUILT);
+  assert.equal(outcome.player, rebuilt.player, '必须返回重建后的新实例');
+  assert.equal(outcome.snapshot, snapshot, '重建结果必须带上状态快照供调用方恢复');
+  assert.deepEqual(rebuild.calls, ['rebuild'], '只重建一次（不重复建实例、不重复上报）');
+  assert.equal(engine.calls.length, 0, '不支持热改的引擎不得被写任何配置');
+});
+
+test('适配层：没有重建回调时判为失败，且失败路径不产生上报', () => {
+  const engine = createEngineDouble({ hotConfig: false });
+  const outcome = core.applyEngineConfig({
+    engineKind: core.ENGINE_KINDS.MPEGTS,
+    player: engine.player,
+    config: core.buildMpegtsConfig(true, 0.25, true),
+    rebuild: null,
+  });
+
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.action, core.ENGINE_APPLY_ACTIONS.REBUILD);
+  assert.equal(outcome.reason, core.ENGINE_APPLY_REASONS.REBUILD_UNAVAILABLE);
+  assert.equal(outcome.report, false);
+});
+
+test('适配层：重建回调返回 null 时判为失败（保持原状态，不上报成功）', () => {
+  const engine = createEngineDouble({ hotConfig: false });
+  const rebuild = createRebuildDouble(null);
+  const outcome = core.applyEngineConfig({
+    engineKind: core.ENGINE_KINDS.MPEGTS,
+    player: engine.player,
+    config: core.buildMpegtsConfig(true, 0.25, true),
+    rebuild: rebuild.rebuild,
+  });
+
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.reason, core.ENGINE_APPLY_REASONS.REBUILD_FAILED);
+  assert.equal(outcome.player, null);
+  assert.equal(outcome.report, false);
+  assert.deepEqual(rebuild.calls, ['rebuild']);
+});
+
+test('适配层：性能相关的热改判定只看能力表，无 player 时不误报成功', () => {
+  const config = core.buildHlsConfig(true, true);
+  const outcome = core.applyEngineConfig({
+    engineKind: core.ENGINE_KINDS.HLS,
+    player: null,
+    config: config,
+    rebuild: null,
+  });
+
+  assert.equal(outcome.ok, false, '没有运行中的实例就不能声称配置已生效');
+  assert.equal(outcome.action, core.ENGINE_APPLY_ACTIONS.REBUILD);
+  assert.equal(outcome.reason, core.ENGINE_APPLY_REASONS.HOOK_MISSING);
+  assert.equal(outcome.report, false);
+});
+
+test('快照 / 恢复：重建保留候选、队列、会话号、暂停态、阶段、音量与档位', () => {
+  const run = {
+    currentCandidate: { url: 'http://127.0.0.1:5566/relay/token', sourceIndex: 3, format: 'flv' },
+    queue: [{ sourceIndex: 4 }, { sourceIndex: 5 }],
+    sessionId: 42,
+    extremeTargetMs: 200,
+    extremeTargetSeconds: 0.2,
+    mode: 'extreme',
+    extreme: true,
+    playbackStarted: true,
+    everPlayed: true,
+  };
+  const session = { pausedByUser: true, statusPhase: core.PLAYBACK_PHASES.PAUSED };
+  const snapshot = core.snapshotRuntimeState(run, session, { volumePercent: '65', positionSeconds: 12.5 });
+
+  assert.deepEqual(core.RUNTIME_STATE_KEYS.slice().sort(), [
+    'currentCandidate', 'extreme', 'mode', 'pausedByUser', 'positionSeconds', 'queue', 'sessionId', 'statusPhase', 'targetMs', 'volumePercent',
+  ]);
+  assert.equal(snapshot.sessionId, 42);
+  assert.equal(snapshot.pausedByUser, true);
+  assert.equal(snapshot.statusPhase, core.PLAYBACK_PHASES.PAUSED);
+  assert.equal(snapshot.volumePercent, 65, '音量百分比取夹取后的整数');
+  assert.equal(snapshot.positionSeconds, 12.5);
+  assert.equal(snapshot.targetMs, 200);
+  assert.equal(snapshot.queue.length, 2);
+  assert.notEqual(snapshot.queue, run.queue, '队列必须是副本，重建期间的改动不能污染快照');
+
+  // 模拟重建期间运行对象被改写：恢复后必须回到快照内容。
+  run.currentCandidate = null;
+  run.queue = [];
+  run.sessionId = 0;
+  run.extremeTargetMs = core.DEFAULT_EXTREME_TARGET_MS;
+  run.extremeTargetSeconds = 0.25;
+  run.mode = 'stable';
+  run.extreme = false;
+  session.pausedByUser = false;
+  session.statusPhase = core.PLAYBACK_PHASES.PLAYING;
+
+  core.restoreRuntimeState(run, session, snapshot);
+  assert.deepEqual(run.currentCandidate, snapshot.currentCandidate);
+  assert.deepEqual(run.queue, [{ sourceIndex: 4 }, { sourceIndex: 5 }]);
+  assert.equal(run.sessionId, 42, '重建不是新会话，会话号必须保持');
+  assert.equal(run.extremeTargetMs, 200);
+  assert.equal(run.extremeTargetSeconds, 0.2);
+  assert.equal(run.mode, 'extreme');
+  assert.equal(run.extreme, true);
+  assert.equal(session.pausedByUser, true, '重建不得把用户暂停悄悄取消');
+  assert.equal(session.statusPhase, core.PLAYBACK_PHASES.PAUSED, '重建期间状态行不得闪回播放中');
+  assert.equal(run.playbackStarted, true, '已出过画的事实不能被重建清掉');
+  assert.equal(run.everPlayed, true);
+});
+
+test('快照：会话态缺失时给出安全缺省（不产生 undefined 字段）', () => {
+  const snapshot = core.snapshotRuntimeState(null, null, null);
+  assert.equal(snapshot.currentCandidate, null);
+  assert.deepEqual(snapshot.queue, []);
+  assert.equal(snapshot.sessionId, 0);
+  assert.equal(snapshot.pausedByUser, false);
+  assert.equal(snapshot.statusPhase, core.PLAYBACK_PHASES.IDLE);
+  assert.equal(snapshot.volumePercent, 0);
+  assert.equal(snapshot.targetMs, core.DEFAULT_EXTREME_TARGET_MS);
+  assert.equal(snapshot.mode, 'stable');
+  assert.equal(snapshot.extreme, false);
+  assert.equal(snapshot.positionSeconds, 0);
+
+  // 恢复时快照非法也不能抛异常。
+  const run = { currentCandidate: null, queue: [] };
+  const session = {};
+  core.restoreRuntimeState(run, session, null);
+  assert.equal(run.currentCandidate, null);
+});
+
+test('页面薄调用层：只用适配层入口，成功后 setStatus / 上报，失败时上报失败并回滚', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+
+  assert.equal(
+    /player\.configure\(/.test(html),
+    false,
+    'SP-01：不得再出现"无能力检查就调用 configure"的裸调用');
+  assert.equal(html.includes('core.applyEngineConfig('), true, '配置应用必须走统一适配层');
+  assert.equal(html.includes('core.buildEngineConfig('), true, '配置推导必须走统一入口');
+  assert.equal(html.includes('core.engineKindForCandidate('), true, '引擎种类必须由候选格式推导');
+  assert.equal(html.includes('core.snapshotRuntimeState('), true, '重建前必须取状态快照');
+  assert.equal(html.includes('recreatePlayerWithConfig('), true, '不支持热改的引擎必须走受控重建');
+
+  const applyBody = extractFunctionBody(html, 'function applyPlayerTargetConfig(run, message, extras)');
+  assert.equal(applyBody.includes('!outcome.ok'), true, '必须按适配层结论分支');
+  assert.equal(applyBody.includes('outbound.WARNING'), true, '失败必须上报失败（warning），不得静默');
+  assert.equal(applyBody.includes('return false;'), true, '失败必须让调用方知道没生效，以便回滚');
+  assert.equal(
+    applyBody.indexOf('if (!outcome.ok)') < applyBody.indexOf('outbound.STATUS'),
+    true,
+    '成功上报必须只出现在"确认生效"之后');
+
+  // 停止追帧与换档位都必须先判定生效再改 UI / 上报。
+  const chaseBody = extractFunctionBody(html, 'function toggleChase()');
+  assert.equal(chaseBody.includes('if (!applyPlayerTargetConfig('), true, '停止追帧必须按生效结论分支');
+  assert.equal(chaseBody.includes('run.autoChaseEnabled = !enabling;'), true, '未生效时开关必须回滚');
+
+  const targetBody = extractFunctionBody(html, 'function handleTargetChange(payload)');
+  assert.equal(targetBody.includes('if (!applyPlayerTargetConfig('), true, '宿主换档位必须按生效结论分支');
+  assert.equal(targetBody.includes('core.applyExtremeTarget(run, previousTargetMs);'), true, '未生效时档位必须回滚');
+});
+
+test('换档位是"改配置"而不是"换地址"：候选地址与队列在换档位路径上不被改写', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+  const targetBody = extractFunctionBody(html, 'function handleTargetChange(payload)');
+  const changeBody = extractFunctionBody(html, 'elements.targetSelect.addEventListener');
+
+  for (const [name, body] of [['handleTargetChange', targetBody], ['onTargetChange', changeBody]]) {
+    assert.equal(body.includes('startCandidate'), false, name + ' 不得重新起播候选（换档位不改地址）');
+    assert.equal(body.includes('switchToNextCandidate'), false, name + ' 不得切换候选');
+    assert.equal(body.includes('requestFreshSources'), false, name + ' 不得请求重新解析');
+    assert.equal(body.includes('candidate-active'), false, name + ' 不得重发候选激活上报');
+  }
+
+  // 三个档位都只是配置值：换档位后仍应保持同一个候选对象（用纯函数证明档位不进 candidates）。
+  const run = { extreme: true, extremeTargetMs: 250, extremeTargetSeconds: 0.25 };
+  const candidate = { format: 'flv', url: 'http://127.0.0.1:5566/relay/token' };
+  assert.equal(core.applyExtremeTarget(run, 150), true);
+  assert.equal(run.extremeTargetMs, 150);
+  assert.equal(core.normalizeExtremeTargetSeconds(run.extremeTargetMs), 0.15);
+  // 0.15 + 0.27 是浮点相加，用容差比较（值本身由既有用例逐档锁住）。
+  assert.ok(
+    Math.abs(core.buildEngineConfig(run, candidate).liveBufferLatencyMaxLatency - 0.42) < 1e-9,
+    '150 ms 档的延迟阈值必须由新档位推导');
+  assert.equal(run.currentCandidate, undefined, '档位推导不得往运行对象里塞候选');
 });

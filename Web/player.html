@@ -447,6 +447,14 @@
       /** 宿主状态消息到期后回落刷新的定时余量（毫秒）：略晚于到期点，避免边界上重复刷新。 */
       const STATUS_FALLBACK_MARGIN_MS = 50;
 
+      /**
+       * 重建播放器后恢复播放位置的最小秒数。
+       *
+       * 小于它的位置（刚起播、缓冲几乎为空）不值得 seek：`currentTime` 的赋值会触发一次
+       * 额外的 seek 流程，而目标点附近的缓冲还没建立起来，反而多一次等待。
+       */
+      const REBUILD_POSITION_RESTORE_MIN_SECONDS = 0.5;
+
       /** 宿主消息通道：WebView2 的 chrome.webview。外部浏览器打开时为空。 */
       const hostChannel = (function createHostChannel() {
         if (window.chrome && window.chrome.webview) {
@@ -1690,29 +1698,149 @@
       }
 
       /**
-       * 把当前档位与追帧开关写进正在播放的播放器（mpegts.js / hls.js 都支持热改配置）。
+       * 恢复重建后的播放位置与音量，并接着播放（用户处于暂停态时保持暂停）。
        *
-       * 按当前候选的格式选配置：过去这里无条件写 mpegts 配置，
-       * 于是 HLS 会话上"改档位"会静默失败（hls.js 不认这些键），用户看到的是"档位改了但没生效"。
-       * 追帧开关走同一个入口，保证"停止追帧"与"改档位"用的是同一份配置推导。
-       * @param {object} run 运行对象（含 extreme / extremeTargetSeconds / autoChaseEnabled / currentCandidate）。
+       * 销毁播放器会把 `video` 的 `playbackRate` / `volume` 复位，重建必须把这些"用户侧状态"补回来，
+       * 否则"换档位"会顺带把音量或倍速改成默认值。
+       * @param {object} snapshot {@link core.snapshotRuntimeState} 的结果。
        */
-      function applyPlayerTargetConfig(run) {
-        const player = state.ownedPlayer;
-        if (!player || typeof player.configure !== 'function') {
+      function restoreMediaAfterRebuild(snapshot) {
+        elements.video.playbackRate = 1;
+        applyVolume(snapshot.volumePercent);
+        if (snapshot.positionSeconds > REBUILD_POSITION_RESTORE_MIN_SECONDS) {
+          try {
+            elements.video.currentTime = snapshot.positionSeconds;
+          } catch (error) {
+            logToHost(core.LOG_LEVELS.WARN, '重建后恢复播放位置失败：' + (error && error.message ? error.message : error));
+          }
+        }
+
+        if (state.pausedByUser) {
+          logToHost(core.LOG_LEVELS.INFO, '重建播放器时保持用户暂停状态');
           return;
         }
 
-        const autoChase = core.shouldAutoChase(run);
-        const candidate = run.currentCandidate;
-        const config = candidate && core.isHlsCandidate(candidate)
-          ? core.buildHlsConfig(run.extreme, autoChase)
-          : core.buildMpegtsConfig(run.extreme, run.extremeTargetSeconds, autoChase);
-        try {
-          player.configure(config);
-        } catch (error) {
-          logToHost(core.LOG_LEVELS.WARN, '应用追帧配置失败：' + (error && error.message ? error.message : error));
+        elements.video.play().catch(function onRebuildPlayFailed(error) {
+          logToHost(core.LOG_LEVELS.WARN, '重建后继续播放失败：' + (error && error.message ? error.message : error));
+        });
+      }
+
+      /**
+       * 生成一个按指定配置就绪的引擎实例（重建路径的"创建"一半）。
+       *
+       * 刻意**不**复用 `startCandidate`：那条路径会重置暂停态、重发 `candidate-active`、
+       * 重新走首帧判定，于是"换档位"会变成"重新开一次会话"（重复上报、状态行闪回）。
+       * 这里只做"销毁旧的 → 按新配置建新的 → 重新挂载并回到同一位置"。
+       * @param {object} snapshot 必须保留的状态快照。
+       * @param {object} config 目标配置。
+       * @returns {object|null} 新引擎实例；环境不支持或创建失败时返回 null。
+       */
+      function createEngineForRebuild(snapshot, config) {
+        const candidate = snapshot.currentCandidate;
+        const isHls = core.engineKindForCandidate(candidate) === core.ENGINE_KINDS.HLS;
+        if (isHls ? !canPlayHls() : !canPlayFlv()) {
+          logToHost(core.LOG_LEVELS.WARN, '当前环境不支持该线路的播放引擎，无法按新配置重建');
+          return null;
         }
+
+        const run = state.run;
+        let created;
+        try {
+          if (isHls) {
+            created = new window.Hls(config);
+            attachPlayerEvents(run, candidate, created, false);
+            created.loadSource(candidate.url);
+            created.attachMedia(elements.video);
+          } else {
+            created = window.mpegts.createPlayer(
+              { type: 'flv', isLive: true, url: candidate.url, hasAudio: true, hasVideo: true },
+              config);
+            attachPlayerEvents(run, candidate, created, true);
+            created.attachMediaElement(elements.video);
+            created.load();
+          }
+        } catch (error) {
+          logToHost(core.LOG_LEVELS.ERROR, '按新配置重建播放器失败：' + (error && error.message ? error.message : error));
+          return null;
+        }
+
+        return created;
+      }
+
+      /**
+       * 销毁旧实例并按新配置重建，随后把快照里的状态原样恢复。
+       * @param {object} snapshot 状态快照。
+       * @param {object} config 目标配置。
+       * @returns {object|null} 新引擎实例；失败返回 null。
+       */
+      function recreatePlayerWithConfig(snapshot, config) {
+        destroyPlayer();
+        const created = createEngineForRebuild(snapshot, config);
+        if (!created) {
+          return null;
+        }
+
+        state.ownedPlayer = created;
+        // 重建不是新会话：位置回到重建前的值，且不清 `playbackStarted`（否则会重复触发首帧逻辑并重复上报）。
+        if (state.run) {
+          state.run.lastPlaybackPosition = snapshot.positionSeconds;
+          state.run.lastPlaybackProgressAt = Date.now();
+        }
+
+        restoreMediaAfterRebuild(snapshot);
+        return created;
+      }
+
+      /**
+       * 把当前档位与追帧开关应用到正在播放的播放器，并**确认是否真的生效**。
+       *
+       * SP-01：过去这里直接调用引擎实例上的 `configure`（两家引擎都没有这个方法）就返回，于是
+       * "停止追帧 / 换档位"只改了页面字段与 UI 文案，引擎配置一个字没变。
+       * 现在一切交给 `core.applyEngineConfig`：
+       *  - hls.js 走热改（改 `hls.config.*` 并读回校验）；
+       *  - mpegts.js 走受控重建（保留候选 / 队列 / 会话号 / 暂停态 / 阶段 / 音量 / 档位）。
+       * 只有 `{ok:true}` 才允许调用方 `setStatus` 与上报成功；失败一律上报失败并保持原状态。
+       * @param {object} run 运行对象。
+       * @param {string} message 成功时的描述（如"停止自动追帧"）。
+       * @param {object} [extras] 上报附加字段。
+       * @returns {boolean} 生效返回 true；失败时已上报失败并保持原状态，返回 false。
+       */
+      function applyPlayerTargetConfig(run, message, extras) {
+        const snapshot = core.snapshotRuntimeState(run, state, {
+          volumePercent: elements.volume.value,
+          positionSeconds: elements.video.currentTime,
+        });
+        const config = core.buildEngineConfig(run, run.currentCandidate);
+        const outcome = core.applyEngineConfig({
+          engineKind: core.engineKindForCandidate(run.currentCandidate),
+          player: state.ownedPlayer,
+          config: config,
+          snapshot: snapshot,
+          rebuild: function rebuildWithConfig() {
+            return recreatePlayerWithConfig(snapshot, config);
+          },
+        });
+
+        if (!outcome.ok) {
+          const detail = '（原因：' + outcome.reason + '）';
+          logToHost(core.LOG_LEVELS.WARN, '应用追帧配置未生效：' + message + detail);
+          report(outbound.WARNING, '追帧配置未生效：' + message + detail, run, run.currentCandidate, {
+            reason: outcome.reason,
+            path: outcome.action,
+          });
+          // 保持原状态：状态行按当前会话阶段重画，档位与开关的文案由调用方回滚。
+          setStatus(core.resolvePlaybackStatusText(run, state));
+          return false;
+        }
+
+        logToHost(core.LOG_LEVELS.INFO, message
+          + (outcome.action === core.ENGINE_APPLY_ACTIONS.REBUILD ? '（已按新配置重建播放器）' : '（已热改播放器配置）'));
+        report(outbound.STATUS, message, run, run.currentCandidate, Object.assign({
+          autoChaseEnabled: core.shouldAutoChase(run),
+          extremeTargetMs: run.extremeTargetMs,
+          applyPath: outcome.action,
+        }, extras || {}));
+        return true;
       }
 
       /** 把当前追帧开关同步到合并按钮的文案与提示。 */
@@ -1741,7 +1869,16 @@
 
         const enabling = !core.shouldAutoChase(run);
         run.autoChaseEnabled = enabling;
-        applyPlayerTargetConfig(run);
+        const message = enabling
+          ? '已开启自动追帧（目标延迟 ' + run.extremeTargetMs + ' ms）'
+          : '已停止自动追帧（画面以正常倍速播放，不再自动拉回目标延迟）';
+        if (!applyPlayerTargetConfig(run, message, { autoChaseEnabled: enabling })) {
+          // 配置没生效：把开关回滚回原状态，UI 与上报都不得声称成功（SP-01）。
+          run.autoChaseEnabled = !enabling;
+          syncChaseButton();
+          return;
+        }
+
         if (enabling) {
           // 点「追帧」等价于"开启自动追帧 + 立刻追一次"，这里保留原来一次性追帧的效果。
           chaseToLiveEdge(core.CHASE_KEEP_DEFAULT_SECONDS);
@@ -1749,13 +1886,6 @@
 
         syncChaseButton();
         setStatus(core.resolvePlaybackStatusText(run, state));
-        const message = enabling
-          ? '已开启自动追帧（目标延迟 ' + run.extremeTargetMs + ' ms）'
-          : '已停止自动追帧（画面以正常倍速播放，不再自动拉回目标延迟）';
-        logToHost(core.LOG_LEVELS.INFO, message);
-        report(outbound.STATUS, message, run, run.currentCandidate, {
-          autoChaseEnabled: enabling,
-        });
       }
 
       /** 刷新"暂停播放 / 继续播放"按钮文案与画面状态提示。 */
@@ -2052,14 +2182,24 @@
           }
 
           const run = state.run;
+          const previousTargetMs = run ? run.extremeTargetMs : core.DEFAULT_EXTREME_TARGET_MS;
           let targetMs;
           if (run && applyExtremeTargetValue(run, milliseconds)) {
-            applyPlayerTargetConfig(run);
-            if (chaseToLiveEdge(core.CHASE_KEEP_DEFAULT_SECONDS)) {
-              report(outbound.STATUS, '追帧档位已切换为 ' + run.extremeTargetMs + ' ms', run, run.currentCandidate);
-            }
+            /*
+              换档位是**改配置**（不是换地址）：改的是目标延迟与随之推导的阈值，
+              候选地址不变。生效判定交给 applyPlayerTargetConfig，失败时把档位回滚。
+            */
+            const message = '追帧档位已切换为 ' + run.extremeTargetMs + ' ms';
+            if (applyPlayerTargetConfig(run, message, { extremeTargetMs: run.extremeTargetMs })) {
+              if (chaseToLiveEdge(core.CHASE_KEEP_DEFAULT_SECONDS)) {
+                report(outbound.STATUS, message, run, run.currentCandidate);
+              }
 
-            targetMs = run.extremeTargetMs;
+              targetMs = run.extremeTargetMs;
+            } else {
+              core.applyExtremeTarget(run, previousTargetMs);
+              targetMs = run.extremeTargetMs;
+            }
           }
           else {
             // 空闲（未开始播放）或档位没变：没有可热切换的运行对象，只记下页面档位值。
@@ -2120,17 +2260,33 @@
         elements.qualitySelect.title = canSwitch ? '切换画质档位' : '当前房间只有这一个档位';
       }
 
-      /** 追帧档位热切换（宿主下发 target 消息时调用，不重连）。 */
+      /**
+       * 追帧档位切换（宿主下发 target 消息时调用，不重连、不换地址）。
+       *
+       * 档位语义是**改配置**：目标是"把目标延迟与随之推导的阈值改成新档位"，
+       * 候选地址、队列与中继都不变（换地址是另一条路径）。生效判定与失败回滚同 `toggleChase`。
+       * @param {object} payload 宿主下发的 target 消息（`extremeTargetMs`）。
+       */
       function handleTargetChange(payload) {
         const run = state.run;
-        if (!run || !applyExtremeTargetValue(run, Number(payload.extremeTargetMs))) {
-          state.targetMs = core.normalizeExtremeTargetSeconds(payload.extremeTargetMs) * 1000;
+        const previousTargetMs = run ? run.extremeTargetMs : core.DEFAULT_EXTREME_TARGET_MS;
+        const applied = Boolean(run) && applyExtremeTargetValue(run, Number(payload.extremeTargetMs));
+        if (!applied) {
+          // 空闲或档位没变：只记下档位，UI 与状态行保持原样。
+          state.targetMs = run ? run.extremeTargetMs : core.normalizeExtremeTargetSeconds(payload.extremeTargetMs) * 1000;
           syncTargetSelect();
           return;
         }
 
-        applyPlayerTargetConfig(run);
+        const message = '追帧档位已切换为 ' + run.extremeTargetMs + ' ms';
+        if (!applyPlayerTargetConfig(run, message, { extremeTargetMs: run.extremeTargetMs })) {
+          // 没生效：档位回滚，宿主下发的档位不写进页面状态（避免"显示新档位、实际跑旧档位"）。
+          core.applyExtremeTarget(run, previousTargetMs);
+        }
+
         syncTargetSelect();
+        syncChaseButton();
+        setStatus(core.resolvePlaybackStatusText(run, state));
         if (chaseToLiveEdge(core.CHASE_KEEP_DEFAULT_SECONDS)) {
           report(outbound.STATUS, '追帧档位已切换为 ' + run.extremeTargetMs + ' ms', run, run.currentCandidate);
         }

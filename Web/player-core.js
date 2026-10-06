@@ -282,6 +282,122 @@ const CHASE_DISABLED_MAX_LATENCY_COUNT = Number.MAX_SAFE_INTEGER;
 const CHASE_DISABLED_PLAYBACK_RATE = 1;
 
 /*
+ * 追帧配置的"引擎适配层"。
+ *
+ * 为什么需要它（SP-01 的根因）：播放页过去把「停止追帧 / 换档位」实现成裸调用 `player.configure(config)`，
+ * 而**两家引擎的实例上都没有这个方法**（依据见下面的 ENGINE_CAPABILITIES 注释）：
+ * 于是 autoChaseEnabled 与 extremeTargetMs 确实被改掉了、状态行与宿主上报也说"成功"，
+ * 但 mpegts.js / hls.js 的运行时配置一个字都没变——"显示成功、实际没生效"。
+ *
+ * 现在的规则：
+ *  1. 先看引擎能力：只有声明了 `hotConfig` 的引擎才允许走热改（改后必须读回校验）；
+ *  2. 不支持热改（或不支持可靠读回）时走**受控重建**：保留候选、队列、会话号、暂停态、阶段、
+ *     音量与追帧档位（见 {@link snapshotRuntimeState} / {@link restoreRuntimeState}），
+ *     销毁旧实例后按新配置重建；
+ *  3. 只有确认生效（`{ok: true}`）才允许调用方 `setStatus` 并上报宿主；
+ *     失败一律上报失败并保持原状态（`{ok: false}`）。
+ */
+
+/** 播放引擎种类。 */
+const ENGINE_KINDS = Object.freeze({
+  /** mpegts.js（HTTP-FLV）。 */
+  MPEGTS: 'mpegts',
+  /** hls.js（HLS）。 */
+  HLS: 'hls',
+});
+
+/*
+ * 逐引擎的配置入口能力（**依据来自两份库内代码，不是猜测**）：
+ *
+ * mpegts.js（Web/mpegts.js，1.8.2，全文 0 次 `configure`）：
+ *   - MSEPlayer 构造时创建 `_live_latency_chaser`（内部类，构造参数是 `this._config`），
+ *     其 `_chaseLiveLatency()` **在运行期**读 `_config.liveBufferLatencyChasing` /
+ *     `liveBufferLatencyMaxLatency` / `liveBufferLatencyMinRemain`；
+ *     LiveSync 的 `_onMediaTimeUpdate` 同样在运行期读 `_config.liveSyncMaxLatency` /
+ *     `liveSyncPlaybackRate`——所以"关闭"这一半改配置是有效的。
+ *   - 但 `_live_latency_chaser` / `_live_sync_controller` **只在构造时按 `_config` 决定是否创建**，
+ *     所以"从关闭改回开启"改配置无效；`enableStashBuffer` / `stashInitialSize` 等 MSE 侧选项同理。
+ *   - 结论：mpegts.js 没有覆盖两个方向的运行时配置入口 → 走受控重建。
+ *
+ * hls.js（Web/hls.js，1.6.16，全文 1 个 `configure`，且只属于 Transmuxer；
+ *   Hls 实例原型上**没有** configure）：
+ *   - `Hls` 构造里 `this.config = mergeConfig(Hls.DefaultConfig, userConfig)`，
+ *     各控制器（含 LatencyController）构造时保存 `this.config = hls.config` 这个**同一对象引用**，
+ *     运行期逐次读取 `config.maxLiveSyncPlaybackRate` / `liveMaxLatencyDurationCount` /
+ *     `maxBufferLength` 等。
+ *   - 结论：改 `hls.config.*` 会真实生效，且可以立刻读回校验 → 走热改。
+ *
+ * 两家都不提供"官方热改 API"，所以热改路径必须**读回校验**（见 {@link verifyConfigApplied}）：
+ * 读不回或值不符时降级为重建，绝不假装成功。
+ */
+const ENGINE_CAPABILITIES = Object.freeze({
+  /** mpegts.js：没有覆盖两个方向的运行时配置入口，必须重建。 */
+  [ENGINE_KINDS.MPEGTS]: Object.freeze({ hotConfig: false, rebuild: true }),
+  /** hls.js：`hls.config.*` 在运行期被共享读取，可直接热改并读回校验。 */
+  [ENGINE_KINDS.HLS]: Object.freeze({ hotConfig: true, rebuild: true }),
+});
+
+/** 适配层动作。 */
+const ENGINE_APPLY_ACTIONS = Object.freeze({
+  /** 直接改运行中实例的配置（改后读回校验）。 */
+  HOT_APPLY: 'hot-apply',
+  /** 销毁旧实例、按新配置重建并重新挂载。 */
+  REBUILD: 'rebuild',
+});
+
+/** 适配层结论原因（供调用方决定文案与上报）。 */
+const ENGINE_APPLY_REASONS = Object.freeze({
+  /** 热改成功且读回校验通过。 */
+  HOT_APPLIED: 'hot-applied',
+  /** 只能热改、但运行中的实例缺可写配置对象。 */
+  HOOK_MISSING: 'hook-missing',
+  /** 重建成功。 */
+  REBUILT: 'rebuilt',
+  /** 引擎不支持热改且没有可用的重建回调。 */
+  REBUILD_UNAVAILABLE: 'rebuild-unavailable',
+  /** 重建回调未返回实例（创建失败，回调内已记日志）。 */
+  REBUILD_FAILED: 'rebuild-failed',
+  /** 热改调用抛出。 */
+  HOT_APPLY_THREW: 'hot-apply-threw',
+  /** 热改读回校验不通过（值未生效或读不回来）。 */
+  VERIFY_FAILED: 'verify-failed',
+});
+
+/** 重建时必须跨越"销毁 / 创建"保留的字段（见 {@link snapshotRuntimeState}）。 */
+const RUNTIME_STATE_KEYS = Object.freeze([
+  /** 当前候选：重建后仍挂同一条地址。 */
+  'currentCandidate',
+  /** 候选队列：不能因为重建丢掉后面的线路。 */
+  'queue',
+  /** 会话号：重建不是新会话，宿主侧不能看到第二个会话。 */
+  'sessionId',
+  /** 用户是否主动暂停：重建不得把暂停变成播放。 */
+  'pausedByUser',
+  /** 状态行阶段：重建期间不得闪回"播放中"。 */
+  'statusPhase',
+  /** 音量百分比：由调用方写进快照（销毁后 `video.volume` 会被重置）。 */
+  'volumePercent',
+  /** 追帧档位（毫秒）。 */
+  'targetMs',
+  /** 模式（extreme / stable）：重建后状态行文案不得变样。 */
+  'mode',
+  /** 是否极限档（`mode` 的布尔镜像）。 */
+  'extreme',
+  /** 重建前的播放位置（秒）：回到同一位置，避免"跳回起播点"。 */
+  'positionSeconds',
+]);
+
+/**
+ * 判断某个引擎是否支持在运行期直接改配置（能力表判定入口）。
+ * @param {string} engineKind 引擎种类（{@link ENGINE_KINDS}）。
+ * @returns {boolean} 支持热改返回 true。
+ */
+function canHotApplyEngineConfig(engineKind) {
+  const capability = ENGINE_CAPABILITIES[engineKind];
+  return Boolean(capability && capability.hotConfig === true);
+}
+
+/*
  * 宿主状态消息（`host-status`）在画面下方状态行上的保留时长。
  *
  * 为什么需要"保留"：状态行同时要显示页面自己的播放状态（"播放中（稳定缓冲）"），
@@ -1077,6 +1193,257 @@ function applyExtremeTarget(run, extremeTargetMs) {
 }
 
 /**
+ * 计算某个候选对应的播放引擎。
+ * @param {{format?:string}} candidate 候选。
+ * @returns {string} {@link ENGINE_KINDS} 之一。
+ */
+function engineKindForCandidate(candidate) {
+  return isHlsCandidate(candidate) ? ENGINE_KINDS.HLS : ENGINE_KINDS.MPEGTS;
+}
+
+/**
+ * 按候选与追帧档位推导该引擎的运行时配置（热改与重建共用同一份推导）。
+ *
+ * 这是"页面只做一次推导"的落点：hls.js 配置从 `buildHlsConfig` 来，mpegts.js 配置从
+ * `buildMpegtsConfig` 来，页面的薄调用层不再自己挑函数（过去挑错了就会"改了但没生效"）。
+ * @param {object} run 运行对象（含 extreme / extremeTargetSeconds / autoChaseEnabled）。
+ * @param {{format?:string}} candidate 当前候选。
+ * @returns {object} 引擎配置对象。
+ */
+function buildEngineConfig(run, candidate) {
+  const autoChase = shouldAutoChase(run);
+  if (engineKindForCandidate(candidate) === ENGINE_KINDS.HLS) {
+    return buildHlsConfig(Boolean(run && run.extreme), autoChase);
+  }
+
+  return buildMpegtsConfig(Boolean(run && run.extreme), run ? run.extremeTargetSeconds : undefined, autoChase);
+}
+
+/**
+ * 取出重建时必须保留的运行时状态快照。
+ *
+ * 只拷贝 {@link RUNTIME_STATE_KEYS} 里的字段：重建不是新会话，候选 / 队列 / 会话号 /
+ * 暂停态 / 状态阶段 / 音量 / 追帧档位都不能因为"销毁再创建"而丢失或复位
+ * （丢失队列会让"换档位"顺带把后面的线路全扔掉，复位暂停态会让用户按下的暂停被悄悄取消）。
+ * @param {object} run 运行对象。
+ * @param {{pausedByUser?:boolean,statusPhase?:string}|null} session 页面会话态。
+ * @param {{volumePercent?:number,positionSeconds?:number}} [media] 媒体侧补充值（音量 / 播放位置）。
+ * @returns {object} 快照对象。
+ */
+function snapshotRuntimeState(run, session, media) {
+  const extra = media && typeof media === 'object' ? media : {};
+  return {
+    currentCandidate: run ? run.currentCandidate : null,
+    queue: run && Array.isArray(run.queue) ? run.queue.slice() : [],
+    sessionId: run ? run.sessionId : 0,
+    pausedByUser: Boolean(session && session.pausedByUser === true),
+    statusPhase: session && typeof session.statusPhase === 'string' ? session.statusPhase : PLAYBACK_PHASES.IDLE,
+    volumePercent: clampVolumePercent(extra.volumePercent),
+    targetMs: run && Number.isFinite(run.extremeTargetMs) ? run.extremeTargetMs : DEFAULT_EXTREME_TARGET_MS,
+    mode: run && run.mode === 'extreme' ? 'extreme' : 'stable',
+    extreme: Boolean(run && run.extreme === true),
+    positionSeconds: Number.isFinite(Number(extra.positionSeconds)) ? Number(extra.positionSeconds) : 0,
+  };
+}
+
+/**
+ * 把快照写回运行对象与页面会话态（重建后的"恢复原状"入口）。
+ *
+ * 注意：**不**改 `run.playbackStarted` / `run.everPlayed`——重建前已经出过画，
+ * 清掉它们会让首帧超时判定与空态提示一起走错分支（表现为"重建后提示又弹回等待直播源"）。
+ * @param {object} run 运行对象。
+ * @param {object} session 页面会话态。
+ * @param {object} snapshot {@link snapshotRuntimeState} 的结果。
+ * @returns {void}
+ */
+function restoreRuntimeState(run, session, snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') {
+    return;
+  }
+
+  if (run) {
+    run.currentCandidate = snapshot.currentCandidate;
+    run.queue = Array.isArray(snapshot.queue) ? snapshot.queue.slice() : [];
+    run.sessionId = snapshot.sessionId;
+    run.extremeTargetMs = snapshot.targetMs;
+    run.extremeTargetSeconds = snapshot.targetMs / 1000;
+    run.mode = snapshot.mode;
+    run.extreme = snapshot.extreme;
+  }
+
+  if (session) {
+    session.pausedByUser = snapshot.pausedByUser;
+    session.statusPhase = snapshot.statusPhase;
+  }
+}
+
+/**
+ * 读取引擎当前生效的配置对象（热改与读回校验的唯一入口）。
+ * @param {object} player 引擎实例。
+ * @returns {object|null} 可写配置对象；该引擎没有运行期配置入口时返回 null。
+ */
+function readEngineConfig(player) {
+  if (!player || typeof player !== 'object') {
+    return null;
+  }
+
+  // hls.js：构造里把 `this.config` 指向合并后的配置对象，各控制器共享同一引用。
+  if (player.config && typeof player.config === 'object') {
+    return player.config;
+  }
+
+  // mpegts.js：库内一律读 `_config`（私有名，只用于读回校验，见能力表注释）。
+  if (player._config && typeof player._config === 'object') {
+    return player._config;
+  }
+
+  return null;
+}
+
+/**
+ * 把配置写进引擎当前生效的配置对象。
+ * @param {object} target 配置对象（{@link readEngineConfig} 的结果）。
+ * @param {object} config 目标配置。
+ * @returns {void}
+ */
+function writeEngineConfig(target, config) {
+  for (const [key, value] of Object.entries(config)) {
+    target[key] = value;
+  }
+}
+
+/**
+ * 读回校验：逐键比较引擎当前配置与目标配置。
+ * @param {object} player 引擎实例。
+ * @param {object} config 目标配置。
+ * @returns {boolean} 每个键都读得回且相等返回 true；读不回或有不一致返回 false。
+ */
+function verifyConfigApplied(player, config) {
+  const current = readEngineConfig(player);
+  if (!current) {
+    return false;
+  }
+
+  for (const [key, value] of Object.entries(config)) {
+    if (current[key] !== value) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * 按引擎能力应用一份追帧配置：能热改就热改并读回校验，否则走受控重建。
+ *
+ * 返回值的 `ok` 是**唯一**允许触发"成功"文案与上报的依据：只有它才代表配置真的生效了
+ * （热改读回一致，或重建拿到了新实例）。`report` 字段预留一个布尔位，方便调用方与替身断言
+ * "成功/失败各自只上报一次"。
+ * @param {object} options 适配参数。
+ * @param {string} options.engineKind 引擎种类（{@link ENGINE_KINDS}）。
+ * @param {object|null} options.player 运行中的引擎实例（无会话时为 null）。
+ * @param {object} options.config 目标配置（{@link buildEngineConfig} 的结果）。
+ * @param {Function|null} [options.rebuild] 受控重建回调：`() => player|null`。
+ * @param {object} [options.snapshot] 重建前必须保留的状态快照。
+ * @returns {{ok:boolean,action:string,reason:string,report:boolean,player:object|null,config:object,snapshot:object|null}} 结论。
+ */
+function applyEngineConfig(options) {
+  const settings = options && typeof options === 'object' ? options : {};
+  const config = settings.config && typeof settings.config === 'object' ? settings.config : {};
+  const snapshot = settings.snapshot && typeof settings.snapshot === 'object' ? settings.snapshot : null;
+  const capability = ENGINE_CAPABILITIES[settings.engineKind];
+
+  // 热改是否可用：只有声明了 hotConfig、且运行中的实例有可写配置对象时才是 true。
+  // 任一条件不满足就落到下面的受控重建：过去这里直接 return 失败，等于"能重建也没试"。
+  const hotConfigPath = capability
+    && capability.hotConfig === true
+    && readEngineConfig(settings.player) !== null;
+
+  if (hotConfigPath) {
+    const hook = readEngineConfig(settings.player);
+    try {
+      writeEngineConfig(hook, config);
+    } catch (error) {
+      // 写入抛出：降级为重建（下面统一处理），并把原因留给调用方日志。
+      return rebuildEngineConfig(settings, config, snapshot, ENGINE_APPLY_REASONS.HOT_APPLY_THREW);
+    }
+
+    if (verifyConfigApplied(settings.player, config)) {
+      return {
+        ok: true,
+        action: ENGINE_APPLY_ACTIONS.HOT_APPLY,
+        reason: ENGINE_APPLY_REASONS.HOT_APPLIED,
+        report: true,
+        player: settings.player,
+        config: config,
+        snapshot: snapshot,
+      };
+    }
+
+    // 写入没抛异常但值没生效：同样降级为重建，绝不假装成功。
+    return rebuildEngineConfig(settings, config, snapshot, ENGINE_APPLY_REASONS.VERIFY_FAILED);
+  }
+
+  if (capability && capability.hotConfig === true) {
+    // 只支持热改的引擎却缺运行中配置对象：没有可重建的余地。
+    return rebuildEngineConfig(settings, config, snapshot, ENGINE_APPLY_REASONS.HOOK_MISSING);
+  }
+
+  return rebuildEngineConfig(settings, config, snapshot, ENGINE_APPLY_REASONS.REBUILD_UNAVAILABLE);
+}
+
+/**
+ * 走**受控重建**路径：没有重建回调时如实返回失败原因。
+ *
+ * 失败的"原因"按降级来源区分（热改抛异常 / 读回校验不通过 / 没有重建回调），
+ * 但如果引擎支持重建且回调可用，就一律重建——这条"能重建就重建"的规则是 SP-01 的关键：
+ * 两家引擎都没有官方热改 API，重建是唯一保证配置真的生效的手段。
+ * @param {object} settings {@link applyEngineConfig} 的入参。
+ * @param {object} config 目标配置。
+ * @param {object|null} snapshot 状态快照。
+ * @param {string} fallbackReason 无法重建时报告的原因。
+ * @returns {object} 适配层结论。
+ */
+function rebuildEngineConfig(settings, config, snapshot, fallbackReason) {
+  const capability = ENGINE_CAPABILITIES[settings.engineKind];
+  const canRebuild = typeof settings.rebuild === 'function' && Boolean(capability && capability.rebuild);
+  if (!canRebuild) {
+    return {
+      ok: false,
+      action: ENGINE_APPLY_ACTIONS.REBUILD,
+      reason: fallbackReason,
+      report: false,
+      player: null,
+      config: config,
+      snapshot: snapshot,
+    };
+  }
+
+  const rebuilt = settings.rebuild();
+  if (!rebuilt) {
+    return {
+      ok: false,
+      action: ENGINE_APPLY_ACTIONS.REBUILD,
+      reason: ENGINE_APPLY_REASONS.REBUILD_FAILED,
+      report: false,
+      player: null,
+      config: config,
+      snapshot: snapshot,
+    };
+  }
+
+  return {
+    ok: true,
+    action: ENGINE_APPLY_ACTIONS.REBUILD,
+    reason: ENGINE_APPLY_REASONS.REBUILT,
+    report: true,
+    player: rebuilt,
+    config: config,
+    snapshot: snapshot,
+  };
+}
+
+/**
  * 判断是否应当对候选发起探测。
  *
  * 探测本身与参考播放页逐条一致（探测请求只取到响应头就 abort，不读响应体），
@@ -1219,6 +1586,11 @@ const StreamPilotPlayerCore = {
   STATUS_PARENTHESIS_CLOSE,
   CHASE_BUTTON_LABELS,
   CHASE_STATUS_LABELS,
+  ENGINE_KINDS,
+  ENGINE_CAPABILITIES,
+  ENGINE_APPLY_ACTIONS,
+  ENGINE_APPLY_REASONS,
+  RUNTIME_STATE_KEYS,
   HOST_STATUS_HOLD_INFO_MS,
   HOST_STATUS_HOLD_WARN_MS,
   HOST_STATUS_HOLD_ERROR_MS,
@@ -1264,6 +1636,14 @@ const StreamPilotPlayerCore = {
   buildPlaybackPlan,
   normalizeQualities,
   applyExtremeTarget,
+  canHotApplyEngineConfig,
+  engineKindForCandidate,
+  buildEngineConfig,
+  snapshotRuntimeState,
+  restoreRuntimeState,
+  readEngineConfig,
+  verifyConfigApplied,
+  applyEngineConfig,
   isHttpStatusInvalid,
   isMseError,
   isHevcUnsupportedDescription,

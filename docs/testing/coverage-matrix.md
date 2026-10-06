@@ -21,10 +21,10 @@
 | 阶段 | 结果 |
 |------|------|
 | `dotnet build StreamPilot.slnx`（Debug 与 Release） | 0 警告 / 0 错误（`TreatWarningsAsErrors=true`） |
-| C# 单元测试 | **157 / 157 通过** |
-| 播放策略前端测试 | **53 / 53 通过** |
+| C# 单元测试 | **173 / 173 通过** |
+| 播放策略前端测试 | **71 / 71 通过** |
 | 静态红线自检 | 通过 |
-| 离线结构分析 | 108 文件 / 24717 行 / 165 类型 / 809 方法，无结构性问题 |
+| 离线结构分析 | 114 文件 / 27099 行 / 181 类型 / 907 方法，无结构性问题 |
 
 > 离线结构分析的定位：在没有 SDK 的环境里提供可复现的前置检查（括号配对、命名空间规则、重复类型、空 catch、CS1998、未引用私有字段、方法行数、XML 注释 `--`）。
 > 上表数字都是**当次运行输出**（用例数与文件 / 行 / 类型 / 方法数都会随批次合入变化），核对时以当前工作树的实际运行结果为准。
@@ -64,7 +64,7 @@
 | `Recording.Flv.FlvSegmentWriter` | 文件头字节、载荷逐字节一致、时间戳重定基、序列头重放、分片元数据、释放后拒绝写入 | `FlvSegmentWriterTests`（6 个） |
 | `Recording.Hls.HlsPlaylistParser` / `TsStreamRecorder.AlignToPacketBoundary` | media/master 播放列表、ENDLIST、空内容、TS 整包对齐、前导垃圾、不足一包 | `HlsPlaylistTests`（7 个） |
 | `Bridge.LoopbackOnlyGuard` / `RelayRegistry` / `BridgeHost` | 回环前缀校验、通配拒绝、端口越界、注册/解析/释放、未知令牌、容量上限、按地址释放、未启动时注册失败、**中继上游请求必须携带 User-Agent（缺 UA 时 B站 CDN 回 403，见 [ADR 0006](../adr/0006-relay-upstream-headers.md)）** | `BridgeTests`（9 个） |
-| `Web.player-core`（播放策略） | 见 `docs/architecture/playback-strategy.md` 第 7 节 | `player-core.test.js`（53 个，含画质/档位/暂停/缓冲失控/状态行优先级与分段/**状态行实际延迟与括号形态**/**追帧开关（追帧 / 停止追帧）**/**档位上报契约（TARGET 不为 undefined，空闲与播放中两个分支都上报）**/**控制条抗重叠约束**） |
+| `Web.player-core`（播放策略） | 见 `docs/architecture/playback-strategy.md` 第 7 节 | `player-core.test.js`（71 个，含画质/档位/暂停/缓冲失控/状态行优先级与分段/**状态行实际延迟与括号形态**/**追帧开关（追帧 / 停止追帧）**/**档位上报契约（TARGET 不为 undefined，空闲与播放中两个分支都上报）**/**引擎配置热改与受控重建（能力替身注入）**/**控制条抗重叠约束**） |
 | `App.Services.PlatformDetector`（纯函数） | 六个平台各自的直播间链接与分享短链识别（`v.douyin.com` / `b23.tv` 等）、分享文案里夹带链接、大小写混合、无 scheme 的裸域名、纯房间号与空输入返回 `null`、`DetectOrFallback` 回退给定平台、相似域名（`myy.com`/`huya.com.evil.example`）不误判、六个平台都带可识别域名 | `PlatformDetectionTests`（7 个） |
 | `App.Services.PresetStore` / `RoomPreset` | **平台字段写盘与读回（六个平台各自保留）**、同名跨平台共存与同平台同名覆盖、**按完整身份（平台 + 名称）删除：同名跨平台不误删、房间号不参与身份、空白名称不匹配任何预设**、空白名称/房间号拒绝、超长名称截断、超过 `MaxPresets` 淘汰最旧、损坏文件回退空列表并记 Warn、旧文件缺 `platform` 读为 `Unknown`、文件不存在为空列表 | `PresetStoreTests`（10 个） |
 
