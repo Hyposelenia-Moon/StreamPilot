@@ -172,7 +172,18 @@ public sealed class FlvSegmentWriter : IAsyncDisposable
     }
 
     /// <inheritdoc />
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync() => DisposeAsync(CancellationToken.None);
+
+    /// <summary>
+    /// 释放写入器；令牌只用于约束最后一次 flush 的等待时长。
+    /// </summary>
+    /// <param name="cancellationToken">约束收尾 flush 的令牌；取消时仍会关闭文件句柄。</param>
+    /// <returns>异步释放任务。</returns>
+    /// <remarks>
+    /// 句柄释放是必达的：flush 被取消或失败只记日志，随后依旧调用
+    /// <see cref="FileStream.DisposeAsync"/>，因此产物不会被锁住（SP-03 同族）。
+    /// </remarks>
+    public async ValueTask DisposeAsync(CancellationToken cancellationToken)
     {
         if (_disposed)
         {
@@ -182,7 +193,14 @@ public sealed class FlvSegmentWriter : IAsyncDisposable
         _disposed = true;
         try
         {
-            await _fileStream.FlushAsync().ConfigureAwait(false);
+            await _fileStream.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException exception)
+        {
+            _logger.LogError(LogLevel.Warn, _moduleName, "分片收尾刷新超时，已直接关闭文件。", exception, new Dictionary<string, object?>
+            {
+                ["file"] = Path.GetFileName(FilePath),
+            });
         }
         catch (IOException exception)
         {

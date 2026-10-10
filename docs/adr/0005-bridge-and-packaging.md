@@ -4,6 +4,23 @@
 - 日期：2025-02-14
 - 相关文档：`0001-technology-stack.md`、`0004-raw-recording.md`
 
+> ## ⚠ 更正（2026-10-10）
+>
+> 本 ADR 第 2 节「端点设计」中的三处描述已随
+> [ADR 0007 中继攻击面与超时分层、引擎热改适配](0007-relay-attack-surface-and-timeouts.md)
+> 变更，**原描述不再成立**（历史原文保留不动，便于追溯当时的取舍）：
+>
+> 1. `GET /relay/register`（POST body 注册）**不存在**：HTTP 侧没有任何注册入口，
+>    注册只能进程内发起；`GET /relay/{token}` 之外（含非 `GET`）的 `/relay` 请求一律 404。
+> 2. 响应头**不是** `Access-Control-Allow-Origin: *`：实际固定回播放页来源
+>    `https://appassets.local` 并带 `Vary: Origin`；`OPTIONS` 也只对**已知路由**
+>    （`/relay/**`、`/play`、`/health`）返回 204 + CORS，未知路径一律 404。
+> 3. `GET /web/*` 静态回退**从未实现**：播放页一律走 WebView2 虚拟主机映射
+>    （`https://appassets.local/player.html`），桥接不提供静态资源。
+>
+> 本节其余条目（端口选择与 `LoopbackOnlyGuard`、中继 token 规则、处理器 try/catch 约定、
+> PNA 只在声明的预检响应上返回）仍与实现一致。
+
 ## 背景
 
 需求与规范要求：

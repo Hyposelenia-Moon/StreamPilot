@@ -31,6 +31,7 @@ public sealed class RecordingSession : IRecordingSession
     private Task _worker = Task.CompletedTask;
     private RecordingStatus _status;
     private RecordingStopReason _stopReason;
+    private bool _stopRequested;
     private bool _disposed;
 
     private RecordingSession(
@@ -117,7 +118,14 @@ public sealed class RecordingSession : IRecordingSession
     public async Task StopAsync(RecordingStopReason reason, CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        _stopReason = reason;
+        if (_status.IsRecording)
+        {
+            // 尊重调用方传入的停止原因：录制器只能看到"令牌被取消"，无法区分用户停止 / 宿主停止 /
+            // 主播下播，调用方给的原因更准确。传 None（"未指定"）时按用户主动停止处理，保持既有默认行为。
+            _stopReason = reason == RecordingStopReason.None ? RecordingStopReason.UserStopped : reason;
+            _stopRequested = true;
+        }
+
         await _cancellation.CancelAsync().ConfigureAwait(false);
         try
         {
@@ -280,6 +288,18 @@ public sealed class RecordingSession : IRecordingSession
             });
             _stopReason = RecordingStopReason.Failed;
         }
+        catch (Exception exception)
+        {
+            // 意外失败（非取消、非录制异常，例如候选地址解析失败）同样必须走收尾：
+            // 旧实现只捕 OCE / RecordingException，异常会从 worker 漏到 StopAsync / DisposeAsync，
+            // 而 sidecar 已被 finally 写成 stopReason=None（读起来像"从未停止过"）。
+            _logger.LogError(LogLevel.Error, _moduleName, "录制会话异常结束。", exception, new Dictionary<string, object?>
+            {
+                ["roomId"] = _request.Room.RoomId,
+                ["exceptionType"] = exception.GetType().Name,
+            });
+            _stopReason = RecordingStopReason.Failed;
+        }
         finally
         {
             // 录制器的必达收尾（关闭末分片 + 登记元数据）已在等待其返回时完成，
@@ -352,7 +372,11 @@ public sealed class RecordingSession : IRecordingSession
 
     private void ApplyResult(FlvRecordingResult result)
     {
-        _stopReason = result.StopReason;
+        // 调用方显式停止过（StopAsync(reason)）时以它为准：录制器只知道"令牌被取消"，
+        // 一律把它归一成 UserStopped，会把调用方给出的原因（例如宿主判定的流结束）覆盖掉。
+        _stopReason = _stopRequested && result.StopReason == RecordingStopReason.UserStopped
+            ? _stopReason
+            : result.StopReason;
         _status = BuildStatus(
             _request.Room,
             isRecording: false,

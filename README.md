@@ -19,8 +19,8 @@ Windows 桌面直播工具：**多平台低延迟播放 + 直播回放录制 + m
 
 ## 2. 安装
 
-1. 解压 `StreamPilot-windows-v0.1.0.zip`，得到同名文件夹；
-2. 双击文件夹内的 `StreamPilot-windows-v0.1.0.exe`；
+1. 解压 `StreamPilot-windows-v0.2.0.zip`，得到同名文件夹；
+2. 双击文件夹内的 `StreamPilot-windows-v0.2.0.exe`；
 3. 首次启动若提示缺少 **WebView2 运行时**，安装一次 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)（Win10 1803+ 与 Win11 通常自带）。
 
 程序为绿色软件：不写注册表、不注册服务，卸载只需删除程序文件夹，用户数据位于独立目录（见第 8 节）。
@@ -230,11 +230,11 @@ StreamPilot/
 |--------|----------|
 | `dotnet build StreamPilot.slnx -c Debug` | **0 警告 / 0 错误**（`TreatWarningsAsErrors=true`） |
 | `build\test.ps1` | **四个阶段全部通过** |
-| C# 单元测试 | **173 / 173 通过**（`tests/StreamPilot.Tests/Cases/*.cs`） |
-| 前端回归测试 | **71 / 71 通过**（`tests/web/player-core.test.js`，`node --test`） |
+| C# 单元测试 | **181 / 181 通过**（`tests/StreamPilot.Tests/Cases/*.cs`） |
+| 前端回归测试 | **77 / 77 通过**（`tests/web/player-core.test.js`，`node --test`） |
 | 静态红线自检 | 通过 |
-| `node build/analyze-csharp.mjs` | **114 文件 / 27099 行 / 181 类型 / 907 方法**，未发现结构性问题 |
-| 发布产物 | `StreamPilot-windows-v0.1.0.zip`（附校验值文件，见 `build\publish.ps1`） |
+| `node build/analyze-csharp.mjs` | **116 文件 / 27981 行 / 185 类型 / 938 方法**，未发现结构性问题 |
+| 发布产物 | `StreamPilot-windows-v0.2.0.zip`（附校验值文件，见 `build\publish.ps1`） |
 | 真实房间实测（B站 814） | 解析 12 条候选；**经真实中继 12/12 返回媒体数据**（FLV 文件头、HLS 播放列表改写后的切片、TS 同步字节） |
 | 播放页控制条几何实测 | 无头 Edge 渲染真实页面（`node tests/web/layout-probe/run-probe.js`，档位 / 画质下拉按真实运行态填好选项），1280→480 px 逐档 × 3 快照（「追帧」/「停止追帧」/ 停止追帧 + 长状态行）：**14 宽度 × 3 快照 = 42 次测量，0 处重叠**；控制条单行阈值随画质档位名宽度变化——普通档位名（最宽 `1080P 高码率`）时 **1024 px 起单行**，带 HDR / 高帧率 后缀的最宽档位名（下拉被 `max-width: 220px` 收敛）时 **1120 px 起单行**；1024–620 px 为两行，560 px 起为三行 |
 
@@ -275,6 +275,7 @@ StreamPilot/
 - [ADR 0003 平台解析器与统一结果结构](docs/adr/0003-parser-contract.md)
 - [ADR 0004 原始流录制、自动分片与断流重连](docs/adr/0004-raw-recording.md)
 - [ADR 0005 桥接服务、Web 播放宿主与打包发布](docs/adr/0005-bridge-and-packaging.md)
+- [ADR 0007 中继攻击面与超时分层、引擎热改适配](docs/adr/0007-relay-attack-surface-and-timeouts.md)
 - [播放消息契约](docs/architecture/player-message-contract.md)
 - [依赖规则（含文件名规范）](docs/architecture/dependency-rules.md)
 - [播放策略（追帧 / 探测 / 恢复）](docs/architecture/playback-strategy.md)
@@ -291,7 +292,7 @@ StreamPilot 的三个能力方向分别参考以下开源 / 公开项目。**均
 |------|------|----------|------------|
 | **录播姬**（BililiveRecorder） | <https://github.com/BililiveRecorder/BililiveRecorder> | 直播原始流录制的行为：FLV 标签级写入、分片触发条件、「断流后新分片总是重发文件头 + onMetaData + 序列头」、时间戳错位与跳变修复思路、侧车元数据 | 参考行为、独立实现（`src/StreamPilot.Recording`），见 [ADR 0004](docs/adr/0004-raw-recording.md) |
 | **Lsar** | <https://github.com/alley-rs/lsar> | 多平台解析思路：统一结果结构、房间状态分类、各平台接口与签名算法（B站 / 抖音 / 虎牙 / 斗鱼 / YY / Bigo） | 参考思路、用 C# 全部重写（`src/StreamPilot.Parsers`），并修正其无超时、`unreachable!` panic、错误分类不一致等问题，见 [ADR 0003](docs/adr/0003-parser-contract.md) |
-| **MultiLive** | <https://www.bilibili.com/video/BV1y1tu66ERj/> | 低延迟播放：WebView2 宿主与页面的消息契约、三档极限追帧参数、CDN 候选并行探测与切换、冻结恢复阈值、WebView2 虚拟主机映射 | 播放逻辑自研重写（`Web/player.html` + `player-core.js`），并复用其随包的 Apache-2.0 前端库 `mpegts.js 1.8.2` / `hls.js 1.6.16`；修正其 PNA 响应头位置错误，见 [ADR 0005](docs/adr/0005-bridge-and-packaging.md) 与 [播放策略](docs/architecture/playback-strategy.md) |
+| **MultiLive** | 低延迟播放参考实现（本地参考项目 `MultiLive-Windows-v10.4.16-diag`） | 低延迟播放：WebView2 宿主与页面的消息契约、三档极限追帧参数、CDN 候选并行探测与切换、冻结恢复阈值、WebView2 虚拟主机映射 | 播放逻辑自研重写（`Web/player.html` + `player-core.js`），并复用其随包的 Apache-2.0 前端库 `mpegts.js 1.8.2` / `hls.js 1.6.16`；修正其 PNA 响应头位置错误，见 [ADR 0005](docs/adr/0005-bridge-and-packaging.md) 与 [播放策略](docs/architecture/playback-strategy.md) |
 | **biliLive-tools** | <https://github.com/renmu123/biliLive-tools> | 平台画质与码率档位的整理：虎牙 `iBitRate` 档位表与 `ratio` 参数、斗鱼 `rate` 档位表、B站 `qn` 表与 HDR 表达方式 | 只参考档位命名与参数含义，自行实现（`src/StreamPilot.Parsers`），未复用其代码 |
 
 > 上述项目各自适用其自身的开源许可；StreamPilot 的分发物中只包含 `mpegts.js` 与 `hls.js` 两个 Apache-2.0 库，其版本与校验值登记于 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。

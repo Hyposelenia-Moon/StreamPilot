@@ -35,6 +35,18 @@ const RECONNECT_COUNTER_RESET_MS = 60000;
 /** 重连退避序列（毫秒）。 */
 const RECONNECT_DELAYS_MS = Object.freeze([250, 1000]);
 
+/**
+ * 受控重建前退避所用的档位下标：复用既有重连退避序列的第一档。
+ *
+ * 为什么复用而不是新造一个数字：重建与重连面对的是同一个物理约束——上游还没察觉旧连接已断，
+ * 立刻建新连接会撞上"同一条签名地址只允许一条并发连接"的限流（`docs/parsers/douyu.md` 记录的实测），
+ * 表现为首帧偶发变慢。两者用同一档退避，语义与取值都不漂移。
+ */
+const REBUILD_BACKOFF_STEP = 0;
+
+/** 受控重建前退避的硬上限（毫秒）：退避只是"等上游收掉旧连接"，不是重连等待。 */
+const MAX_REBUILD_BACKOFF_MS = 1000;
+
 /** 遥测与卡顿检测的轮询间隔（毫秒）。 */
 const TELEMETRY_INTERVAL_MS = 500;
 
@@ -1444,6 +1456,79 @@ function rebuildEngineConfig(settings, config, snapshot, fallbackReason) {
 }
 
 /**
+ * 判断一次配置应用是否会走到**受控重建**（判定与 {@link applyEngineConfig} 的前置条件同源）。
+ * @param {string} engineKind 引擎种类（{@link ENGINE_KINDS}）。
+ * @param {object|null} player 运行中的引擎实例。
+ * @returns {boolean} 需要重建返回 true。
+ * @remarks
+ * 与 {@link applyEngineConfig} 的差别只有一处：热改路径在"写入抛异常 / 读回校验不通过"时也会
+ * 降级为重建，那种情况发生在写入之后，事前无法判定；这里只回答"按能力表判定是否需要重建"。
+ */
+function requiresControlledRebuild(engineKind, player) {
+  return !canHotApplyEngineConfig(engineKind) || readEngineConfig(player) === null;
+}
+
+/**
+ * 计算受控重建前的退避毫秒数（复用重连退避序列的第一档，并受硬上限约束）。
+ * @param {string} engineKind 引擎种类。
+ * @param {object|null} player 运行中的引擎实例。
+ * @param {Function|null} [rebuild] 受控重建回调：没有它就没有"重建"可等。
+ * @returns {number} 需要重建时返回退避毫秒数；走热改或无法重建时返回 0（不等待）。
+ */
+function getEngineRebuildBackoffMs(engineKind, player, rebuild) {
+  if (typeof rebuild !== 'function' || !requiresControlledRebuild(engineKind, player)) {
+    return 0;
+  }
+
+  const delay = getReconnectDelayMs(REBUILD_BACKOFF_STEP);
+  return delay > 0 ? Math.min(delay, MAX_REBUILD_BACKOFF_MS) : 0;
+}
+
+/**
+ * 默认的退避等待实现（浏览器与 Node 都有 `setTimeout`）。
+ * @param {number} delayMs 等待毫秒数。
+ * @returns {Promise<void>} 等待完成的 Promise。
+ */
+function waitForEngineRebuild(delayMs) {
+  return new Promise(function resolveAfterDelay(resolve) {
+    setTimeout(resolve, delayMs);
+  });
+}
+
+/**
+ * 应用追帧配置（页面唯一入口）：需要受控重建时，先断开旧连接、退避等待，再交给适配层重建。
+ *
+ * 为什么必须先断开再等：mpegts.js 没有运行时配置入口，只能"销毁旧实例 + 按新配置建新实例"，
+ * 中间会出现"旧连接刚断、新连接刚建"。上游对同一条签名地址的并发连接是有限流的，新连接可能
+ * 撞上还没回收的旧连接，表现为首帧偶发变慢。退避放在**断开之后、创建之前**，给上游留出察觉窗口。
+ *
+ * 三条硬约束（都由用例锁定）：
+ *  - 退避只在**确实需要重建**时执行一次（热改路径、没有重建回调时都不等待）；
+ *  - 退避有界（复用重连退避序列并受 {@link MAX_REBUILD_BACKOFF_MS} 限制），不是无限等待；
+ *  - 结论完全来自 {@link applyEngineConfig}：只有它说 `{ok:true}` 才允许上报成功，
+ *    重建失败时如实返回失败（调用方据此回滚并上报失败，不重复上报成功）。
+ * @param {object} options 适配参数（同 {@link applyEngineConfig}）。
+ * @param {Function|null} [options.prepareRebuild] 重建前置动作（断开旧连接），可为空。
+ * @param {Function} [options.wait] 退避等待实现：`(ms) => Promise`；缺省用 {@link waitForEngineRebuild}。
+ * @returns {Promise<object>} 适配层结论（{@link applyEngineConfig} 的返回值）。
+ */
+async function applyEngineConfigWithBackoff(options) {
+  const settings = options && typeof options === 'object' ? options : {};
+  const backoffMs = getEngineRebuildBackoffMs(settings.engineKind, settings.player, settings.rebuild);
+  if (backoffMs <= 0) {
+    return applyEngineConfig(settings);
+  }
+
+  if (typeof settings.prepareRebuild === 'function') {
+    settings.prepareRebuild();
+  }
+
+  const wait = typeof settings.wait === 'function' ? settings.wait : waitForEngineRebuild;
+  await wait(backoffMs);
+  return applyEngineConfig(settings);
+}
+
+/**
  * 判断是否应当对候选发起探测。
  *
  * 探测本身与参考播放页逐条一致（探测请求只取到响应头就 abort，不读响应体），
@@ -1556,6 +1641,9 @@ const StreamPilotPlayerCore = {
   TELEMETRY_INTERVAL_MS,
   TELEMETRY_REPORT_INTERVAL_MS,
   RECONNECT_COUNTER_RESET_MS,
+  RECONNECT_DELAYS_MS,
+  REBUILD_BACKOFF_STEP,
+  MAX_REBUILD_BACKOFF_MS,
   LOG_LEVELS,
   CHASE_KEEP_DEFAULT_SECONDS,
   PLAY_RESTORE_TOLERANCE_SECONDS,
@@ -1644,6 +1732,10 @@ const StreamPilotPlayerCore = {
   readEngineConfig,
   verifyConfigApplied,
   applyEngineConfig,
+  requiresControlledRebuild,
+  getEngineRebuildBackoffMs,
+  waitForEngineRebuild,
+  applyEngineConfigWithBackoff,
   isHttpStatusInvalid,
   isMseError,
   isHevcUnsupportedDescription,

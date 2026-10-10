@@ -19,7 +19,8 @@ using StreamPilot.Core.Services;
 ///   <item><c>GET /health</c>：存活探测与版本信息；</item>
 ///   <item><c>GET /play?url=&amp;title=&amp;referer=</c>：调用 mpv 外挂播放；</item>
 ///   <item><c>GET /relay/{token}</c>：为需要 Referer 的流提供本地中继（**只读**，注册只能进程内发起）；</item>
-///   <item><c>OPTIONS</c>：CORS 预检（仅预检响应携带 <c>Access-Control-Allow-Private-Network</c>）。</item>
+///   <item><c>OPTIONS</c>：CORS 预检（**只对已知路由**返回 204，未知路径一律 404；
+///     仅预检响应携带 <c>Access-Control-Allow-Private-Network</c>）。</item>
 /// </list>
 /// <para>安全约束：</para>
 /// <list type="bullet">
@@ -428,36 +429,65 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// 把请求行（方法 + 路径）解析成路由结论。
+    /// </summary>
+    /// <param name="method">HTTP 方法。</param>
+    /// <param name="path">绝对路径（形如 <c>/relay/{token}</c>）。</param>
+    /// <returns>路由结论。</returns>
+    /// <remarks>
+    /// 预检（<c>OPTIONS</c>）只为**已知路由**（<c>/relay</c>、<c>/play</c>、<c>/health</c>）返回
+    /// <see cref="BridgeRoute.Preflight"/>：过去任意路径的 <c>OPTIONS</c> 都会拿到 204 + CORS，
+    /// 等于向本机任意页面确认"这个回环端口上什么路径都有人应答"；收紧后未知路径的预检与普通请求
+    /// 一样是 404（最小攻击面）。方法是纯函数，因此离线用例可以直接断言，不必启动 <c>HttpListener</c>。
+    /// </remarks>
+    internal static BridgeRoute ResolveRoute(string method, string path)
+    {
+        bool isRelay = path.Equals(RelayPathPrefix, StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith(RelayPathPrefix + "/", StringComparison.OrdinalIgnoreCase);
+        bool isPlay = string.Equals(path, PlayPath, StringComparison.OrdinalIgnoreCase);
+        bool isHealth = string.Equals(path, HealthPath, StringComparison.OrdinalIgnoreCase);
+        if (!isRelay && !isPlay && !isHealth)
+        {
+            return BridgeRoute.NotFound;
+        }
+
+        if (string.Equals(method, "OPTIONS", StringComparison.OrdinalIgnoreCase))
+        {
+            return BridgeRoute.Preflight;
+        }
+
+        if (isRelay)
+        {
+            return BridgeRoute.Relay;
+        }
+
+        return isPlay ? BridgeRoute.Play : BridgeRoute.Health;
+    }
+
     private async Task HandleContextAsync(HttpListenerContext context)
     {
         try
         {
             string path = context.Request.Url?.AbsolutePath ?? "/";
-            if (string.Equals(context.Request.HttpMethod, "OPTIONS", StringComparison.OrdinalIgnoreCase))
+            switch (ResolveRoute(context.Request.HttpMethod, path))
             {
-                await WriteEmptyAsync(context, HttpStatusCode.NoContent, includePrivateNetworkHeader: true).ConfigureAwait(false);
-                return;
+                case BridgeRoute.Preflight:
+                    await WriteEmptyAsync(context, HttpStatusCode.NoContent, includePrivateNetworkHeader: true).ConfigureAwait(false);
+                    return;
+                case BridgeRoute.Relay:
+                    await HandleRelayAsync(context, path).ConfigureAwait(false);
+                    return;
+                case BridgeRoute.Play:
+                    await HandlePlayAsync(context).ConfigureAwait(false);
+                    return;
+                case BridgeRoute.Health:
+                    await HandleHealthAsync(context).ConfigureAwait(false);
+                    return;
+                default:
+                    await WriteTextAsync(context, HttpStatusCode.NotFound, "{\"error\":\"not-found\"}").ConfigureAwait(false);
+                    return;
             }
-
-            if (path.StartsWith(RelayPathPrefix, StringComparison.OrdinalIgnoreCase))
-            {
-                await HandleRelayAsync(context, path).ConfigureAwait(false);
-                return;
-            }
-
-            if (string.Equals(path, PlayPath, StringComparison.OrdinalIgnoreCase))
-            {
-                await HandlePlayAsync(context).ConfigureAwait(false);
-                return;
-            }
-
-            if (string.Equals(path, HealthPath, StringComparison.OrdinalIgnoreCase))
-            {
-                await HandleHealthAsync(context).ConfigureAwait(false);
-                return;
-            }
-
-            await WriteTextAsync(context, HttpStatusCode.NotFound, "{\"error\":\"not-found\"}").ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is BridgeException or IOException or HttpListenerException or ObjectDisposedException or InvalidOperationException)
         {
@@ -888,6 +918,27 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         {
             _outputLock.Release();
         }
+    }
+
+    /// <summary>
+    /// 一次桥接请求的路由结论（把"方法 + 路径 → 处理器"的映射抽成可离线断言的纯判定）。
+    /// </summary>
+    internal enum BridgeRoute
+    {
+        /// <summary>未知路径：一律 404（未知路径的预检同样是 404）。</summary>
+        NotFound = 0,
+
+        /// <summary>中继路由（<c>/relay/**</c>）。</summary>
+        Relay = 1,
+
+        /// <summary>mpv 外挂播放路由（<c>/play</c>）。</summary>
+        Play = 2,
+
+        /// <summary>健康检查路由（<c>/health</c>）。</summary>
+        Health = 3,
+
+        /// <summary>已知路由的 CORS 预检：204 + CORS 头（仅此处携带私有网络头）。</summary>
+        Preflight = 4,
     }
 
     /// <summary>

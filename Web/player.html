@@ -498,7 +498,6 @@
         ownedPlayer: null,
         currentStreamUrl: '',
         currentReferer: '',
-        bridgeBaseAddress: '',
         roomTitle: '',
         lastVolume: core.INITIAL_VOLUME_PERCENT,
         muteToggleVolume: core.INITIAL_VOLUME_PERCENT,
@@ -1796,30 +1795,46 @@
        *
        * SP-01：过去这里直接调用引擎实例上的 `configure`（两家引擎都没有这个方法）就返回，于是
        * "停止追帧 / 换档位"只改了页面字段与 UI 文案，引擎配置一个字没变。
-       * 现在一切交给 `core.applyEngineConfig`：
+       * 现在一切交给 `core.applyEngineConfigWithBackoff`（内部仍是 `core.applyEngineConfig` 的判定）：
        *  - hls.js 走热改（改 `hls.config.*` 并读回校验）；
        *  - mpegts.js 走受控重建（保留候选 / 队列 / 会话号 / 暂停态 / 阶段 / 音量 / 档位）。
        * 只有 `{ok:true}` 才允许调用方 `setStatus` 与上报成功；失败一律上报失败并保持原状态。
+       *
+       * 受控重建（mpegts.js）会在**断开旧连接之后**做一次有界退避再建新连接
+       * （见 `core.applyEngineConfigWithBackoff`）：上游对同一条签名地址的并发连接有限流，
+       * 立刻重连会撞上还没回收的旧连接，表现为首帧偶发变慢。退避窗口内不改状态行阶段、
+       * 不产生任何上报，因此状态行不会闪回「播放中」，也不会重复上报。
        * @param {object} run 运行对象。
        * @param {string} message 成功时的描述（如"停止自动追帧"）。
        * @param {object} [extras] 上报附加字段。
-       * @returns {boolean} 生效返回 true；失败时已上报失败并保持原状态，返回 false。
+       * @returns {Promise<boolean>} 生效返回 true；失败时已上报失败并保持原状态，返回 false。
        */
-      function applyPlayerTargetConfig(run, message, extras) {
+      async function applyPlayerTargetConfig(run, message, extras) {
         const snapshot = core.snapshotRuntimeState(run, state, {
           volumePercent: elements.volume.value,
           positionSeconds: elements.video.currentTime,
         });
         const config = core.buildEngineConfig(run, run.currentCandidate);
-        const outcome = core.applyEngineConfig({
+        const outcome = await core.applyEngineConfigWithBackoff({
           engineKind: core.engineKindForCandidate(run.currentCandidate),
           player: state.ownedPlayer,
           config: config,
           snapshot: snapshot,
+          // 重建前置动作：先断开旧连接（退避因此发生在"旧连接已断、新连接未建"之间）。
+          prepareRebuild: function disconnectBeforeRebuild() {
+            if (isActive(run)) {
+              destroyPlayer();
+            }
+          },
           rebuild: function rebuildWithConfig() {
-            return recreatePlayerWithConfig(snapshot, config);
+            return isActive(run) ? recreatePlayerWithConfig(snapshot, config) : null;
           },
         });
+
+        if (!isActive(run)) {
+          // 退避窗口里会话已经结束或被替换：旧会话的结论不得再改 UI 或上报。
+          return false;
+        }
 
         if (!outcome.ok) {
           const detail = '（原因：' + outcome.reason + '）';
@@ -1858,9 +1873,11 @@
        * 语义（与「暂停播放」的区别：这里**不**调用 `video.pause()`、不销毁播放器、不释放地址）：
        *  - 点「追帧」= 开启自动追帧**并立刻追一次帧**（保留原一次性追帧的效果）；
        *  - 点「停止追帧」= 关闭自动追帧，画面以正常倍速实时推进，不再按目标延迟拉回。
-       * 缓冲失控自救属于兜底保护，不随本开关关闭。
+       *
+       * 缓冲失控自救属于兜底保护，不随本开关关闭；配置应用是异步的（受控重建前有一次有界退避），
+       * 因此这里 await 结论后再决定是否回滚与上报。
        */
-      function toggleChase() {
+      async function toggleChase() {
         const run = state.run;
         if (!run) {
           logToHost(core.LOG_LEVELS.WARN, '当前没有正在播放的会话，无法切换追帧');
@@ -1872,7 +1889,7 @@
         const message = enabling
           ? '已开启自动追帧（目标延迟 ' + run.extremeTargetMs + ' ms）'
           : '已停止自动追帧（画面以正常倍速播放，不再自动拉回目标延迟）';
-        if (!applyPlayerTargetConfig(run, message, { autoChaseEnabled: enabling })) {
+        if (!(await applyPlayerTargetConfig(run, message, { autoChaseEnabled: enabling }))) {
           // 配置没生效：把开关回滚回原状态，UI 与上报都不得声称成功（SP-01）。
           run.autoChaseEnabled = !enabling;
           syncChaseButton();
@@ -2172,10 +2189,10 @@
         });
 
         elements.chaseBtn.addEventListener('click', function onChaseClick() {
-          toggleChase();
+          void toggleChase();
         });
 
-        elements.targetSelect.addEventListener('change', function onTargetChange() {
+        elements.targetSelect.addEventListener('change', async function onTargetChange() {
           const milliseconds = Number(elements.targetSelect.value);
           if (!core.EXTREME_TARGETS_MS.includes(milliseconds)) {
             return;
@@ -2190,7 +2207,7 @@
               候选地址不变。生效判定交给 applyPlayerTargetConfig，失败时把档位回滚。
             */
             const message = '追帧档位已切换为 ' + run.extremeTargetMs + ' ms';
-            if (applyPlayerTargetConfig(run, message, { extremeTargetMs: run.extremeTargetMs })) {
+            if (await applyPlayerTargetConfig(run, message, { extremeTargetMs: run.extremeTargetMs })) {
               if (chaseToLiveEdge(core.CHASE_KEEP_DEFAULT_SECONDS)) {
                 report(outbound.STATUS, message, run, run.currentCandidate);
               }
@@ -2264,10 +2281,12 @@
        * 追帧档位切换（宿主下发 target 消息时调用，不重连、不换地址）。
        *
        * 档位语义是**改配置**：目标是"把目标延迟与随之推导的阈值改成新档位"，
-       * 候选地址、队列与中继都不变（换地址是另一条路径）。生效判定与失败回滚同 `toggleChase`。
+       * 候选地址、队列与中继都不变（换地址是另一条路径）。生效判定与失败回滚同 `toggleChase`；
+       * 配置应用是异步的，因此本函数返回 Promise，由调用方按"发后不理"处理。
        * @param {object} payload 宿主下发的 target 消息（`extremeTargetMs`）。
+       * @returns {Promise<void>} 应用完成的 Promise。
        */
-      function handleTargetChange(payload) {
+      async function handleTargetChange(payload) {
         const run = state.run;
         const previousTargetMs = run ? run.extremeTargetMs : core.DEFAULT_EXTREME_TARGET_MS;
         const applied = Boolean(run) && applyExtremeTargetValue(run, Number(payload.extremeTargetMs));
@@ -2279,7 +2298,7 @@
         }
 
         const message = '追帧档位已切换为 ' + run.extremeTargetMs + ' ms';
-        if (!applyPlayerTargetConfig(run, message, { extremeTargetMs: run.extremeTargetMs })) {
+        if (!(await applyPlayerTargetConfig(run, message, { extremeTargetMs: run.extremeTargetMs }))) {
           // 没生效：档位回滚，宿主下发的档位不写进页面状态（避免"显示新档位、实际跑旧档位"）。
           core.applyExtremeTarget(run, previousTargetMs);
         }
@@ -2310,7 +2329,7 @@
             handleStop();
             break;
           case core.INBOUND_MESSAGE_TYPES.TARGET:
-            handleTargetChange(payload);
+            void handleTargetChange(payload);
             break;
           case core.INBOUND_MESSAGE_TYPES.PAUSE:
             togglePausePlayback(typeof payload.paused === 'boolean' ? payload.paused : undefined);
@@ -2322,8 +2341,9 @@
             if (payload.type === 'volume') {
               applyVolume(payload.value);
             } else if (payload.type === 'bridge-info') {
-              state.bridgeBaseAddress = typeof payload.baseAddress === 'string' ? payload.baseAddress : '';
-              logToHost(core.LOG_LEVELS.INFO, '桥接服务地址：' + (state.bridgeBaseAddress || '未启动'));
+              // 桥接地址只用于日志与宿主提示：页面从不自己拼桥接地址（候选地址一律由宿主下发）。
+              const baseAddress = typeof payload.baseAddress === 'string' ? payload.baseAddress : '';
+              logToHost(core.LOG_LEVELS.INFO, '桥接服务地址：' + (baseAddress || '未启动'));
             } else {
               logToHost(core.LOG_LEVELS.WARN, '收到未知消息类型：' + payload.type);
             }

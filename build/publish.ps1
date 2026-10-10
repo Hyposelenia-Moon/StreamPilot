@@ -172,7 +172,7 @@ $archiveHashPath = $null
 if (-not $SkipArchive) {
     Write-Host '==== 6/6 压缩为发行版 zip ====' -ForegroundColor Cyan
 
-    # zip 与发行版目录同级同名：解压后得到 StreamPilot-windows-v0.1.0\ 目录，
+    # zip 与发行版目录同级同名：解压后得到 <发行版目录名>\ 目录（目录名 = {产品}-windows-v{版本}），
     # 目录内的 Web\ 相对路径与虚拟主机映射保持一致，不会多套一层壳。
     #
     # 压缩包的 SHA256 只记录在包外的 <zip>.sha256 中：

@@ -40,6 +40,18 @@ internal sealed class ScriptedStreamSource : IStreamSource
         return this;
     }
 
+    /// <summary>
+    /// 追加一次"连接成功并返回指定可读流"（用于模拟"给出一段数据后卡住"这类流）。
+    /// </summary>
+    /// <param name="streamFactory">流工厂：每次连接各调用一次，避免同一个流被复用。</param>
+    /// <returns>自身，便于链式编排脚本。</returns>
+    public ScriptedStreamSource ThenStream(Func<Stream> streamFactory)
+    {
+        ArgumentNullException.ThrowIfNull(streamFactory);
+        _script.Enqueue(streamFactory);
+        return this;
+    }
+
     /// <inheritdoc />
     public Task<Stream> OpenAsync(CancellationToken cancellationToken)
     {

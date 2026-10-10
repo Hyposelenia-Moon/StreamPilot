@@ -287,6 +287,14 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
   重建**不**清 `playbackStarted` / `everPlayed`，因此不会重复触发首帧逻辑、不会重复上报、状态行也不会闪回；
 - 只有 `{ok: true}` 才允许调用方 `setStatus` 与上报成功；失败一律上报 `warning` 并保持原状态
   （调用方回滚 `autoChaseEnabled` / `extremeTargetMs`）。
+- 页面只调用 `core.applyEngineConfigWithBackoff(...)`（内部仍是 `core.applyEngineConfig` 的判定）：
+  受控重建前先断开旧连接、再做一次**有界退避**，最后才按新配置创建。
+  退避复用重连退避序列的第一档（`RECONNECT_DELAYS_MS[REBUILD_BACKOFF_STEP] = 250 ms`，
+  上限 `MAX_REBUILD_BACKOFF_MS = 1000 ms`）：上游对同一条签名地址的并发连接有限流，
+  旧连接刚断就建新连接会撞上还没回收的那一条，表现为首帧偶发变慢。
+  退避只在**确实需要重建**时执行一次（热改路径、没有重建回调时都不等待）；退避与重建窗口内
+  不改状态行阶段、不产生任何上报，因此状态行不会闪回「播放中」、也不会重复上报，
+  重建失败仍按失败上报（见 [ADR 0007](../adr/0007-relay-attack-surface-and-timeouts.md)）。
 
 ## 10. 合并后的追帧开关（「追帧 / 停止追帧」）与暂停播放的区别
 
@@ -440,6 +448,11 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
   （`BridgeHost.PlayerPageOrigin`），并带 `Vary: Origin`；
   `Access-Control-Allow-Private-Network: true` **保留**，但只在预检请求声明
   `Access-Control-Request-Private-Network: true` 时返回；
+- **预检只为已知路由返回 204**：`/relay/**`、`/play`、`/health` 之外的路径
+  （含 `/`、旧文档里并不存在的 `/web/*`、以及 `/relayx/1` 这类前缀相似路径）一律 404。
+  判定是纯函数 `BridgeHost.ResolveRoute`，离线用例直接断言；过去任意路径的 `OPTIONS`
+  都会拿到 204 + CORS，等于向本机任意页面确认"这个回环端口上什么路径都有人应答"
+  （见 [ADR 0007](../adr/0007-relay-attack-surface-and-timeouts.md)）；
 - **目的地址白名单**（`IsAllowedUpstreamUrl`，注册与**重定向后的最终地址**都过）：
   只允许 `http` / `https`（中继是 HTTP 客户端，`rtmp`/`rtmps` 本来就拉不了，已移除），
   拒绝回环 / 私网 / 链路本地 / 未指定地址的字面量与 `localhost` 主机名

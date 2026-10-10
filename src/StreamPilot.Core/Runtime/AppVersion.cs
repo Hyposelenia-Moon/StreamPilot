@@ -7,12 +7,12 @@ using System.Reflection;
 /// </summary>
 public static class AppVersion
 {
-    /// <summary>无法读取程序集版本时的回退值。</summary>
-    private const string FallbackVersion = "0.1.0";
+    /// <summary>无法读取程序集版本时的回退值（与 <c>StreamPilot.App.csproj</c> 的版本号保持一致）。</summary>
+    private const string FallbackVersion = "0.2.0";
 
     private static readonly Lazy<string> LazyVersion = new(ResolveVersion);
 
-    /// <summary>语义化版本字符串（例如 <c>0.1.0</c>）。</summary>
+    /// <summary>语义化版本字符串（例如 <c>0.2.0</c>）。</summary>
     public static string Current => LazyVersion.Value;
 
     private static string ResolveVersion()

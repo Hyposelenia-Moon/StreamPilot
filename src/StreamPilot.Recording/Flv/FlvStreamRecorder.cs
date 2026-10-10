@@ -24,6 +24,17 @@ public sealed class FlvStreamRecorder
     /// <summary>默认重连退避序列（秒），超出长度后复用最后一项。</summary>
     public static IReadOnlyList<int> DefaultReconnectBackoffSeconds { get; } = [2, 4, 8, 15, 30];
 
+    /// <summary>FLV 收尾（关闭末分片并登记元数据）的超时秒数。</summary>
+    /// <remarks>
+    /// 收尾必须用**独立且有界**的令牌：录制被取消时上层令牌已经取消，若继续沿用它会在 flush 之前
+    /// 立刻抛 <see cref="OperationCanceledException"/>，导致末分片登记不上、文件句柄不释放（SP-03）；
+    /// 而改用"永不过期"的 <see cref="CancellationToken.None"/> 又会让 flush 卡死时无限阻塞
+    /// <c>RecordingSession.StopAsync</c>。本地磁盘 flush 通常在 100 毫秒内完成，10 秒留出两个数量级
+    /// 余量（慢盘、杀毒软件实时扫描），同时保证停止录制时的等待一定有界。
+    /// 取值与 <c>TsStreamRecorder.FinalizeTimeoutSeconds</c> 一致：两侧收尾面对的是同一类本地磁盘。
+    /// </remarks>
+    public const int FinalizeTimeoutSeconds = 10;
+
     private readonly IStructuredLogger _logger;
     private readonly string _moduleName = "Recording.Flv";
     private readonly SegmentPolicy _policy;
@@ -109,7 +120,7 @@ public sealed class FlvStreamRecorder
                             ["roomId"] = room.RoomId,
                             ["maxDurationMinutes"] = maxDurationMinutes,
                         });
-                        return await FinishAsync(session, room, RecordingStopReason.DurationLimitReached, onSegmentCompleted, cancellationToken).ConfigureAwait(false);
+                        return await FinishAsync(session, RecordingStopReason.DurationLimitReached, onSegmentCompleted).ConfigureAwait(false);
                     }
 
                     FlvTag? tag;
@@ -141,7 +152,7 @@ public sealed class FlvStreamRecorder
 
                 if (session.SessionDurationMs >= safeMaxDurationMs)
                 {
-                    return await FinishAsync(session, room, RecordingStopReason.DurationLimitReached, onSegmentCompleted, cancellationToken).ConfigureAwait(false);
+                    return await FinishAsync(session, RecordingStopReason.DurationLimitReached, onSegmentCompleted).ConfigureAwait(false);
                 }
 
                 if (session.ReconnectCount >= maxReconnectAttempts)
@@ -151,7 +162,7 @@ public sealed class FlvStreamRecorder
                         ["roomId"] = room.RoomId,
                         ["reconnectCount"] = session.ReconnectCount,
                     });
-                    return await FinishAsync(session, room, RecordingStopReason.ReconnectLimitReached, onSegmentCompleted, cancellationToken).ConfigureAwait(false);
+                    return await FinishAsync(session, RecordingStopReason.ReconnectLimitReached, onSegmentCompleted).ConfigureAwait(false);
                 }
 
                 session.ReconnectCount++;
@@ -160,14 +171,29 @@ public sealed class FlvStreamRecorder
         }
         catch (OperationCanceledException)
         {
-            return await FinishAsync(session, room, RecordingStopReason.UserStopped, onSegmentCompleted, CancellationToken.None).ConfigureAwait(false);
+            return await FinishAsync(session, RecordingStopReason.UserStopped, onSegmentCompleted).ConfigureAwait(false);
         }
         catch (Core.Errors.RecordingException)
         {
-            return await FinishAsync(session, room, RecordingStopReason.Failed, onSegmentCompleted, CancellationToken.None).ConfigureAwait(false);
+            return await FinishAsync(session, RecordingStopReason.Failed, onSegmentCompleted).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // 落盘 IO 异常（分片写入失败，或分片回调里刷新侧车元数据失败）：同样必须收尾，
+            // 否则末分片登记不上、FLV 分片句柄一直占着文件（SP-03 的同族问题）。
+            _logger.LogError(LogLevel.Error, _moduleName, "录制过程中落盘失败，已收尾并释放分片句柄。", exception, new Dictionary<string, object?>
+            {
+                ["roomId"] = room.RoomId,
+                ["segmentIndex"] = session.SegmentIndex,
+            });
+            return await FinishAsync(session, RecordingStopReason.Failed, onSegmentCompleted).ConfigureAwait(false);
         }
         finally
         {
+            // 兜底：任何没走到上面收尾路径的异常（例如回调抛出的非 IO 异常）都不得泄漏分片句柄。
+            // 收尾后再调用这里是幂等的无操作（句柄已置空）。
+            using CancellationTokenSource boundedRelease = new(TimeSpan.FromSeconds(FinalizeTimeoutSeconds));
+            await session.ReleaseWriterAsync(boundedRelease.Token).ConfigureAwait(false);
             await source.DisposeAsync().ConfigureAwait(false);
         }
     }
@@ -342,16 +368,26 @@ public sealed class FlvStreamRecorder
         Action<RecordingSegment>? onSegmentCompleted,
         CancellationToken cancellationToken)
     {
-        if (session.Writer is null)
+        FlvSegmentWriter? writer = session.Writer;
+        if (writer is null)
         {
             return;
         }
 
-        RecordingSegment segment = await session.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
-        session.Segments.Add(segment);
-        onSegmentCompleted?.Invoke(segment);
-        await session.Writer.DisposeAsync().ConfigureAwait(false);
+        // 先摘掉引用再收尾：回调（上层据此登记分片并刷新侧车元数据）一旦抛错，
+        // 也不会让同一分片在随后的收尾里被重复登记。
         session.Writer = null;
+        try
+        {
+            RecordingSegment segment = await writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
+            session.Segments.Add(segment);
+            onSegmentCompleted?.Invoke(segment);
+        }
+        finally
+        {
+            // 句柄必须无条件释放：CompleteAsync 或回调抛出时同样不能把产物锁住（SP-03 同族）。
+            await writer.DisposeAsync(cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private FlvSegmentWriter CreateWriter(SessionState session, ResolvedRoom room, string outputDirectory)
@@ -362,15 +398,49 @@ public sealed class FlvStreamRecorder
         return new FlvSegmentWriter(path, _policy, _logger);
     }
 
-    private static async Task<FlvRecordingResult> FinishAsync(
+    /// <summary>
+    /// 收尾：关闭并登记末分片，汇总录制结果。
+    /// </summary>
+    /// <param name="session">会话状态。</param>
+    /// <param name="stopReason">停止原因。</param>
+    /// <param name="onSegmentCompleted">分片完成回调。</param>
+    /// <returns>录制结果。</returns>
+    /// <remarks>
+    /// 收尾用**独立且有界**的令牌（<see cref="FinalizeTimeoutSeconds"/>），既不受已经取消的上层令牌
+    /// 影响（否则末分片登记不上，见 SP-03），也不会因为 flush 卡死而无限阻塞上层停止录制。
+    /// 收尾超时或落盘失败时记 Error 日志，并把停止原因归一为 <see cref="RecordingStopReason.Failed"/>，
+    /// 绝不静默吞掉；无论成败，分片句柄都由 <see cref="RollSegmentAsync"/> 的 finally 释放。
+    /// </remarks>
+    private async Task<FlvRecordingResult> FinishAsync(
         SessionState session,
-        ResolvedRoom room,
         RecordingStopReason stopReason,
-        Action<RecordingSegment>? onSegmentCompleted,
-        CancellationToken cancellationToken)
+        Action<RecordingSegment>? onSegmentCompleted)
     {
-        _ = room;
-        await RollSegmentAsync(session, onSegmentCompleted, cancellationToken).ConfigureAwait(false);
+        RecordingStopReason effectiveReason = stopReason;
+        using CancellationTokenSource bounded = new(TimeSpan.FromSeconds(FinalizeTimeoutSeconds));
+        try
+        {
+            await RollSegmentAsync(session, onSegmentCompleted, bounded.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException exception)
+        {
+            effectiveReason = RecordingStopReason.Failed;
+            _logger.LogError(LogLevel.Error, _moduleName, "FLV 录制收尾超时：末分片未登记。", exception, new Dictionary<string, object?>
+            {
+                ["roomId"] = session.RoomId,
+                ["segmentIndex"] = session.SegmentIndex,
+                ["finalizeTimeoutSeconds"] = FinalizeTimeoutSeconds,
+            });
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            effectiveReason = RecordingStopReason.Failed;
+            _logger.LogError(LogLevel.Error, _moduleName, "FLV 录制收尾失败：末分片未能落盘。", exception, new Dictionary<string, object?>
+            {
+                ["roomId"] = session.RoomId,
+                ["segmentIndex"] = session.SegmentIndex,
+            });
+        }
 
         long totalBytes = 0;
         foreach (RecordingSegment segment in session.Segments)
@@ -383,7 +453,7 @@ public sealed class FlvStreamRecorder
             totalBytes,
             session.SessionDurationMs / 1000.0,
             session.ReconnectCount,
-            stopReason);
+            effectiveReason);
     }
 
     /// <summary>一次录制会话的可变状态。</summary>
@@ -434,6 +504,21 @@ public sealed class FlvStreamRecorder
         /// 误当成"已录制时长"，导致刚开始录制就命中时长上限而丢数据。
         /// </remarks>
         public long SessionDurationMs => CompletedMediaDurationMs + ConnectionMediaDurationMs;
+
+        /// <summary>
+        /// 释放当前分片写入器（幂等：已经收尾过则什么也不做）。
+        /// </summary>
+        /// <param name="cancellationToken">只约束最后一次 flush 的等待，超时也会释放文件句柄。</param>
+        /// <returns>异步释放任务。</returns>
+        public async Task ReleaseWriterAsync(CancellationToken cancellationToken)
+        {
+            FlvSegmentWriter? writer = Writer;
+            Writer = null;
+            if (writer is not null)
+            {
+                await writer.DisposeAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
 
         /// <summary>
         /// 开始一次新连接：结算上一条连接的媒体时长，并重置连接内的归一化基准。

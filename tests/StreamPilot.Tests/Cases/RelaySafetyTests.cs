@@ -134,6 +134,37 @@ public sealed class RelaySafetyTests
         Assert.Equal("https://appassets.local", BridgeHost.PlayerPageOrigin, "跨源响应头只回播放页来源，不再用 *");
     }
 
+    /// <summary>
+    /// 预检只对已知路由返回 204：未知路径（含旧文档里并不存在的 <c>/web/*</c> 静态回退）一律 404。
+    /// </summary>
+    /// <remarks>
+    /// 路由判定是纯函数（<see cref="BridgeHost.ResolveRoute"/>），因此这里直接断言而无需启动
+    /// <c>HttpListener</c>：旧实现对**任意**路径的 <c>OPTIONS</c> 都回 204 + CORS，
+    /// 等于向本机任意页面确认"这个回环端口上什么路径都有人应答"。
+    /// </remarks>
+    [TestMethod("桥接路由：预检只为已知路径返回 204，未知路径一律 404")]
+    public void PreflightOnlyAnswersKnownRoutes()
+    {
+        Assert.Equal(BridgeHost.BridgeRoute.Preflight, BridgeHost.ResolveRoute("OPTIONS", "/health"));
+        Assert.Equal(BridgeHost.BridgeRoute.Preflight, BridgeHost.ResolveRoute("options", "/play"), "方法名大小写不敏感");
+        Assert.Equal(BridgeHost.BridgeRoute.Preflight, BridgeHost.ResolveRoute("OPTIONS", "/relay/abc123"));
+        Assert.Equal(
+            BridgeHost.BridgeRoute.NotFound,
+            BridgeHost.ResolveRoute("OPTIONS", "/web/player.html"),
+            "旧文档里描述的静态回退路径并不存在，预检不得应答");
+        Assert.Equal(BridgeHost.BridgeRoute.NotFound, BridgeHost.ResolveRoute("OPTIONS", "/"));
+        Assert.Equal(BridgeHost.BridgeRoute.NotFound, BridgeHost.ResolveRoute("OPTIONS", "/relayx/1"), "前缀相似不等于已知路由");
+
+        Assert.Equal(BridgeHost.BridgeRoute.Relay, BridgeHost.ResolveRoute("GET", "/relay/abc123"));
+        Assert.Equal(
+            BridgeHost.BridgeRoute.Relay,
+            BridgeHost.ResolveRoute("POST", "/relay/abc123"),
+            "HTTP 注册路由已关闭：非 GET 仍进中继处理器，由它回 404 并记 Warn");
+        Assert.Equal(BridgeHost.BridgeRoute.Play, BridgeHost.ResolveRoute("GET", "/play"));
+        Assert.Equal(BridgeHost.BridgeRoute.Health, BridgeHost.ResolveRoute("HEAD", "/health"));
+        Assert.Equal(BridgeHost.BridgeRoute.NotFound, BridgeHost.ResolveRoute("GET", "/web/index.html"));
+    }
+
     /// <summary>上游被重定向到回环地址：最终地址判定为不允许，转发入口直接判定失败。</summary>
     [TestMethod("中继安全：重定向到回环地址被拒绝")]
     public async Task RedirectToLoopbackIsRejected()

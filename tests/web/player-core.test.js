@@ -1280,6 +1280,151 @@ test('适配层：性能相关的热改判定只看能力表，无 player 时不
   assert.equal(outcome.report, false);
 });
 
+test('受控重建退避：mpegts 重建前先断开、再退避、最后才重建（有界且各只一次）', async () => {
+  const calls = [];
+  const engine = createEngineDouble({ hotConfig: false });
+  const rebuilt = createEngineDouble({ hotConfig: false });
+  const rebuild = createRebuildDouble(rebuilt.player);
+  const expectedBackoffMs = core.RECONNECT_DELAYS_MS[core.REBUILD_BACKOFF_STEP];
+
+  const outcome = await core.applyEngineConfigWithBackoff({
+    engineKind: core.ENGINE_KINDS.MPEGTS,
+    player: engine.player,
+    config: core.buildMpegtsConfig(true, 0.2, false),
+    snapshot: { sessionId: 7 },
+    prepareRebuild: function disconnectOldPlayer() {
+      calls.push('disconnect');
+    },
+    rebuild: function rebuildNewPlayer() {
+      calls.push('rebuild');
+      return rebuild.rebuild();
+    },
+    wait: function waitForBackoff(ms) {
+      calls.push('wait:' + ms);
+      return Promise.resolve();
+    },
+  });
+
+  // 顺序即语义：旧连接必须在退避**之前**断开，新连接必须在退避**之后**才建。
+  assert.deepEqual(calls, ['disconnect', 'wait:' + expectedBackoffMs, 'rebuild'], '必须先断开、再有界退避、最后重建');
+  assert.equal(
+    core.getEngineRebuildBackoffMs(core.ENGINE_KINDS.MPEGTS, engine.player, rebuild.rebuild),
+    expectedBackoffMs,
+    '退避必须复用重连退避序列的第一档');
+  assert.ok(expectedBackoffMs > 0 && expectedBackoffMs <= core.MAX_REBUILD_BACKOFF_MS, '退避必须有界');
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.action, core.ENGINE_APPLY_ACTIONS.REBUILD);
+  assert.equal(outcome.report, true, '重建成功才允许上报成功');
+  assert.deepEqual(rebuild.calls, ['rebuild'], '只重建一次（不重复建实例、不重复上报）');
+});
+
+test('受控重建退避：热改路径不退避、不断开连接、不重建', async () => {
+  const engine = createEngineDouble({ hotConfig: true });
+  const rebuild = createRebuildDouble({});
+  const waitCalls = [];
+  let disconnectCount = 0;
+
+  const outcome = await core.applyEngineConfigWithBackoff({
+    engineKind: core.ENGINE_KINDS.HLS,
+    player: engine.player,
+    config: { maxLiveSyncPlaybackRate: 1 },
+    prepareRebuild: function disconnectOldPlayer() {
+      disconnectCount++;
+    },
+    rebuild: rebuild.rebuild,
+    wait: function waitForBackoff(ms) {
+      waitCalls.push(ms);
+      return Promise.resolve();
+    },
+  });
+
+  assert.deepEqual(waitCalls, [], '热改路径不得退避');
+  assert.equal(disconnectCount, 0, '热改路径不得断开连接');
+  assert.deepEqual(rebuild.calls, [], '热改路径不得重建播放器');
+  assert.equal(core.getEngineRebuildBackoffMs(core.ENGINE_KINDS.HLS, engine.player, rebuild.rebuild), 0);
+  assert.equal(outcome.action, core.ENGINE_APPLY_ACTIONS.HOT_APPLY);
+  assert.equal(outcome.ok, true);
+});
+
+test('受控重建退避：没有重建回调时不空等，失败仍然如实返回失败', async () => {
+  const engine = createEngineDouble({ hotConfig: false });
+  const waitCalls = [];
+
+  const outcome = await core.applyEngineConfigWithBackoff({
+    engineKind: core.ENGINE_KINDS.MPEGTS,
+    player: engine.player,
+    config: core.buildMpegtsConfig(true, 0.25, true),
+    rebuild: null,
+    wait: function waitForBackoff(ms) {
+      waitCalls.push(ms);
+      return Promise.resolve();
+    },
+  });
+
+  assert.deepEqual(waitCalls, [], '没有重建可做时不得退避');
+  assert.equal(core.getEngineRebuildBackoffMs(core.ENGINE_KINDS.MPEGTS, engine.player, null), 0);
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.reason, core.ENGINE_APPLY_REASONS.REBUILD_UNAVAILABLE);
+  assert.equal(outcome.report, false, '失败不得产生成功上报');
+});
+
+test('受控重建退避：重建失败仍上报失败（只尝试一次，不重复上报成功）', async () => {
+  const engine = createEngineDouble({ hotConfig: false });
+  const rebuild = createRebuildDouble(null);
+  const waitCalls = [];
+
+  const outcome = await core.applyEngineConfigWithBackoff({
+    engineKind: core.ENGINE_KINDS.MPEGTS,
+    player: engine.player,
+    config: core.buildMpegtsConfig(true, 0.25, true),
+    rebuild: rebuild.rebuild,
+    wait: function waitForBackoff(ms) {
+      waitCalls.push(ms);
+      return Promise.resolve();
+    },
+  });
+
+  assert.deepEqual(waitCalls, [core.RECONNECT_DELAYS_MS[core.REBUILD_BACKOFF_STEP]], '有重建可做时必须退避一次');
+  assert.deepEqual(rebuild.calls, ['rebuild'], '只尝试重建一次');
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.reason, core.ENGINE_APPLY_REASONS.REBUILD_FAILED);
+  assert.equal(outcome.report, false, '重建失败不得上报成功');
+});
+
+test('页面薄调用层：重建先断开再由 core 退避，退避与重建窗口内不改状态行', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+  const applyBody = extractFunctionBody(html, 'async function applyPlayerTargetConfig(run, message, extras)');
+  const callIndex = applyBody.indexOf('await core.applyEngineConfigWithBackoff(');
+  assert.notEqual(callIndex, -1, '配置应用必须走带退避的统一入口');
+
+  // 退避发生在 core 内部（断开之后、创建之前）：调用点之前只允许准备快照与配置，不得先断开或改写状态行。
+  const beforeCall = applyBody.slice(0, callIndex);
+  assert.equal(/setStatus|applyPlaybackPhase/.test(beforeCall), false, '退避之前不得改写状态行');
+  assert.equal(beforeCall.includes('destroyPlayer();'), false, '断开动作必须由 core 在退避前触发，而不是调用点提前断开');
+
+  assert.equal(
+    applyBody.includes('prepareRebuild: function disconnectBeforeRebuild()'),
+    true,
+    '必须提供重建前置动作');
+  assert.equal(applyBody.includes('destroyPlayer();'), true, '前置动作必须真的断开旧连接');
+  assert.equal(applyBody.includes('if (!isActive(run))'), true, '退避窗口里会话已变化时不得再改 UI / 上报');
+
+  const betweenCallAndVerdict = applyBody.slice(callIndex, applyBody.indexOf('if (!outcome.ok)'));
+  assert.equal(/setStatus|applyPlaybackPhase/.test(betweenCallAndVerdict), false, '退避与重建窗口内不得改写状态行阶段（不得闪回播放中）');
+});
+
+test('播放页不再保存桥接地址：只按原样记日志，消息契约不变', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+
+  // 页面从不自己拼桥接地址（候选地址一律由宿主下发），因此不得保留"只赋值不读"的死状态。
+  assert.equal(html.includes('bridgeBaseAddress'), false, 'bridge-info 的 baseAddress 不得存进页面状态');
+  assert.equal(html.includes("payload.type === 'bridge-info'"), true, 'bridge-info 消息仍然必须被识别');
+  assert.equal(
+    html.includes("logToHost(core.LOG_LEVELS.INFO, '桥接服务地址：'"),
+    true,
+    '桥接地址仍然照原样记日志（日志与消息契约不变）');
+});
+
 test('快照 / 恢复：重建保留候选、队列、会话号、暂停态、阶段、音量与档位', () => {
   const run = {
     currentCandidate: { url: 'http://127.0.0.1:5566/relay/token', sourceIndex: 3, format: 'flv' },
@@ -1359,13 +1504,13 @@ test('页面薄调用层：只用适配层入口，成功后 setStatus / 上报�
     /player\.configure\(/.test(html),
     false,
     'SP-01：不得再出现"无能力检查就调用 configure"的裸调用');
-  assert.equal(html.includes('core.applyEngineConfig('), true, '配置应用必须走统一适配层');
+  assert.equal(html.includes('core.applyEngineConfigWithBackoff('), true, '配置应用必须走统一适配层（带受控重建退避）');
   assert.equal(html.includes('core.buildEngineConfig('), true, '配置推导必须走统一入口');
   assert.equal(html.includes('core.engineKindForCandidate('), true, '引擎种类必须由候选格式推导');
   assert.equal(html.includes('core.snapshotRuntimeState('), true, '重建前必须取状态快照');
   assert.equal(html.includes('recreatePlayerWithConfig('), true, '不支持热改的引擎必须走受控重建');
 
-  const applyBody = extractFunctionBody(html, 'function applyPlayerTargetConfig(run, message, extras)');
+  const applyBody = extractFunctionBody(html, 'async function applyPlayerTargetConfig(run, message, extras)');
   assert.equal(applyBody.includes('!outcome.ok'), true, '必须按适配层结论分支');
   assert.equal(applyBody.includes('outbound.WARNING'), true, '失败必须上报失败（warning），不得静默');
   assert.equal(applyBody.includes('return false;'), true, '失败必须让调用方知道没生效，以便回滚');
@@ -1375,18 +1520,18 @@ test('页面薄调用层：只用适配层入口，成功后 setStatus / 上报�
     '成功上报必须只出现在"确认生效"之后');
 
   // 停止追帧与换档位都必须先判定生效再改 UI / 上报。
-  const chaseBody = extractFunctionBody(html, 'function toggleChase()');
-  assert.equal(chaseBody.includes('if (!applyPlayerTargetConfig('), true, '停止追帧必须按生效结论分支');
+  const chaseBody = extractFunctionBody(html, 'async function toggleChase()');
+  assert.equal(chaseBody.includes('if (!(await applyPlayerTargetConfig('), true, '停止追帧必须按生效结论分支');
   assert.equal(chaseBody.includes('run.autoChaseEnabled = !enabling;'), true, '未生效时开关必须回滚');
 
-  const targetBody = extractFunctionBody(html, 'function handleTargetChange(payload)');
-  assert.equal(targetBody.includes('if (!applyPlayerTargetConfig('), true, '宿主换档位必须按生效结论分支');
+  const targetBody = extractFunctionBody(html, 'async function handleTargetChange(payload)');
+  assert.equal(targetBody.includes('if (!(await applyPlayerTargetConfig('), true, '宿主换档位必须按生效结论分支');
   assert.equal(targetBody.includes('core.applyExtremeTarget(run, previousTargetMs);'), true, '未生效时档位必须回滚');
 });
 
 test('换档位是"改配置"而不是"换地址"：候选地址与队列在换档位路径上不被改写', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
-  const targetBody = extractFunctionBody(html, 'function handleTargetChange(payload)');
+  const targetBody = extractFunctionBody(html, 'async function handleTargetChange(payload)');
   const changeBody = extractFunctionBody(html, 'elements.targetSelect.addEventListener');
 
   for (const [name, body] of [['handleTargetChange', targetBody], ['onTargetChange', changeBody]]) {
