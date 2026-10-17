@@ -273,7 +273,9 @@ test('shouldProbeCandidate 只在多候选时探测', () => {
   assert.equal(core.shouldProbeCandidate(1), false, '单候选探测零收益却会多占一条上游连接');
   assert.equal(core.shouldProbeCandidate(2), true);
   assert.equal(core.shouldProbeCandidate(8), true);
-  assert.equal(core.PROBE_TIMEOUT_MS, 1200, '探测超时与参考播放页一致');
+  assert.ok(
+    core.PROBE_TIMEOUT_MS >= 2500,
+    '探测超时不低于 2500ms：探测只用于排序与提示，过紧会把可播线路判成不可用');
 });
 
 test('shouldRecoverAfterLoadingComplete 只在真的断流时重连，且按模式取阈值', () => {
@@ -1553,3 +1555,79 @@ test('换档位是"改配置"而不是"换地址"：候选地址与队列在换�
     '150 ms 档的延迟阈值必须由新档位推导');
   assert.equal(run.currentCandidate, undefined, '档位推导不得往运行对象里塞候选');
 });
+
+test('探测不再按 4xx 一律否决线路，超时放宽到 3000ms', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+
+  assert.ok(
+    core.PROBE_TIMEOUT_MS >= 2500,
+    '探测超时必须不低于 2500ms，否则慢 CDN 节点会被误判为不可用（历史日志里成批 Failed to fetch）');
+  assert.deepEqual([...core.PROBE_REJECT_STATUS_CODES], [404, 410], '只有 404/410 表示地址确实不存在或已失效');
+
+  assert.equal(core.isProbeRejectedStatus(404), true);
+  assert.equal(core.isProbeRejectedStatus(410), true);
+  assert.equal(core.isProbeRejectedStatus(403), false, '403 可能只是缺请求头，不能据此丢掉整条线路');
+  assert.equal(core.isProbeRejectedStatus(500), false, '5xx 是上游临时故障，线路本身仍可能在播');
+  assert.equal(core.isProbeRejectedStatus(200), false);
+  assert.equal(core.isProbeRejectedStatus(null), false, '没拿到响应（网络错误/CORS/超时）不算否决');
+  assert.equal(core.isProbeRejectedStatus(undefined), false);
+
+  assert.equal(html.includes('HTTP_ERROR_STATUS_MIN'), false, '页面不得再按 4xx/5xx 区间一律否决候选');
+  assert.equal(html.includes('core.isProbeRejectedStatus(status)'), true, '页面必须走统一否决判定');
+});
+
+test('上游结束连接时只重连一次就换线', () => {
+  assert.ok(
+    core.MAX_RECONNECTS_FOR_ENDED_STREAM < core.MAX_RECONNECTS_PER_CANDIDATE,
+    '确定性断开的重连预算必须小于卡顿场景，否则会把预算耗在同一条死线路上');
+
+  assert.equal(core.isStreamEndedReason('直播连接已结束'), true);
+  assert.equal(core.isStreamEndedReason('播放器错误：连接已结束'), true);
+  assert.equal(core.isStreamEndedReason('缓冲失控（12 秒未消耗）'), false);
+  assert.equal(core.isStreamEndedReason(null), false);
+  assert.equal(core.isStreamEndedReason(undefined), false);
+
+  assert.ok(core.getReconnectDelayMs(0, '直播连接已结束') >= 0, '第一次仍给一次重连机会');
+  assert.equal(core.getReconnectDelayMs(1, '直播连接已结束'), -1, '确定性断开的第二次必须换线');
+  assert.ok(core.getReconnectDelayMs(1, '画面停滞') >= 0, '卡顿场景仍按每候选两次');
+  assert.equal(core.getReconnectDelayMs(2, '画面停滞'), -1);
+  assert.equal(core.getReconnectDelayMs(2), -1, '不传原因时保持原有上限');
+});
+
+test('会话结束时输出一次可复盘摘要', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+
+  assert.equal(html.includes('function emitSessionSummary'), true, '必须有统一的摘要输出函数');
+  assert.equal(html.includes('会话摘要（'), true, '摘要必须以固定前缀输出，便于日志筛选');
+  ['候选 ', '换线 ', '重连 ', '首帧 ', '峰值缓冲 '].forEach(function check(field) {
+    assert.equal(html.includes(field), true, '摘要里必须包含「' + field + '」这一项');
+  });
+  assert.equal(html.includes('summaryReported'), true, '每个会话只允许输出一次摘要');
+  assert.equal(html.includes('emitSessionSummary(state.run'), true, '用户停止播放时必须输出摘要');
+});
+
+test('换线必须退避且有次数上限，避免重载风暴', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+
+  assert.ok(
+    core.MAX_CANDIDATE_SWITCHES_PER_SESSION >= 3 && core.MAX_CANDIDATE_SWITCHES_PER_SESSION <= 20,
+    '单会话换线上限必须有限且可用，过大等于不设上限');
+  assert.ok(
+    core.MAX_CANDIDATE_SWITCH_BACKOFF_MS > 0 && core.MAX_CANDIDATE_SWITCH_BACKOFF_MS <= 2000,
+    '换线退避必须有上界，否则用户会以为程序卡死');
+
+  const samples = [0, 1, 2, 3, 10].map(function backoff(n) {
+    return core.getCandidateSwitchBackoffMs(n);
+  });
+  samples.forEach(function check(value) {
+    assert.ok(Number.isFinite(value) && value >= 0, '退避必须是有限的非负数：' + value);
+    assert.ok(value <= core.MAX_CANDIDATE_SWITCH_BACKOFF_MS, '退避不得超过上界：' + value);
+  });
+  assert.ok(samples[1] >= samples[0], '退避应随换线次数递增');
+  assert.equal(core.getCandidateSwitchBackoffMs(-5), core.getCandidateSwitchBackoffMs(0), '非法次数按 0 处理');
+
+  assert.equal(html.includes('getCandidateSwitchBackoffMs'), true, '换线路径必须真的使用退避');
+  assert.equal(html.includes('MAX_CANDIDATE_SWITCHES_PER_SESSION'), true, '换线路径必须真的检查次数上限');
+  assert.equal(html.includes('switchCount'), true, '页面必须维护换线计数');
+});
+

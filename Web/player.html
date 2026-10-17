@@ -440,10 +440,6 @@
       const core = window.StreamPilotPlayerCore;
       const outbound = core.OUTBOUND_MESSAGE_TYPES;
 
-      /** HTTP 错误状态码区间：4xx/5xx 视为"线路明确拒绝"，直接丢弃不再尝试。 */
-      const HTTP_ERROR_STATUS_MIN = 400;
-      const HTTP_ERROR_STATUS_MAX = 600;
-
       /** 宿主状态消息到期后回落刷新的定时余量（毫秒）：略晚于到期点，避免边界上重复刷新。 */
       const STATUS_FALLBACK_MARGIN_MS = 50;
 
@@ -811,8 +807,9 @@
       /**
        * 探测单个候选：只取到响应头就中止，绝不读取响应体。
        *
-       * 与参考播放页（`probeCandidate`）逐条一致：GET、`cache:'no-store'`、`credentials:'omit'`、
-       * 超时 1200 ms 且超时即 abort、拿到状态码立刻 abort。
+       * 请求方式是 GET、`cache:'no-store'`、`credentials:'omit'`，超时取 `core.PROBE_TIMEOUT_MS`。
+       * 探测只用于排序与提示，**不用于否决**：只有 404/410 才判为 rejected，
+       * 其余状态与网络错误、CORS 不可见都算不确定（判定见 `core.isProbeRejectedStatus`）。
        * "不读 body"是关键：读 body 等于把整条直播流拉下来，探测就变成一次真实下载。
        * @param {object} run 运行对象。
        * @param {object} candidate 候选。
@@ -857,7 +854,7 @@
             return { outcome: 'good', elapsedMs: elapsed(), statusCode: status, errorName: null, errorMessage: null };
           }
 
-          if (status >= HTTP_ERROR_STATUS_MIN && status < HTTP_ERROR_STATUS_MAX) {
+          if (core.isProbeRejectedStatus(status)) {
             return { outcome: 'rejected', elapsedMs: elapsed(), statusCode: status, errorName: null, errorMessage: null };
           }
 
@@ -1149,6 +1146,8 @@
       /** 首帧就绪：统一处理状态、界面、日志与上报。 */
       function markPlaybackStarted(run, candidate, startedAt) {
         run.playbackStarted = true;
+        // 出过首帧说明"换线是为了更好"，此时把换线计数归零，避免长会话被历史累计卡住上限。
+        run.switchCount = 0;
         run.everPlayed = true;
         state.autoplayBlocked = false;
         state.pausedByUser = false;
@@ -1165,6 +1164,7 @@
         // 首帧到达：会话回到"播放中"，重连计数归零，状态行从此由遥测数值刷新。
         state.reconnectAttempt = 0;
         applyPlaybackPhase(core.PLAYBACK_PHASES.PLAYING, run);
+        run.summary.firstFrameMs = firstFrameMs;
         logToHost(core.LOG_LEVELS.INFO, '首帧 ' + firstFrameMs + ' ms（' + candidate.host + '）');
         report(outbound.STATUS, '播放已开始', run, candidate, { firstFrameMs: firstFrameMs, mode: run.mode });
         startTelemetry(run);
@@ -1258,6 +1258,7 @@
               return;
             }
 
+            logStreamEndedDiagnostics(run, candidate, buffered);
             recoverAfterInterruption(run, candidate, '直播连接已结束');
           });
           return;
@@ -1324,8 +1325,28 @@
         }
 
         const next = run.queue[0];
-        run.switching = false;
-        void startCandidate(run, next);
+        run.switchCount = (Number.isFinite(run.switchCount) ? run.switchCount : 0) + 1;
+        run.summary.switches += 1;
+        if (run.switchCount > core.MAX_CANDIDATE_SWITCHES_PER_SESSION) {
+          /*
+            换线次数到顶仍没出首帧：继续换只会不断重载、把"卡"变成"一直卡"。
+            这里停下并请宿主重新解析一次，让用户看到明确结论而不是无尽重连。
+          */
+          run.switching = false;
+          requestFreshSources(run, '连续切换线路 ' + (run.switchCount - 1) + ' 次仍未起播');
+          return;
+        }
+
+        // 换线会销毁并重建播放器：加一个递增且有上界的退避，避免退化成重载风暴。
+        const backoffMs = core.getCandidateSwitchBackoffMs(run.switchCount);
+        window.setTimeout(function startNextCandidateAfterBackoff() {
+          if (!isActive(run)) {
+            return;
+          }
+
+          run.switching = false;
+          void startCandidate(run, next);
+        }, backoffMs);
       }
 
       /** 断流后的重连（每个候选最多两次）。 */
@@ -1344,7 +1365,7 @@
         }
 
         const reconnectCount = run.reconnectsBySource.get(candidate.sourceIndex) || 0;
-        const delay = core.getReconnectDelayMs(reconnectCount);
+        const delay = core.getReconnectDelayMs(reconnectCount, reason);
         if (delay < 0) {
           /*
             这里不再先把 switching 置 true 再置回来：`switchToNextCandidate` 自己会置位并守门，
@@ -1380,8 +1401,53 @@
           run.playbackStarted = false;
           run.lastPlaybackPosition = 0;
           run.lastPlaybackProgressAt = Date.now();
+          run.summary.reconnects += 1;
           void startCandidate(run, candidate);
         }, delay);
+      }
+
+      /**
+       * 输出一次会话摘要：候选数、换线次数、重连次数、首帧耗时与峰值缓冲。
+       *
+       * 目的不是给用户看，而是让"为什么这个房间卡/播不了"能从一份日志里直接读出来，
+       * 不必再去翻成百上千条探测与切换记录。每个会话只输出一次（停止或最终失败时）。
+       * @param {object} run 运行对象。
+       * @param {string} reason 结束原因。
+       */
+      function emitSessionSummary(run, reason) {
+        if (!run || run.summaryReported) {
+          return;
+        }
+
+        run.summaryReported = true;
+        const summary = run.summary;
+        const firstFrame = summary.firstFrameMs === null ? '未出画' : summary.firstFrameMs + ' ms';
+        logToHost(
+          core.LOG_LEVELS.INFO,
+          '会话摘要（' + reason + '）：候选 ' + run.candidates.length + ' 条，换线 ' + summary.switches
+            + ' 次，重连 ' + summary.reconnects + ' 次，首帧 ' + firstFrame
+            + '，峰值缓冲 ' + summary.maxAheadMs + ' ms');
+      }
+
+      /**
+       * 上游结束连接时记录一条诊断：用来区分"CDN 限流/参数问题"与"客户端追帧/缓冲问题"。
+       *
+       * 关键字段：已播放时长（太短说明一开始就被拒）、媒体时间与缓冲（判断是断流还是卡住）、
+       * `networkState`（1=空闲、2=加载中、3=无源，3 说明地址本身没下发）。
+       * @param {object} run 运行对象。
+       * @param {object} candidate 当前候选。
+       * @param {number} bufferedSeconds 当前缓冲秒数（无缓冲时为 0）。
+       */
+      function logStreamEndedDiagnostics(run, candidate, bufferedSeconds) {
+        const playedMs = run.currentCandidateStartedAt > 0 ? Date.now() - run.currentCandidateStartedAt : 0;
+        logToHost(
+          core.LOG_LEVELS.WARN,
+          '连接结束诊断：主机 ' + (candidate && candidate.host ? candidate.host : '未知')
+            + '，会话已播放 ' + Math.round(playedMs / 1000) + ' 秒'
+            + '，媒体时间 ' + Math.round(elements.video.currentTime * 10) / 10 + ' 秒'
+            + '，缓冲 ' + (Number.isFinite(bufferedSeconds) ? Math.round(bufferedSeconds * 10) / 10 : 0) + ' 秒'
+            + '，networkState ' + elements.video.networkState
+            + '，readyState ' + elements.video.readyState);
       }
 
       /** 请求宿主重新解析（每个会话只请求一次）。 */
@@ -1391,6 +1457,7 @@
         }
 
         run.refreshRequested = true;
+        emitSessionSummary(run, reason);
         destroyPlayer();
         state.currentStreamUrl = '';
         setHintLocked('播放失败：所有线路都连不上（可能未开播、地区受限或网络问题）。\n正在请主程序重新解析…\n' + reason, 'error', 10000);
@@ -1493,6 +1560,9 @@
             绝不用档位值（150/200/250）冒充实测结果。
           */
           run.lastLatencyMs = localBuffer === null ? null : Math.round(localBuffer * 1000);
+        if (run.lastLatencyMs !== null && run.lastLatencyMs > run.summary.maxAheadMs) {
+          run.summary.maxAheadMs = run.lastLatencyMs;
+        }
           refreshPlaybackStatus(run);
 
           /*
@@ -1650,6 +1720,12 @@
           switching: false,
           reconnecting: false,
           playbackStarted: false,
+          /** 本次会话已换线次数：只在没出首帧时累计，出首帧后归零。 */
+          switchCount: 0,
+          /** 会话摘要计数：结束时输出一次，便于按房间复盘"卡在哪一步"。 */
+          summary: { switches: 0, reconnects: 0, maxAheadMs: 0, firstFrameMs: null },
+          /** 摘要是否已输出（每个会话只输出一次）。 */
+          summaryReported: false,
           everPlayed: false,
           refreshRequested: false,
           currentCandidate: null,
@@ -2045,6 +2121,7 @@
       /** 处理宿主下发的 stop 消息（兼容旧宿主：结束会话并回到空态）。 */
       function handleStop() {
         if (state.run) {
+          emitSessionSummary(state.run, '用户停止播放');
           report(outbound.STATUS, '播放已停止', state.run, state.run.currentCandidate);
           stopRun(state.run);
           state.run = null;

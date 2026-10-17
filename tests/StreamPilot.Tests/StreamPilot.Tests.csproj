@@ -39,6 +39,12 @@
     <Compile Include="..\..\src\StreamPilot.App\Services\PresetStore.cs">
       <Link>App\Services\PresetStore.cs</Link>
     </Compile>
+    <Compile Include="..\..\src\StreamPilot.App\Services\RoomInputNormalizer.cs">
+      <Link>App\Services\RoomInputNormalizer.cs</Link>
+    </Compile>
+    <Compile Include="..\..\src\StreamPilot.App\Services\ShortLinkResolver.cs">
+      <Link>App\Services\ShortLinkResolver.cs</Link>
+    </Compile>
   </ItemGroup>
 
 </Project>

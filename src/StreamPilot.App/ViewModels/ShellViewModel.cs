@@ -192,6 +192,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     private readonly Func<SettingsViewModel, bool> _showSettingsDialog;
     private readonly string _moduleName = "App.Shell";
 
+    /// <summary>平台分享短链解析器：把 v.douyin.com / b23.tv 跟随跳转成真实房间地址。</summary>
+    private readonly ShortLinkResolver _shortLinkResolver;
+
     private StreamPilotOptions _options;
     private PlatformOption _selectedPlatformOption = null!;
 
@@ -260,6 +263,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         _presetStore = dependencies.Presets;
         _resolveMpvPath = dependencies.ResolveMpvPath;
         _showSettingsDialog = dependencies.ShowSettingsDialog;
+        _shortLinkResolver = new ShortLinkResolver(_logger);
 
         _roomInput = _options.LastRoomInput;
         _extremeTargetMs = NormalizeTarget(_options.Playback.ExtremeTargetMs);
@@ -730,9 +734,19 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             }
 
             ApplyPlatform(effective);
-            RoomQuery? query = BuildQuery(effective);
+
+            /*
+              分享短链（v.douyin.com / b23.tv）里没有房间号，必须先跟随跳转拿到真实地址，
+              否则解析器会把它当成房间号去查，最后报"房间不存在"。解析失败时原样返回，不阻断。
+            */
+            string resolvedInput = await _shortLinkResolver
+                .ResolveAsync(RoomInputNormalizer.Normalize(_roomInput), CancellationToken.None)
+                .ConfigureAwait(true);
+
+            RoomQuery? query = resolvedInput.Length == 0 ? null : BuildQueryFor(effective, resolvedInput);
             if (query is null)
             {
+                StatusMessage = "请先输入房间号或直播间链接。";
                 return;
             }
 
@@ -744,7 +758,10 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             if (!outcome.Success || outcome.Room is null)
             {
                 _currentRoom = null;
-                StatusMessage = ResolveMessages.DescribeFailure(outcome.Failure);
+                // 平台自己的说明（例如 Bigo 的"需要登录"）比通用文案具体，优先展示它。
+                StatusMessage = outcome.Message.Length > 0
+                    ? outcome.Message
+                    : ResolveMessages.DescribeFailure(outcome.Failure);
                 ClearRoomInfo(ResolveMessages.DescribeLiveStatus(outcome.Failure));
                 AppendLog(StatusMessage);
                 RaiseCommandStates();
@@ -1146,42 +1163,14 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         RaisePlatformChanged();
     }
 
-    /// <summary>按指定平台构造解析请求。</summary>
-    /// <param name="platform">生效的平台。</param>
-    /// <returns>解析请求；输入为空时返回 <see langword="null"/>。</returns>
-    private RoomQuery? BuildQuery(PlatformId platform)
-    {
-        string input = _roomInput.Trim();
-        if (input.Length == 0)
-        {
-            StatusMessage = "请先输入房间号或直播间链接。";
-            return null;
-        }
-
-        bool looksLikeUrl = input.Contains("://", StringComparison.Ordinal)
-            || input.Contains('/', StringComparison.Ordinal);
-
-        RoomQuery query = looksLikeUrl
-            ? RoomQuery.FromUrl(platform, input)
-            : RoomQuery.FromRoomId(platform, input);
-
-        // Cookie 只参与解析（换最高画质），播放地址本身不带登录态。
-        return query with
-        {
-            Cookie = _options.Platforms.ForPlatform(platform),
-            PreferredQualityKey = _preferredQualityKey,
-        };
-    }
-
     /// <summary>为指定平台构造解析请求（预设点击路径，平台来自预设本身）。</summary>
     /// <param name="platform">预设的平台。</param>
     /// <param name="input">预设的房间号或链接。</param>
     /// <returns>解析请求。</returns>
     private RoomQuery BuildQueryFor(PlatformId platform, string input)
     {
-        string trimmed = input.Trim();
-        bool looksLikeUrl = trimmed.Contains("://", StringComparison.Ordinal)
-            || trimmed.Contains('/', StringComparison.Ordinal);
+        string trimmed = RoomInputNormalizer.Normalize(input);
+        bool looksLikeUrl = RoomInputNormalizer.LooksLikeUrl(trimmed);
 
         RoomQuery query = looksLikeUrl
             ? RoomQuery.FromUrl(platform, trimmed)
@@ -1799,8 +1788,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// </remarks>
     private RoomQuery? BuildPresetQuery(string input, PlatformId platform)
     {
+        string normalized = RoomInputNormalizer.Normalize(input);
         PlatformId effective = platform == PlatformId.Unknown
-            ? PlatformDetector.DetectOrFallback(input, _options.DefaultPlatform)
+            ? PlatformDetector.DetectOrFallback(normalized, _options.DefaultPlatform)
             : platform;
         if (effective == PlatformId.Unknown)
         {
@@ -1808,12 +1798,11 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             return null;
         }
 
-        bool looksLikeUrl = input.Contains("://", StringComparison.Ordinal)
-            || input.Contains('/', StringComparison.Ordinal);
+        bool looksLikeUrl = RoomInputNormalizer.LooksLikeUrl(normalized);
 
         RoomQuery query = looksLikeUrl
-            ? RoomQuery.FromUrl(effective, input)
-            : RoomQuery.FromRoomId(effective, input);
+            ? RoomQuery.FromUrl(effective, normalized)
+            : RoomQuery.FromRoomId(effective, normalized);
 
         return query with
         {

@@ -148,11 +148,7 @@ public sealed class PlaybackCoordinator : IPlaybackCoordinator
         string? hint = null;
         if (playable.Count == 0)
         {
-            hint = "没有可在 Web 端播放的候选线路";
-            if (request.Room.Candidates.Count > 0 && request.Room.Candidates[0].Format == StreamFormat.Rtmp)
-            {
-                hint = "该直播间仅提供 RTMP 流，Web 端无法播放，请点击「mpv 播放」。";
-            }
+            hint = DescribeNoPlayableCandidates(request.Room.Candidates, hasUnsupportedCodec);
         }
         else if (usedRelay)
         {
@@ -260,6 +256,36 @@ public sealed class PlaybackCoordinator : IPlaybackCoordinator
     /// <returns>播放列表格式返回 <see langword="true"/>。</returns>
     private static bool IsPlaylist(StreamFormat format) =>
         format is StreamFormat.HlsTs or StreamFormat.HlsFmp4;
+
+    /// <summary>
+    /// 解释"为什么没有可播候选"，并给出用户可以立刻执行的下一步。
+    /// </summary>
+    /// <param name="candidates">平台给出的全部候选。</param>
+    /// <param name="hasUnsupportedCodec">是否存在内嵌播放器不支持的编码（例如 HEVC）。</param>
+    /// <returns>中文提示文案。</returns>
+    /// <remarks>
+    /// 用户看到的"播放失败"里，很大一部分其实是能力边界（只有 RTMP、只有 HEVC），
+    /// 说清是哪一种、以及该点哪个按钮，比统一报"所有线路都不可用"更有用。
+    /// </remarks>
+    private static string DescribeNoPlayableCandidates(IReadOnlyList<StreamCandidate> candidates, bool hasUnsupportedCodec)
+    {
+        if (candidates.Count == 0)
+        {
+            return "该房间没有返回任何可播放地址（可能未开播或平台未下发流地址）。";
+        }
+
+        if (candidates.All(candidate => candidate.Format == StreamFormat.Rtmp))
+        {
+            return "该直播间只提供 RTMP 直播流，内置播放器无法播放，请点击「mpv 播放」。";
+        }
+
+        if (hasUnsupportedCodec && candidates.All(candidate => candidate.Codec == VideoCodec.Hevc))
+        {
+            return "全部线路都是 HEVC（H.265），当前系统缺少解码扩展，请点击「mpv 播放」或安装系统 HEVC 扩展。";
+        }
+
+        return "当前线路均无法在内置播放器播放（格式或编码不受支持），请点击「mpv 播放」。";
+    }
 
     private static string FormatName(StreamFormat format) => format switch
     {

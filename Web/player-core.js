@@ -20,8 +20,41 @@ const DEFAULT_EXTREME_TARGET_MS = 250;
 /** 每个候选最多重连次数。 */
 const MAX_RECONNECTS_PER_CANDIDATE = 2;
 
-/** CDN 候选探测超时（毫秒，与参考播放页一致）。 */
-const PROBE_TIMEOUT_MS = 1200;
+/**
+ * "上游已结束连接"时的重连上限：只试一次就换线。
+ *
+ * 斗鱼真机复验里出现过首帧 100 ms 起播、随后每隔十几秒被 CDN 关闭连接的情况：
+ * 同一地址立刻重连往往再被关闭一次，把两次重连预算耗在同一条死线路上，
+ * 而重新解析/换线反而更容易恢复。
+ */
+const MAX_RECONNECTS_FOR_ENDED_STREAM = 1;
+
+/** 断流原因里表示"上游主动结束连接"的标记文本。 */
+const STREAM_ENDED_REASON_MARKER = '连接已结束';
+
+/**
+ * CDN 候选探测超时（毫秒）。
+ *
+ * 原为 1200 ms（对齐参考实现），但对慢 CDN 节点偏紧：超时即 abort，
+ * 会把本可播放的线路判成不可用，随后进入"换线—重载"循环。
+ * 探测只用于排序与提示，真实可用性由播放结果决定，因此放宽到 3000 ms。
+ */
+const PROBE_TIMEOUT_MS = 3000;
+
+/**
+ * 探测可以据此"否决"候选的 HTTP 状态码。
+ *
+ * 只有 404/410 表示地址本身不存在或已失效；其余状态（含 403、5xx）与网络错误、
+ * 超时、CORS 不可见都只算"不确定"——历史上虎牙/B站的大批 403 实际是中继缺请求头，
+ * 若按 4xx 一律否决，会把整批可用线路直接丢掉。
+ */
+const PROBE_REJECT_STATUS_CODES = Object.freeze([404, 410]);
+
+/** 单次会话内允许的换线次数上限（始终没出首帧时）。超过就停止换线并请求重新解析。 */
+const MAX_CANDIDATE_SWITCHES_PER_SESSION = 8;
+
+/** 换线退避的硬上限（毫秒）：退避只为避免"重载风暴"，不应让用户等到以为卡死。 */
+const MAX_CANDIDATE_SWITCH_BACKOFF_MS = 1000;
 
 /** 稳定模式首帧超时（毫秒）。 */
 const STABLE_STARTUP_TIMEOUT_MS = 8000;
@@ -715,19 +748,61 @@ function chaseButtonLabel(state) {
 
 /**
  * 计算重连退避时间。
+ *
+ * "上游已经结束连接"（例如斗鱼 CDN 周期性关闭 FLV 连接）与"卡顿/缓冲见底"要区别对待：
+ * 前者重新连同一个地址大概率立刻再被关闭，只值得重试一次，之后应换线；
+ * 后者说明这条线路本身还能用，按 {@link MAX_RECONNECTS_PER_CANDIDATE} 给足重试。
  * @param {number} reconnectCount 已完成的重连次数（从 0 开始）。
- * @returns {number} 退避毫秒数；超过上限返回 -1 表示应切换候选。
+ * @param {string} [reason] 断流原因；包含"连接已结束"时按确定性断开处理。
+ * @returns {number} 退避毫秒数；超过该原因的允许次数时返回 -1 表示应切换候选。
  */
-function getReconnectDelayMs(reconnectCount) {
+function getReconnectDelayMs(reconnectCount, reason) {
   if (reconnectCount < 0) {
     return RECONNECT_DELAYS_MS[0];
   }
 
-  if (reconnectCount >= MAX_RECONNECTS_PER_CANDIDATE) {
+  const limit = isStreamEndedReason(reason) ? MAX_RECONNECTS_FOR_ENDED_STREAM : MAX_RECONNECTS_PER_CANDIDATE;
+  if (reconnectCount >= limit) {
     return -1;
   }
 
   return RECONNECT_DELAYS_MS[Math.min(reconnectCount, RECONNECT_DELAYS_MS.length - 1)];
+}
+
+/**
+ * 判断断流原因是否表示"上游主动结束了连接"。
+ * @param {*} reason 断流原因文本。
+ * @returns {boolean} 是确定性断开时返回 true。
+ */
+function isStreamEndedReason(reason) {
+  return typeof reason === 'string' && reason.includes(STREAM_ENDED_REASON_MARKER);
+}
+
+/**
+ * 判断探测结果是否足以否决一个候选。
+ *
+ * 只有"地址确实不存在/已失效"（{@link PROBE_REJECT_STATUS_CODES}）才否决；
+ * 网络错误、超时、CORS 不可见、403、5xx 一律保留——它们只说明"这一次没探到"，
+ * 不足以说明这条线路播不了（历史日志里成批的 403 事后证实是缺请求头）。
+ * @param {number|null} statusCode 探测拿到的 HTTP 状态码；没拿到响应时为 null。
+ * @returns {boolean} 应否决该候选时返回 true。
+ */
+function isProbeRejectedStatus(statusCode) {
+  return Number.isFinite(statusCode) && PROBE_REJECT_STATUS_CODES.includes(Number(statusCode));
+}
+
+/**
+ * 计算换线退避时间。
+ *
+ * 换线会销毁并重建播放器，连续换线等于连续重载（历史日志里表现为上万条"首帧超时"与
+ * "play() 被打断"）。这里给每次换线加一个递增且有上界的退避，避免退化成重载风暴。
+ * @param {number} switchCount 本次会话已发生的换线次数（从 0 开始）。
+ * @returns {number} 退避毫秒数，范围 [0, MAX_CANDIDATE_SWITCH_BACKOFF_MS]。
+ */
+function getCandidateSwitchBackoffMs(switchCount) {
+  const count = Number.isFinite(switchCount) && switchCount > 0 ? Math.floor(switchCount) : 0;
+  const base = RECONNECT_DELAYS_MS[Math.min(count, RECONNECT_DELAYS_MS.length - 1)];
+  return Math.min(base, MAX_CANDIDATE_SWITCH_BACKOFF_MS);
 }
 
 /**
@@ -1637,7 +1712,11 @@ const StreamPilotPlayerCore = {
   EXTREME_TARGETS_MS,
   DEFAULT_EXTREME_TARGET_MS,
   MAX_RECONNECTS_PER_CANDIDATE,
+  MAX_RECONNECTS_FOR_ENDED_STREAM,
   PROBE_TIMEOUT_MS,
+  PROBE_REJECT_STATUS_CODES,
+  MAX_CANDIDATE_SWITCHES_PER_SESSION,
+  MAX_CANDIDATE_SWITCH_BACKOFF_MS,
   TELEMETRY_INTERVAL_MS,
   TELEMETRY_REPORT_INTERVAL_MS,
   RECONNECT_COUNTER_RESET_MS,
@@ -1692,6 +1771,9 @@ const StreamPilotPlayerCore = {
   buildMpegtsConfig,
   buildHlsConfig,
   getReconnectDelayMs,
+  isStreamEndedReason,
+  isProbeRejectedStatus,
+  getCandidateSwitchBackoffMs,
   getStallThresholdMs,
   isPlaybackStalled,
   isBufferRunaway,

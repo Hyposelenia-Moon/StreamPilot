@@ -159,14 +159,16 @@ internal sealed class DouyinParser : PlatformParserBase
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>页面与 reflow 接口均不可用时的提示。</summary>
-    private const string NoStreamMessage = "抖音直播间页面与 reflow 接口均未返回可用播放地址。";
+    private const string NoStreamMessage =
+        "抖音没有返回可播放地址：直播间可能已结束、未开播，或页面结构发生变化。请确认主播是否在播后重试。";
 
     /// <summary>页面返回风控/验证码中间页且所有路径都失败时的提示。</summary>
     private const string SecurityChallengeMessage =
         "抖音返回了浏览器安全验证页（含 __ac_nonce），本程序不绕过验证码与风控；请稍后重试或改用官方直播页。";
 
     /// <summary>两条路径都拿到了状态但没有可用地址时的提示。</summary>
-    private const string NoCandidateMessage = "抖音未返回可用播放地址。";
+    private const string NoCandidateMessage =
+        "抖音没有返回可播放地址：直播间可能已结束（room.status=4）、未开播，或平台未下发流地址。请确认主播是否在播后重试。";
 
     /// <summary>无法从输入确定房间号时的提示。</summary>
     private const string MissingRoomIdMessage = "无法从输入中确定抖音直播间房间号。";

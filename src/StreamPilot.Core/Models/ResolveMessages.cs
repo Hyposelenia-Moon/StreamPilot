@@ -9,19 +9,19 @@ namespace StreamPilot.Core.Models;
 public static class ResolveMessages
 {
     /// <summary>未开播的提示。</summary>
-    public const string NotLive = "该直播间当前未开播。";
+    public const string NotLive = "该直播间当前未开播。请等主播开播后再试，或换一个房间。";
 
     /// <summary>房间不存在的提示。</summary>
-    public const string RoomNotFound = "房间号不存在，请检查后重试。";
+    public const string RoomNotFound = "房间号不存在，请检查号码或链接是否完整后重试。";
 
     /// <summary>轮播/重播的提示。</summary>
-    public const string Replaying = "该直播间正在轮播/重播，本程序不解析重播源。";
+    public const string Replaying = "该直播间正在轮播/重播，本程序只解析正在进行的直播。请等主播正式开播后再试。";
 
     /// <summary>网络错误的提示。</summary>
     public const string NetworkError = "网络请求失败，请检查网络后重试。";
 
     /// <summary>平台拒绝请求的提示。</summary>
-    public const string Rejected = "平台拒绝了本次请求（可能触发风控），请稍后重试。";
+    public const string Rejected = "平台拒绝了本次请求（可能触发风控，请稍后重试；若提示需要登录，请在「设置」中填入该平台的 Cookie）。";
 
     /// <summary>输入非法的提示。</summary>
     public const string InvalidInput = "输入的房间号或链接不合法。";

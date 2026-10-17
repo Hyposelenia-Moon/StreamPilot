@@ -57,7 +57,7 @@ internal sealed class BigoParser : PlatformParserBase
     private const string NoStreamMessage = "Bigo 未返回 HLS 地址（可能未开播，或该地区被 Bigo 限制）。";
 
     /// <summary>接口要求登录时的提示。</summary>
-    private const string LoginRequiredMessage = "Bigo 要求登录后才能读取直播信息（当前网络或地区也受限）。";
+    private const string LoginRequiredMessage = "Bigo 要求登录后才能读取直播信息（当前网络或地区也可能受限）。请在「设置」中填入 Bigo Cookie 后重试。";
 
     /// <summary>响应不是合法 JSON 时的提示。</summary>
     private const string InvalidJsonMessage = "Bigo 工作室接口返回的响应不是合法 JSON。";
