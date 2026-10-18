@@ -345,7 +345,7 @@ public sealed class RecordingSession : IRecordingSession
         // 同上：共享客户端不可释放。
         HttpClient client = GetStreamingClient(httpClients);
         Uri playlistUri = new(_candidate.Url, UriKind.Absolute);
-        string content = await FetchPlaylistAsync(client, playlistUri, _cancellation.Token).ConfigureAwait(false);
+        string content = await FetchPlaylistAsync(client, playlistUri, _candidate.HttpReferer, _cancellation.Token).ConfigureAwait(false);
         HlsPlaylist playlist = HlsPlaylistParser.Parse(content, playlistUri);
 
         TsStreamRecorder recorder = new(policy, DateTimeOffset.Now, _logger);
@@ -407,9 +407,19 @@ public sealed class RecordingSession : IRecordingSession
         });
     }
 
-    private static async Task<string> FetchPlaylistAsync(HttpClient client, Uri playlistUri, CancellationToken cancellationToken)
+    private static async Task<string> FetchPlaylistAsync(
+        HttpClient client,
+        Uri playlistUri,
+        string? referer,
+        CancellationToken cancellationToken)
     {
         using HttpRequestMessage request = new(HttpMethod.Get, playlistUri);
+        if (!string.IsNullOrWhiteSpace(referer))
+        {
+            // 首个播放列表请求也必须带 Referer：防盗链的 HLS 服务对首个请求返回 403，会让整场录制直接失败。
+            request.Headers.TryAddWithoutValidation("Referer", referer);
+        }
+
         using HttpResponseMessage response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
