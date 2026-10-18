@@ -777,7 +777,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             PersistLastInput();
 
             // 自动开始播放（是否播放由设置里的开关决定；mpv 外挂播放同属"开始播放"）。
-            await PlayAsync().ConfigureAwait(true);
+            await PlayAsync(automatic: true).ConfigureAwait(true);
         }
         finally
         {
@@ -868,7 +868,13 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// 把当前房间交给播放页播放。
     /// </summary>
     /// <returns>异步任务。</returns>
-    public async Task PlayAsync()
+    /// <summary>开始播放当前直播间。</summary>
+    /// <param name="automatic">
+    /// 是否为"解析成功后自动开始"这类非用户直接触发的调用。
+    /// 只有自动调用才受设置里的「解析成功后自动播放」开关约束；用户点「开始播放」必须永远能播。
+    /// </param>
+    /// <returns>异步任务。</returns>
+    public async Task PlayAsync(bool automatic = false)
     {
         if (_currentRoom is null)
         {
@@ -882,8 +888,8 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         */
         ShowCurrentRoomInfo();
 
-        // 解析成功后由本方法统一决定"是否开始播放"，设置里的自动播放开关在这里生效。
-        if (!_options.Playback.AutoPlayOnResolve)
+        // 自动播放开关只约束"自动开始"这一条路径；手动点「开始播放」不受它影响。
+        if (automatic && !_options.Playback.AutoPlayOnResolve)
         {
             StatusMessage = "已解析完成；设置里已关闭「解析成功后自动播放」，点「开始播放」即可观看。";
             return;
