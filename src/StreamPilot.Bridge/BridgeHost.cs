@@ -105,7 +105,10 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     private readonly TimeSpan _idleTimeout;
 
     /// <summary>播放列表地址 → 该列表上一次改写登记的子节点本地地址。</summary>
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<string>> _playlistChildren = new(StringComparer.Ordinal);
+    /// <summary>每个播放列表保留的最近改写代数：播放器可能仍在用上一版列表里的切片地址。</summary>
+    private const int MaxRetainedPlaylistGenerations = 2;
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<List<string>>> _playlistChildren = new(StringComparer.Ordinal);
 
     private readonly CancellationTokenSource _shutdown = new();
     private readonly SemaphoreSlim _outputLock = new(1, 1);
@@ -298,9 +301,9 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         if (!string.IsNullOrWhiteSpace(localUrl))
         {
             // 释放播放列表时连同它上一次改写登记的子节点一起回收。
-            foreach (KeyValuePair<string, List<string>> entry in _playlistChildren)
+            foreach (KeyValuePair<string, List<List<string>>> entry in _playlistChildren)
             {
-                if (entry.Value.Contains(localUrl, StringComparer.Ordinal))
+                if (entry.Value.Exists(generation => generation.Contains(localUrl, StringComparer.Ordinal)))
                 {
                     ReleasePlaylistChildren(entry.Key);
                 }
@@ -1086,8 +1089,6 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// <returns>改写后的播放列表文本。</returns>
     private string RewritePlaylist(string playlist, RelayTarget target)
     {
-        ReleasePlaylistChildren(target.UpstreamUrl);
-
         List<string> children = [];
         StringBuilder builder = new(playlist.Length + PlaylistRewriteHeadroomBytes);
         foreach (string rawLine in playlist.Split('\n'))
@@ -1108,7 +1109,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
             builder.Append(RegisterChild(ResolveChildUrl(target.UpstreamUrl, line), target, children)).Append('\n');
         }
 
-        _playlistChildren[target.UpstreamUrl] = children;
+        AppendPlaylistGeneration(target.UpstreamUrl, children);
         return builder.ToString();
     }
 
@@ -1156,18 +1157,59 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         return localUrl;
     }
 
-    /// <summary>释放某个播放列表上一次改写登记的子节点。</summary>
-    /// <param name="playlistUrl">播放列表上游地址。</param>
-    private void ReleasePlaylistChildren(string playlistUrl)
+    /// <summary>
+    /// 登记新一代子节点，并回收超出保留代数的旧一代。
+    /// </summary>
+    /// <param name="playlistUrl">播放列表上游地址（作为分组键）。</param>
+    /// <param name="children">本次改写登记的本地子地址。</param>
+    /// <remarks>
+    /// 不能每次刷新就把上一代全部释放：播放器可能仍在请求上一版列表里的切片，
+    /// 立即回收会表现为"备用地址 404"。这里保留最近 <see cref="MaxRetainedPlaylistGenerations"/> 代，
+    /// 既保证注册数量有界（不随刷新无限增长），也不打断正在使用的上一版列表。
+    /// </remarks>
+    private void AppendPlaylistGeneration(string playlistUrl, List<string> children)
     {
-        if (!_playlistChildren.TryRemove(playlistUrl, out List<string>? previous))
+        List<string>? expired = null;
+        _playlistChildren.AddOrUpdate(
+            playlistUrl,
+            _ => [children],
+            (_, generations) =>
+            {
+                List<List<string>> updated = [children, .. generations];
+                if (updated.Count > MaxRetainedPlaylistGenerations)
+                {
+                    expired = updated[^1];
+                    updated.RemoveAt(updated.Count - 1);
+                }
+
+                return updated;
+            });
+
+        if (expired is null)
         {
             return;
         }
 
-        foreach (string url in previous)
+        foreach (string url in expired)
         {
             _registry.ReleaseByLocalUrl(url);
+        }
+    }
+    /// <summary>释放某个播放列表上一次改写登记的子节点。</summary>
+    /// <param name="playlistUrl">播放列表上游地址。</param>
+    private void ReleasePlaylistChildren(string playlistUrl)
+    {
+        if (!_playlistChildren.TryRemove(playlistUrl, out List<List<string>>? previous))
+        {
+            return;
+        }
+
+        foreach (List<string> generation in previous)
+        {
+            foreach (string url in generation)
+            {
+                _registry.ReleaseByLocalUrl(url);
+            }
         }
     }
 
