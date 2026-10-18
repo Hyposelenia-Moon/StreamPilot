@@ -718,6 +718,20 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// <returns>发送结果：成功且地址合法时带响应，超时或最终地址不被允许时判定为失败。</returns>
     internal async Task<RelaySendResult> TrySendUpstreamAsync(RelayTarget target, string? rangeHeader = null)
     {
+        /*
+          先校验目标地址再发包：只校验"重定向后的最终地址"等于让请求先抵达上游（
+          合成的私网/回环地址也真的会收到一次 GET），那已经越过了服务端边界。
+        */
+        if (!IsAllowedUpstreamUrl(target.UpstreamUrl))
+        {
+            _logger.LogError(
+                LogLevel.Warn,
+                _moduleName,
+                "中继目标地址不被允许，已在发送前拦截。",
+                new InvalidOperationException("blocked-upstream-address"));
+            return RelaySendResult.Timeout();
+        }
+
         RelaySendResult sent = await SendUpstreamAsync(
             target,
             rangeHeader,
@@ -763,6 +777,17 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// <returns>播放列表拉取结果：成功时带改写后的播放列表文本，超时时 <c>TimedOut</c> 为真。</returns>
     internal async Task<PlaylistFetchResult> TryReadPlaylistAsync(RelayTarget target, TimeSpan playlistTimeout)
     {
+        // 与字节流路径一致：先校验目标地址再发包，避免请求先抵达不该抵达的上游。
+        if (!IsAllowedUpstreamUrl(target.UpstreamUrl))
+        {
+            _logger.LogError(
+                LogLevel.Warn,
+                _moduleName,
+                "中继播放列表目标地址不被允许，已在发送前拦截。",
+                new InvalidOperationException("blocked-upstream-address"));
+            return PlaylistFetchResult.Timeout();
+        }
+
         RelaySendResult sent = await SendUpstreamAsync(
             target,
             rangeHeader: null,
