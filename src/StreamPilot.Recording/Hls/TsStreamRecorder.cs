@@ -32,11 +32,18 @@ public sealed class TsStreamRecorder
     /// </remarks>
     public const int FinalizeTimeoutSeconds = 10;
 
+    /// <summary>默认的"上游无数据"停滞判定秒数（与 FLV 录制保持一致）。</summary>
+    public const int DefaultStallTimeoutSeconds = 12;
+
+    /// <summary>停滞超时的下限秒数：配置再小也至少给这么多，避免误杀慢速分片。</summary>
+    private const int MinimumStallTimeoutSeconds = 2;
+
     private readonly IStructuredLogger _logger;
     private readonly string _moduleName = "Recording.Hls";
     private readonly SegmentPolicy _policy;
     private readonly DateTimeOffset _startedAt;
     private readonly int _playlistRefreshSeconds;
+    private readonly int _stallTimeoutSeconds;
 
     /// <summary>初始化 TS 录制器。</summary>
     /// <param name="segmentPolicy">分片策略。</param>
@@ -47,11 +54,16 @@ public sealed class TsStreamRecorder
     /// 自动化测试可传入更短（含 0）的间隔，从而在不等候真实刷新周期的前提下覆盖
     /// "取消/上游失败发生在刷新播放列表时"的必达收尾路径。
     /// </param>
+    /// <param name="stallTimeoutSeconds">
+    /// "上游无数据"的停滞判定秒数；为 <see langword="null"/> 时使用 <see cref="DefaultStallTimeoutSeconds"/>，
+    /// 低于 <see cref="MinimumStallTimeoutSeconds"/> 时按该下限处理（避免误杀慢速分片）。
+    /// </param>
     public TsStreamRecorder(
         SegmentPolicy segmentPolicy,
         DateTimeOffset startedAt,
         IStructuredLogger logger,
-        int? playlistRefreshSeconds = null)
+        int? playlistRefreshSeconds = null,
+        int? stallTimeoutSeconds = null)
     {
         ArgumentNullException.ThrowIfNull(segmentPolicy);
         ArgumentNullException.ThrowIfNull(logger);
@@ -59,6 +71,7 @@ public sealed class TsStreamRecorder
         _startedAt = startedAt;
         _logger = logger;
         _playlistRefreshSeconds = Math.Max(0, playlistRefreshSeconds ?? PlaylistRefreshSeconds);
+        _stallTimeoutSeconds = Math.Max(MinimumStallTimeoutSeconds, stallTimeoutSeconds ?? DefaultStallTimeoutSeconds);
     }
 
     /// <summary>
@@ -116,7 +129,7 @@ public sealed class TsStreamRecorder
                 // master 播放列表：切换到第一个 variant 的 media 播放列表，
                 // 之后周期性刷新该 variant 的播放列表（分片地址由解析器解析为绝对地址）。
                 playlistUri = new Uri(playlist.VariantUris[0], UriKind.Absolute);
-                playlist = await FetchMediaPlaylistAsync(client, playlistUri.ToString(), referer, cancellationToken).ConfigureAwait(false);
+                playlist = await WithStallTimeoutAsync(_stallTimeoutSeconds, "拉取播放列表", token => FetchMediaPlaylistAsync(client, playlistUri.ToString(), referer, token), cancellationToken).ConfigureAwait(false);
             }
 
             // 只刷新 media 播放列表；含 ENDLIST 的播放列表（点播/已结束）读完即结束，不刷新。
@@ -143,7 +156,7 @@ public sealed class TsStreamRecorder
 
                 await Task.Delay(TimeSpan.FromSeconds(_playlistRefreshSeconds), cancellationToken).ConfigureAwait(false);
 
-                HlsPlaylist refreshed = await FetchMediaPlaylistAsync(client, playlistUri.ToString(), referer, cancellationToken).ConfigureAwait(false);
+                HlsPlaylist refreshed = await WithStallTimeoutAsync(_stallTimeoutSeconds, "拉取播放列表", token => FetchMediaPlaylistAsync(client, playlistUri.ToString(), referer, token), cancellationToken).ConfigureAwait(false);
                 if (refreshed.SegmentUris.Count == 0)
                 {
                     _logger.Warn(_moduleName, "刷新后的播放列表为空，结束录制。", new Dictionary<string, object?>
@@ -224,7 +237,7 @@ public sealed class TsStreamRecorder
             byte[] payload;
             try
             {
-                payload = await DownloadAsync(client, segmentUri, referer, cancellationToken).ConfigureAwait(false);
+                payload = await WithStallTimeoutAsync(_stallTimeoutSeconds, "下载分片", token => DownloadAsync(client, segmentUri, referer, token), cancellationToken).ConfigureAwait(false);
             }
             catch (Core.Errors.RecordingException exception)
             {
@@ -513,6 +526,39 @@ public sealed class TsStreamRecorder
             : 0;
     }
 
+    /// <summary>
+    /// 用"停滞超时"包住一次上游请求：超过设定秒数没有任何响应即判定上游停滞。
+    /// </summary>
+    /// <typeparam name="T">请求结果类型。</typeparam>
+    /// <param name="stallTimeoutSeconds">停滞判定秒数。</param>
+    /// <param name="operation">环节名，用于失败原因与日志。</param>
+    /// <param name="action">实际的请求动作（拿到的令牌带停滞超时）。</param>
+    /// <param name="cancellationToken">调用方取消令牌。</param>
+    /// <returns>请求结果。</returns>
+    /// <remarks>
+    /// TS 录制的两个阻塞点（拉播放列表、下载分片）此前没有任何上限：上游不回包时录制会一直显示"录制中"。
+    /// 这里与 FLV 的 <c>ReadWithStallTimeoutAsync</c> 同口径，超时即按上游停滞结束录制。
+    /// </remarks>
+    private static async Task<T> WithStallTimeoutAsync<T>(
+        int stallTimeoutSeconds,
+        string operation,
+        Func<CancellationToken, Task<T>> action,
+        CancellationToken cancellationToken)
+    {
+        int seconds = Math.Max(MinimumStallTimeoutSeconds, stallTimeoutSeconds);
+        using CancellationTokenSource stall = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        stall.CancelAfter(TimeSpan.FromSeconds(seconds));
+        try
+        {
+            return await action(stall.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new Core.Errors.RecordingException(
+                Core.Errors.RecordingErrorCategory.MalformedStream,
+                operation + " 超过 " + seconds + " 秒没有数据返回，判定上游停滞。");
+        }
+    }
     private static async Task<HlsPlaylist> FetchMediaPlaylistAsync(
         HttpClient client,
         string playlistUri,

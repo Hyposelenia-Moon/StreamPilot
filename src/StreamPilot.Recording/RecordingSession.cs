@@ -348,7 +348,7 @@ public sealed class RecordingSession : IRecordingSession
         string content = await FetchPlaylistAsync(client, playlistUri, _candidate.HttpReferer, _cancellation.Token).ConfigureAwait(false);
         HlsPlaylist playlist = HlsPlaylistParser.Parse(content, playlistUri);
 
-        TsStreamRecorder recorder = new(policy, DateTimeOffset.Now, _logger);
+        TsStreamRecorder recorder = new(policy, DateTimeOffset.Now, _logger, stallTimeoutSeconds: _stallTimeoutSeconds);
         FlvRecordingResult result = await recorder.RecordFragmentsAsync(
             client,
             playlist,
