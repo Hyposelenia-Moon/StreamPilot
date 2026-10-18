@@ -234,6 +234,32 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     public int RelayCount => _registry.Count;
 
     /// <summary>
+    /// 判断某个本地中继地址当前是否仍然可用（离线用例据此断言子节点回收时机）。
+    /// </summary>
+    /// <param name="localUrl">本地中继地址（例如 <c>http://127.0.0.1:5566/relay/{token}</c>）。</param>
+    /// <returns>仍然登记时返回 <see langword="true"/>。</returns>
+    internal bool IsRelayRegistered(string localUrl)
+    {
+        if (string.IsNullOrWhiteSpace(localUrl))
+        {
+            return false;
+        }
+
+        // 未启动监听的离线用例里，登记得到的地址是相对的（"/relay/{token}"），因此按路径取最后一段。
+        string path = Uri.TryCreate(localUrl, UriKind.Absolute, out Uri? absolute)
+            ? absolute.AbsolutePath
+            : localUrl.Split('?')[0];
+        string[] segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length == 0)
+        {
+            return false;
+        }
+
+        string token = segments[^1];
+        return token.Length > 0 && _registry.TryResolve(token, out _);
+    }
+
+    /// <summary>
     /// 启动监听。端口依次尝试 <c>PreferredPort..MaxPort</c>，全部占用时由系统分配。
     /// </summary>
     /// <exception cref="BridgeException">无法绑定任何端口时抛出。</exception>

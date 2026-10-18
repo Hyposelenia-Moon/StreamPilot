@@ -243,6 +243,62 @@ public sealed class RelaySafetyTests
         Assert.True(result.Playlist.Contains("#EXTINF", StringComparison.Ordinal), "分片时长标签必须保留");
     }
 
+    /// <summary>
+    /// 播放列表刷新后的子节点回收：最近一代保留、更早一代被回收，且注册数量不随刷新增长。
+    /// </summary>
+    /// <remarks>
+    /// 回归背景：过去每次刷新都会把上一版子节点全部释放，播放器仍在用的切片会 404；
+    /// 现在保留最近两代，只回收更早的一代。
+    /// </remarks>
+    [TestMethod("中继子节点：按代回收，上一代仍可访问、更早一代被释放")]
+    public async Task PlaylistChildrenAreRetainedByGeneration()
+    {
+        using SlowBodyHandler handler = new(TimeSpan.Zero);
+        await using BridgeHost host = CreateHost(handler);
+
+        RelayTarget target = new()
+        {
+            UpstreamUrl = "https://cdn.example.com/live/index.m3u8",
+            Kind = RelayKind.HlsPlaylist,
+        };
+
+        BridgeHost.PlaylistFetchResult first = await host.TryReadPlaylistAsync(target, ShortPlaylistTimeout);
+        string firstChild = FirstChildUrl(first.Playlist!);
+        Assert.True(host.IsRelayRegistered(firstChild), "第一次改写登记的子节点必须可用");
+
+        BridgeHost.PlaylistFetchResult second = await host.TryReadPlaylistAsync(target, ShortPlaylistTimeout);
+        string secondChild = FirstChildUrl(second.Playlist!);
+        Assert.True(host.IsRelayRegistered(firstChild), "上一代子节点必须保留：播放器可能仍在用上一版列表");
+        Assert.True(host.IsRelayRegistered(secondChild), "新一代子节点必须可用");
+        int retainedCount = host.RelayCount;
+        Assert.True(retainedCount <= 4, "保留两代后注册数应有界（每代 2 条子地址），实际 " + retainedCount);
+
+        BridgeHost.PlaylistFetchResult third = await host.TryReadPlaylistAsync(target, ShortPlaylistTimeout);
+        string thirdChild = FirstChildUrl(third.Playlist!);
+        Assert.True(host.IsRelayRegistered(thirdChild), "最新一代子节点必须可用");
+        Assert.False(host.IsRelayRegistered(firstChild), "更早一代必须被回收，避免无限增长");
+        Assert.True(host.RelayCount <= retainedCount + 2, "刷新不应让注册数持续增长");
+
+        host.ReleaseRelay(thirdChild);
+        Assert.False(host.IsRelayRegistered(thirdChild), "显式释放后子节点必须立刻失效");
+    }
+
+    /// <summary>从改写后的播放列表里取第一条子地址（跳过注释与空行）。</summary>
+    /// <param name="playlist">改写后的播放列表文本。</param>
+    /// <returns>首条子地址。</returns>
+    private static string FirstChildUrl(string playlist)
+    {
+        foreach (string line in playlist.Split('\n'))
+        {
+            string trimmed = line.Trim();
+            if (trimmed.Length > 0 && trimmed[0] != '#')
+            {
+                return trimmed;
+            }
+        }
+
+        throw new AssertionFailedException("播放列表里没有任何子地址，用例前提不成立。");
+    }
     /// <summary>长连接：响应头在超时窗口内返回后，只要数据持续到达就不能被这两条超时误杀。</summary>
     [TestMethod("中继超时：长连接不被响应头 / 播放列表超时误杀")]
     public async Task LongLivedStreamIsNotKilledByHeaderTimeout()

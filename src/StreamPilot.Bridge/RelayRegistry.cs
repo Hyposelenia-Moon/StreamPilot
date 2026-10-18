@@ -105,12 +105,12 @@ public sealed class RelayRegistry
             return;
         }
 
-        if (!Uri.TryCreate(localUrl, UriKind.Absolute, out Uri? uri))
-        {
-            return;
-        }
+        // 未启动监听的离线路径里地址可能是相对的（"/relay/{token}"），按路径最后一段同样能释放。
+        string path = Uri.TryCreate(localUrl, UriKind.Absolute, out Uri? uri)
+            ? uri.AbsolutePath
+            : localUrl.Split('?')[0];
 
-        string[] segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        string[] segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (segments.Length == 0)
         {
             return;
