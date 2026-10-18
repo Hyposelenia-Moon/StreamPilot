@@ -1256,11 +1256,11 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         _preferredQualityKey = qualityKey;
         AppendLog("切换画质：" + (qualityKey ?? QualityOption.BestFlag));
         _automaticReResolveCount = 0;
+        /*
+          重新解析后会按「解析成功后自动播放」的开关决定是否播放（见 ResolveAsync），
+          这里不再额外下发一次播放：过去两处都调 PlayAsync，一次换档会生成两份播放计划。
+        */
         await ResolveAsync().ConfigureAwait(true);
-        if (_currentRoom is not null)
-        {
-            await PlayAsync().ConfigureAwait(true);
-        }
     }
 
     /// <summary>
