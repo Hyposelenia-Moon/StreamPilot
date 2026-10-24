@@ -69,6 +69,25 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// <summary>建立上游连接的超时（秒）。</summary>
     private const int UpstreamConnectTimeoutSeconds = 10;
 
+    /// <summary>
+    /// 跟随上游重定向的最大跳数。
+    /// </summary>
+    /// <remarks>
+    /// 重定向**逐跳**发送与校验（见 <see cref="SendUpstreamAsync"/>）：每一跳的实际目标都要先过
+    /// <see cref="IsAllowedUpstreamUrl(string)"/> 再发包，因此跳数必须有上限，避免"公网地址 → 公网地址 → …"的循环。
+    /// </remarks>
+    private const int MaxUpstreamRedirects = 5;
+
+    /// <summary>需要跟随的上游重定向状态码（300/304/305/306 不跟随）。</summary>
+    private static readonly HttpStatusCode[] RedirectStatusCodes =
+    [
+        HttpStatusCode.MovedPermanently,
+        HttpStatusCode.Found,
+        HttpStatusCode.SeeOther,
+        HttpStatusCode.TemporaryRedirect,
+        HttpStatusCode.PermanentRedirect,
+    ];
+
     /// <summary>HLS 播放列表响应的内容类型。</summary>
     private const string HlsPlaylistContentType = "application/vnd.apple.mpegurl; charset=utf-8";
 
@@ -196,9 +215,9 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// <see cref="_playlistDownloadTimeout"/>），FLV/TS 长连接的边界只由 <see cref="_idleTimeout"/> 空闲看门狗负责。
     /// </para>
     /// <para>
-    /// 跟随重定向（<see cref="SocketsHttpHandler.AllowAutoRedirect"/>）保留，但**重定向后的最终地址**
-    /// 同样要过 <see cref="IsAllowedUpstreamUrl(string)"/>（见 <see cref="StreamRelayAsync"/>），
-    /// 否则公网地址可以把中继指向回环/私网。
+    /// 跟随重定向的能力**不用** <see cref="SocketsHttpHandler.AllowAutoRedirect"/>：自动跳转会在
+    /// 应用层拿到控制权之前先请求中间地址，回环/私网目标因此照样会收到一次 GET（SP-04）。
+    /// 这里关闭自动跳转，改由 <see cref="SendUpstreamAsync"/> 逐跳校验、逐跳发送。
     /// </para>
     /// </remarks>
     private static HttpClient CreateRelayClient(HttpMessageHandler? handler)
@@ -206,7 +225,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         SocketsHttpHandler sockets = new()
         {
             UseCookies = false,
-            AllowAutoRedirect = true,
+            AllowAutoRedirect = false,
             AutomaticDecompression = System.Net.DecompressionMethods.None,
             PooledConnectionLifetime = Timeout.InfiniteTimeSpan,
             ConnectTimeout = TimeSpan.FromSeconds(UpstreamConnectTimeoutSeconds),
@@ -317,26 +336,59 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
             throw new BridgeException("register-relay", "桥接服务未启动，无法注册中继。");
         }
 
-        string token = _registry.Register(target);
-        return $"{BaseAddress}{RelayPathPrefix}/{token}";
+        return $"{BaseAddress}{RelayPathPrefix}/{RegisterRelayCore(target)}";
     }
 
+    /// <summary>
+    /// 往注册表里登记一个中继目标（不要求监听已启动）。
+    /// </summary>
+    /// <param name="target">中继目标。</param>
+    /// <returns>中继令牌。</returns>
+    /// <remarks>
+    /// 供离线用例驱动"父节点 → 子节点"的回收链：<see cref="ReleaseRelay"/> 要按**完整本地地址**释放父节点，
+    /// 而完整地址里的令牌只能由注册得到，离线环境又没有监听端口可以拼地址。
+    /// 生产路径仍走 <see cref="RegisterRelay"/>（带运行状态检查）。
+    /// </remarks>
+    internal string RegisterRelayCore(RelayTarget target) => _registry.Register(target);
+
     /// <inheritdoc />
+    /// <remarks>
+    /// 释放一个父中继（HLS 播放列表）时必须**递归**回收它改写出来的子节点：
+    /// 生产调用者传进来的是完整的本地地址（<c>http://127.0.0.1:端口/relay/{token}</c>），
+    /// 而子节点集合按"播放列表上游地址"分组、元素是裸令牌——过去用完整地址去匹配这份集合永远匹配不上，
+    /// 于是释放父节点后子注册仍可访问（SP-03）。这里先由令牌反查上游地址，再沿子分组逐代回收，
+    /// 子播放列表自己的子节点同样递归处理。
+    /// </remarks>
     public void ReleaseRelay(string localUrl)
     {
-        if (!string.IsNullOrWhiteSpace(localUrl))
+        string? token = RelayRegistry.ExtractToken(localUrl);
+        if (token is null)
         {
-            // 释放播放列表时连同它上一次改写登记的子节点一起回收。
-            foreach (KeyValuePair<string, List<List<string>>> entry in _playlistChildren)
-            {
-                if (entry.Value.Exists(generation => generation.Contains(localUrl, StringComparer.Ordinal)))
-                {
-                    ReleasePlaylistChildren(entry.Key);
-                }
-            }
+            return;
         }
 
-        _registry.ReleaseByLocalUrl(localUrl);
+        ReleaseRegistration(token, new HashSet<string>(StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// 释放一条注册，并递归释放它作为播放列表时登记的所有子节点。
+    /// </summary>
+    /// <param name="token">中继令牌。</param>
+    /// <param name="visited">本次释放已经处理过的令牌（防止子节点环导致无限递归）。</param>
+    private void ReleaseRegistration(string token, HashSet<string> visited)
+    {
+        if (!visited.Add(token))
+        {
+            return;
+        }
+
+        // 用"不刷新活跃时间"的读取：回收不是访问，不该延长这条注册的过期时间。
+        if (_registry.TryPeek(token, out RelayTarget? target) && target is not null)
+        {
+            ReleasePlaylistChildren(target.UpstreamUrl, visited);
+        }
+
+        _registry.Release(token);
     }
 
     /// <inheritdoc />
@@ -518,20 +570,25 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
                     return;
             }
         }
-        catch (Exception exception) when (exception is BridgeException or IOException or HttpListenerException or ObjectDisposedException or InvalidOperationException)
+        catch (Exception exception) when (exception is BridgeException or IOException or HttpListenerException or ObjectDisposedException or InvalidOperationException or HttpRequestException)
         {
             _logger.LogError(LogLevel.Warn, _moduleName, "处理桥接请求失败。", exception, new Dictionary<string, object?>
             {
                 ["path"] = context.Request.Url?.AbsolutePath,
             });
 
-            HttpStatusCode status = exception is BridgeException ? HttpStatusCode.BadGateway : HttpStatusCode.InternalServerError;
+            HttpStatusCode status = exception is BridgeException or HttpRequestException
+                ? HttpStatusCode.BadGateway
+                : HttpStatusCode.InternalServerError;
+            string error = exception switch
+            {
+                BridgeException => "bridge-unavailable",
+                HttpRequestException => "upstream-unavailable",
+                _ => "internal",
+            };
             try
             {
-                await WriteTextAsync(
-                    context,
-                    status,
-                    exception is BridgeException ? "{\"error\":\"bridge-unavailable\"}" : "{\"error\":\"internal\"}").ConfigureAwait(false);
+                await WriteTextAsync(context, status, "{\"error\":\"" + error + "\"}").ConfigureAwait(false);
             }
             catch (Exception writeFailure) when (writeFailure is IOException or HttpListenerException or ObjectDisposedException or InvalidOperationException)
             {
@@ -644,11 +701,23 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     internal static HttpRequestMessage CreateUpstreamRequest(RelayTarget target, string? rangeHeader)
     {
         ArgumentNullException.ThrowIfNull(target);
-        HttpRequestMessage request = new(HttpMethod.Get, target.UpstreamUrl);
+        return CreateUpstreamRequest(target.UpstreamUrl, target.Referer, rangeHeader);
+    }
+
+    /// <summary>
+    /// 按"地址 + Referer"构造发往上游 CDN 的请求（重定向时逐跳重建使用）。
+    /// </summary>
+    /// <param name="url">本跳的实际目标地址。</param>
+    /// <param name="referer">上游 Referer，可为 <see langword="null"/>。</param>
+    /// <param name="rangeHeader">客户端传来的 <c>Range</c> 头，可为 <see langword="null"/>。</param>
+    /// <returns>可直接发送的请求（调用方负责释放）。</returns>
+    private static HttpRequestMessage CreateUpstreamRequest(string url, string? referer, string? rangeHeader)
+    {
+        HttpRequestMessage request = new(HttpMethod.Get, url);
         request.Headers.TryAddWithoutValidation(HeaderNameUserAgent, HttpClientFactory.DefaultUserAgent);
-        if (!string.IsNullOrWhiteSpace(target.Referer))
+        if (!string.IsNullOrWhiteSpace(referer))
         {
-            request.Headers.TryAddWithoutValidation(HeaderNameReferer, target.Referer);
+            request.Headers.TryAddWithoutValidation(HeaderNameReferer, referer);
         }
 
         if (!string.IsNullOrWhiteSpace(rangeHeader))
@@ -660,18 +729,25 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     }
 
     /// <summary>
-    /// 向中继上游发起一次请求并等响应头，带**有限**超时。
+    /// 向中继上游发起一次请求并等响应头，带**有限**超时；重定向**逐跳校验后再发送**。
     /// </summary>
     /// <param name="target">中继目标。</param>
     /// <param name="rangeHeader">客户端传来的 <c>Range</c> 头，可为 <see langword="null"/>。</param>
     /// <param name="completionOption">读取方式（取响应头 / 读完整正文）。</param>
-    /// <param name="timeout">等上游的时限。</param>
-    /// <returns>发送结果：成功时带请求与响应，超时时带判定原因。</returns>
+    /// <param name="timeout">每一跳等上游的时限。</param>
+    /// <returns>发送结果：成功时带请求与响应；超时、被拒或跳转过多时判定为失败。</returns>
     /// <remarks>
+    /// <para>
     /// 超时用独立的 <see cref="CancellationTokenSource"/>（而不是 <see cref="HttpClient.Timeout"/>）：
     /// <see cref="HttpCompletionOption.ResponseHeadersRead"/> 下后者只管到响应头，
     /// 且中继整体必须保持 <see cref="Timeout.InfiniteTimeSpan"/> 才能承载直播长连接；
     /// 断流判定仍由 <see cref="PumpWithIdleTimeoutAsync"/> 的空闲看门狗负责。
+    /// </para>
+    /// <para>
+    /// 所有发出（等响应头、读播放列表、读长连接正文）都从这里出去，因此**重定向的每一跳**
+    /// 都在发包**之前**过 <see cref="IsAllowedUpstreamUrl(string)"/>（SP-04）：过去依赖
+    /// <see cref="SocketsHttpHandler.AllowAutoRedirect"/>，中间地址已经收到一次 GET 才轮到应用层检查。
+    /// </para>
     /// </remarks>
     private async Task<RelaySendResult> SendUpstreamAsync(
         RelayTarget target,
@@ -679,26 +755,88 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         HttpCompletionOption completionOption,
         TimeSpan timeout)
     {
-        HttpRequestMessage request = CreateUpstreamRequest(target, rangeHeader);
-        using CancellationTokenSource timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
-        timeoutSource.CancelAfter(timeout);
-        try
+        string currentUrl = target.UpstreamUrl;
+        for (int hop = 0; hop <= MaxUpstreamRedirects; hop++)
         {
-            HttpResponseMessage response = await _relayClient
-                .SendAsync(request, completionOption, timeoutSource.Token)
-                .ConfigureAwait(false);
-            return RelaySendResult.Success(request, response);
-        }
-        catch (OperationCanceledException) when (!_shutdown.IsCancellationRequested)
-        {
+            if (!IsAllowedUpstreamUrl(currentUrl))
+            {
+                _logger.LogError(
+                    LogLevel.Warn,
+                    _moduleName,
+                    "中继目标地址不被允许，已在发送前拦截。",
+                    new InvalidOperationException("blocked-upstream-address"),
+                    new Dictionary<string, object?>
+                    {
+                        ["host"] = TryGetHost(currentUrl),
+                        ["hop"] = hop,
+                    });
+                return RelaySendResult.Rejected();
+            }
+
+            HttpRequestMessage request = CreateUpstreamRequest(currentUrl, target.Referer, rangeHeader);
+            using CancellationTokenSource timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
+            timeoutSource.CancelAfter(timeout);
+            HttpResponseMessage response;
+            try
+            {
+                response = await _relayClient
+                    .SendAsync(request, completionOption, timeoutSource.Token)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!_shutdown.IsCancellationRequested)
+            {
+                request.Dispose();
+                return RelaySendResult.Timeout();
+            }
+            catch (HttpRequestException)
+            {
+                request.Dispose();
+                throw;
+            }
+
+            if (!TryGetRedirectTarget(response, currentUrl, out string redirectUrl))
+            {
+                return RelaySendResult.Success(request, response);
+            }
+
             request.Dispose();
-            return RelaySendResult.Timeout();
+            response.Dispose();
+            currentUrl = redirectUrl;
         }
-        catch (HttpRequestException)
+
+        _logger.Warn(_moduleName, "中继上游重定向次数超过上限，已放弃。", new Dictionary<string, object?>
         {
-            request.Dispose();
-            throw;
+            ["host"] = TryGetHost(target.UpstreamUrl),
+            ["maxRedirects"] = MaxUpstreamRedirects,
+        });
+        return RelaySendResult.Timeout();
+    }
+
+    /// <summary>
+    /// 判断上游响应是不是需要跟随的重定向，并给出下一跳的绝对地址。
+    /// </summary>
+    /// <param name="response">上游响应。</param>
+    /// <param name="currentUrl">本跳的请求地址（相对 <c>Location</c> 的基地址）。</param>
+    /// <param name="redirectUrl">下一跳的绝对地址（不是重定向时为空字符串）。</param>
+    /// <returns>需要跟随重定向返回 <see langword="true"/>。</returns>
+    private static bool TryGetRedirectTarget(HttpResponseMessage response, string currentUrl, out string redirectUrl)
+    {
+        redirectUrl = string.Empty;
+        if (!RedirectStatusCodes.Contains(response.StatusCode))
+        {
+            return false;
         }
+
+        Uri? location = response.Headers.Location;
+        if (location is null)
+        {
+            return false;
+        }
+
+        redirectUrl = location.IsAbsoluteUri
+            ? location.ToString()
+            : new Uri(new Uri(currentUrl), location).ToString();
+        return true;
     }
 
     /// <summary>
@@ -731,13 +869,24 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// <summary>上游超时后的收尾：回 504（日志已由 <see cref="ReportUpstreamTimeout"/> 记录）。</summary>
     /// <param name="context">当前请求。</param>
     /// <param name="moduleOperation">发生超时的环节（写入响应体便于页面侧定位）。</param>
-    private async Task FailUpstreamTimeoutAsync(HttpListenerContext context, string moduleOperation)
-    {
-        await WriteTextAsync(
+    private Task FailUpstreamTimeoutAsync(HttpListenerContext context, string moduleOperation) =>
+        FailUpstreamAsync(context, HttpStatusCode.GatewayTimeout, "upstream-timeout", moduleOperation);
+
+    /// <summary>上游判定失败后的收尾：按失败原因回 502 / 504，状态码与错误码都不含签名地址。</summary>
+    /// <param name="context">当前请求。</param>
+    /// <param name="status">HTTP 状态码。</param>
+    /// <param name="error">错误码（写入响应体）。</param>
+    /// <param name="moduleOperation">发生失败的环节（写入响应体便于页面侧定位）。</param>
+    /// <returns>异步任务。</returns>
+    private Task FailUpstreamAsync(
+        HttpListenerContext context,
+        HttpStatusCode status,
+        string error,
+        string moduleOperation) =>
+        WriteTextAsync(
             context,
-            HttpStatusCode.GatewayTimeout,
-            "{\"error\":\"upstream-timeout\",\"operation\":\"" + moduleOperation + "\"}").ConfigureAwait(false);
-    }
+            status,
+            "{\"error\":\"" + error + "\",\"operation\":\"" + moduleOperation + "\"}");
 
     /// <summary>
     /// 等上游响应头并校验"重定向后的最终地址"（离线用例可直接调用的入口）。
@@ -748,8 +897,8 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     internal async Task<RelaySendResult> TrySendUpstreamAsync(RelayTarget target, string? rangeHeader = null)
     {
         /*
-          先校验目标地址再发包：只校验"重定向后的最终地址"等于让请求先抵达上游（
-          合成的私网/回环地址也真的会收到一次 GET），那已经越过了服务端边界。
+          地址校验统一在 SendUpstreamAsync 的"每一跳发送之前"完成：这里先做一次快速判定只是为了
+          在明显非法的目标上不创建请求；真正的保证来自发送入口本身（生产路径同样经过它）。
         */
         if (!IsAllowedUpstreamUrl(target.UpstreamUrl))
         {
@@ -758,7 +907,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
                 _moduleName,
                 "中继目标地址不被允许，已在发送前拦截。",
                 new InvalidOperationException("blocked-upstream-address"));
-            return RelaySendResult.Timeout();
+            return RelaySendResult.Rejected();
         }
 
         RelaySendResult sent = await SendUpstreamAsync(
@@ -766,6 +915,11 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
             rangeHeader,
             HttpCompletionOption.ResponseHeadersRead,
             _upstreamHeaderTimeout).ConfigureAwait(false);
+        if (sent.Blocked)
+        {
+            return sent;
+        }
+
         if (sent.TimedOut)
         {
             return ReportUpstreamTimeout(sent, target, "response-headers");
@@ -775,7 +929,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         {
             sent.Request!.Dispose();
             sent.Response!.Dispose();
-            return RelaySendResult.Timeout();
+            return RelaySendResult.Rejected();
         }
 
         return sent;
@@ -806,7 +960,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// <returns>播放列表拉取结果：成功时带改写后的播放列表文本，超时时 <c>TimedOut</c> 为真。</returns>
     internal async Task<PlaylistFetchResult> TryReadPlaylistAsync(RelayTarget target, TimeSpan playlistTimeout)
     {
-        // 与字节流路径一致：先校验目标地址再发包，避免请求先抵达不该抵达的上游。
+        // 与字节流路径一致：先把目标地址过一遍（真正的逐跳校验在 SendUpstreamAsync 里）。
         if (!IsAllowedUpstreamUrl(target.UpstreamUrl))
         {
             _logger.LogError(
@@ -814,7 +968,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
                 _moduleName,
                 "中继播放列表目标地址不被允许，已在发送前拦截。",
                 new InvalidOperationException("blocked-upstream-address"));
-            return PlaylistFetchResult.Timeout();
+            return PlaylistFetchResult.Rejected();
         }
 
         RelaySendResult sent = await SendUpstreamAsync(
@@ -822,6 +976,11 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
             rangeHeader: null,
             HttpCompletionOption.ResponseContentRead,
             _upstreamHeaderTimeout).ConfigureAwait(false);
+        if (sent.Blocked)
+        {
+            return PlaylistFetchResult.Rejected();
+        }
+
         if (sent.TimedOut)
         {
             _ = ReportUpstreamTimeout(sent, target, "playlist");
@@ -832,7 +991,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         using HttpResponseMessage response = sent.Response!;
         if (!IsAllowedUpstreamUrl(response.RequestMessage?.RequestUri ?? new Uri(target.UpstreamUrl)))
         {
-            return PlaylistFetchResult.Timeout();
+            return PlaylistFetchResult.Rejected();
         }
 
         if (!response.IsSuccessStatusCode)
@@ -845,7 +1004,11 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         try
         {
             string playlist = await response.Content.ReadAsStringAsync(timeoutSource.Token).ConfigureAwait(false);
-            return new PlaylistFetchResult(RewritePlaylist(playlist, target), (int)HttpStatusCode.OK, TimedOut: false);
+
+            // 相对地址必须按**最终地址**解析：上游可能把播放列表跳到另一个目录（例如 /live → /live2），
+            // 拿原始地址当基地址会把重定向后的分片解析到不存在的路径。
+            string baseUrl = response.RequestMessage?.RequestUri?.ToString() ?? target.UpstreamUrl;
+            return new PlaylistFetchResult(RewritePlaylist(playlist, target, baseUrl), (int)HttpStatusCode.OK, TimedOut: false);
         }
         catch (OperationCanceledException) when (!_shutdown.IsCancellationRequested)
         {
@@ -888,11 +1051,23 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
             return;
         }
 
-        RelaySendResult sent = await SendUpstreamAsync(
+        /*
+          字节流是**生产入口**：必须和播放列表走同一个发送入口（TrySendUpstreamAsync → SendUpstreamAsync），
+          否则"发送前校验"只管住了离线用例与播放列表，真实的分片/FLV 请求仍会先打到目标再被拒绝（SP-04）。
+        */
+        RelaySendResult sent = await TrySendUpstreamAsync(
             target,
-            context.Request.Headers[HeaderNameRange],
-            HttpCompletionOption.ResponseHeadersRead,
-            _upstreamHeaderTimeout).ConfigureAwait(false);
+            context.Request.Headers[HeaderNameRange]).ConfigureAwait(false);
+        if (sent.Blocked)
+        {
+            await FailUpstreamAsync(
+                context,
+                HttpStatusCode.BadGateway,
+                "forbidden-upstream",
+                "response-headers").ConfigureAwait(false);
+            return;
+        }
+
         if (sent.TimedOut)
         {
             await FailUpstreamTimeoutAsync(context, "response-headers").ConfigureAwait(false);
@@ -945,6 +1120,16 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     private async Task ServePlaylistAsync(HttpListenerContext context, RelayTarget target)
     {
         PlaylistFetchResult fetched = await TryReadPlaylistAsync(target, _playlistDownloadTimeout).ConfigureAwait(false);
+        if (fetched.Blocked)
+        {
+            await FailUpstreamAsync(
+                context,
+                HttpStatusCode.BadGateway,
+                "forbidden-upstream",
+                "playlist").ConfigureAwait(false);
+            return;
+        }
+
         if (fetched.TimedOut)
         {
             await FailUpstreamTimeoutAsync(context, "playlist").ConfigureAwait(false);
@@ -1000,7 +1185,8 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// </summary>
     /// <param name="Request">请求（成功时非空，调用方负责释放）。</param>
     /// <param name="Response">响应（成功时非空，调用方负责释放）。</param>
-    /// <param name="TimedOut">是否因为超过时限而被判定失败。</param>
+    /// <param name="TimedOut">是否没有拿到可用的上游响应（超时、被拒、跳转过多）。</param>
+    /// <param name="Blocked">是否因为目标地址不被允许而被拒（调用方据此回 502 而不是 504）。</param>
     /// <remarks>
     /// 类型是 internal 而不是 private：离线用例要直接读这三个字段来断言超时与重定向拒绝
     /// （见 <c>tests/StreamPilot.Tests/Cases/RelaySafetyTests.cs</c>），
@@ -1009,7 +1195,8 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     internal readonly record struct RelaySendResult(
         HttpRequestMessage? Request,
         HttpResponseMessage? Response,
-        bool TimedOut)
+        bool TimedOut,
+        bool Blocked = false)
     {
         /// <summary>构造成功结果。</summary>
         /// <param name="request">请求。</param>
@@ -1021,20 +1208,30 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         /// <summary>构造超时结果。</summary>
         /// <returns>超时结果。</returns>
         public static RelaySendResult Timeout() => new(null, null, TimedOut: true);
+
+        /// <summary>构造"目标地址被拒"结果。</summary>
+        /// <returns>被拒结果（<see cref="TimedOut"/> 同样为真，调用方按 <see cref="Blocked"/> 区分 502/504）。</returns>
+        public static RelaySendResult Rejected() => new(null, null, TimedOut: true, Blocked: true);
     }
 
     /// <summary>
     /// 一次 HLS 播放列表拉取的结果。
     /// </summary>
     /// <param name="Playlist">改写后的播放列表文本；失败时为 <see langword="null"/>。</param>
-    /// <param name="StatusCode">上游状态码（成功时为 200）。</param>
-    /// <param name="TimedOut">是否因为超过时限而被判定失败。</param>
+    /// <param name="StatusCode">上游状态码（成功时为 200，被拒时为 502，超时为 504）。</param>
+    /// <param name="TimedOut">是否没有拿到可用的播放列表（超时、被拒、跳转过多）。</param>
+    /// <param name="Blocked">是否因为目标地址不被允许而被拒（调用方据此回 502 而不是 504）。</param>
     /// <remarks>类型是 internal 的原因同 <see cref="RelaySendResult"/>。</remarks>
-    internal readonly record struct PlaylistFetchResult(string? Playlist, int StatusCode, bool TimedOut)
+    internal readonly record struct PlaylistFetchResult(string? Playlist, int StatusCode, bool TimedOut, bool Blocked = false)
     {
         /// <summary>构造超时结果。</summary>
         /// <returns>超时结果。</returns>
         public static PlaylistFetchResult Timeout() => new(null, (int)HttpStatusCode.GatewayTimeout, TimedOut: true);
+
+        /// <summary>构造"目标地址被拒"结果。</summary>
+        /// <returns>被拒结果。</returns>
+        public static PlaylistFetchResult Rejected() =>
+            new(null, (int)HttpStatusCode.BadGateway, TimedOut: true, Blocked: true);
     }
 
     /// <summary>
@@ -1111,9 +1308,10 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// 改写播放列表：把每个切片/子播放列表地址注册成新的本地中继并替换。
     /// </summary>
     /// <param name="playlist">上游播放列表文本。</param>
-    /// <param name="target">播放列表中继目标。</param>
+    /// <param name="target">播放列表中继目标（改写出的子节点继承它的 Referer）。</param>
+    /// <param name="baseUrl">相对地址的基地址（跟随重定向后是最后一跳的地址）。</param>
     /// <returns>改写后的播放列表文本。</returns>
-    private string RewritePlaylist(string playlist, RelayTarget target)
+    private string RewritePlaylist(string playlist, RelayTarget target, string baseUrl)
     {
         List<string> children = [];
         StringBuilder builder = new(playlist.Length + PlaylistRewriteHeadroomBytes);
@@ -1128,11 +1326,11 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
 
             if (line[0] == '#')
             {
-                builder.Append(RewritePlaylistTag(line, target, children)).Append('\n');
+                builder.Append(RewritePlaylistTag(line, target, baseUrl, children)).Append('\n');
                 continue;
             }
 
-            builder.Append(RegisterChild(ResolveChildUrl(target.UpstreamUrl, line), target, children)).Append('\n');
+            builder.Append(RegisterChild(ResolveChildUrl(baseUrl, line), target, children)).Append('\n');
         }
 
         AppendPlaylistGeneration(target.UpstreamUrl, children);
@@ -1142,9 +1340,10 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// <summary>改写带 URI 属性的标签（密钥、初始化段、备用音视频轨）。</summary>
     /// <param name="line">标签行。</param>
     /// <param name="target">播放列表中继目标。</param>
+    /// <param name="baseUrl">相对地址的基地址（跟随重定向后是最后一跳的地址）。</param>
     /// <param name="children">本次改写登记的本地地址集合。</param>
     /// <returns>改写后的标签行。</returns>
-    private string RewritePlaylistTag(string line, RelayTarget target, List<string> children)
+    private string RewritePlaylistTag(string line, RelayTarget target, string baseUrl, List<string> children)
     {
         const string AttributePrefix = "URI=\"";
         int index = line.IndexOf(AttributePrefix, StringComparison.OrdinalIgnoreCase);
@@ -1160,7 +1359,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
             return line;
         }
 
-        string childUrl = ResolveChildUrl(target.UpstreamUrl, line[valueStart..valueEnd]);
+        string childUrl = ResolveChildUrl(baseUrl, line[valueStart..valueEnd]);
         string localUrl = RegisterChild(childUrl, target, children);
         return string.Concat(line[..valueStart], localUrl, line[valueEnd..]);
     }
@@ -1218,12 +1417,19 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
 
         foreach (string url in expired)
         {
-            _registry.ReleaseByLocalUrl(url);
+            string? expiredToken = RelayRegistry.ExtractToken(url);
+            if (expiredToken is not null)
+            {
+                // 过期的一代里如果有子播放列表，它自己登记的子节点也要一起回收。
+                ReleaseRegistration(expiredToken, new HashSet<string>(StringComparer.Ordinal));
+            }
         }
     }
-    /// <summary>释放某个播放列表上一次改写登记的子节点。</summary>
-    /// <param name="playlistUrl">播放列表上游地址。</param>
-    private void ReleasePlaylistChildren(string playlistUrl)
+
+    /// <summary>释放某个播放列表登记的所有子节点（含子播放列表自己的子节点）。</summary>
+    /// <param name="playlistUrl">播放列表上游地址（分组键）。</param>
+    /// <param name="visited">本次释放已经处理过的令牌（防止重复释放与环）。</param>
+    private void ReleasePlaylistChildren(string playlistUrl, HashSet<string> visited)
     {
         if (!_playlistChildren.TryRemove(playlistUrl, out List<List<string>>? previous))
         {
@@ -1232,9 +1438,13 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
 
         foreach (List<string> generation in previous)
         {
-            foreach (string url in generation)
+            foreach (string child in generation)
             {
-                _registry.ReleaseByLocalUrl(url);
+                string? childToken = RelayRegistry.ExtractToken(child);
+                if (childToken is not null)
+                {
+                    ReleaseRegistration(childToken, visited);
+                }
             }
         }
     }

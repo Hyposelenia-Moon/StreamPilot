@@ -1,5 +1,6 @@
 namespace StreamPilot.Recording.Hls;
 
+using System.Net;
 using StreamPilot.Core.Logging;
 using StreamPilot.Core.Models;
 using StreamPilot.Recording.Flv;
@@ -35,8 +36,30 @@ public sealed class TsStreamRecorder
     /// <summary>默认的"上游无数据"停滞判定秒数（与 FLV 录制保持一致）。</summary>
     public const int DefaultStallTimeoutSeconds = 12;
 
+    /// <summary>默认的重连/重试上限（配置未指定时使用）。</summary>
+    /// <remarks>
+    /// 与会话侧的 <c>RecordingOptions.MaxReconnectAttempts</c> 同义：分片下载失败、播放列表刷新失败
+    /// 都共用这一份预算，用尽即结束录制并给出明确原因（不再把失败记成"自然下播"）。
+    /// </remarks>
+    public const int DefaultMaxReconnectAttempts = 3;
+
     /// <summary>停滞超时的下限秒数：配置再小也至少给这么多，避免误杀慢速分片。</summary>
-    private const int MinimumStallTimeoutSeconds = 2;
+    internal const int MinimumStallTimeoutSeconds = 2;
+
+    /// <summary>重试失败分片/播放列表前的固定等待（毫秒）。</summary>
+    /// <remarks>不给"立刻重试"：上游限流或短暂抖动时，连续秒发只会继续失败；固定短等待足够跨过一个抖动窗口。</remarks>
+    private const int RetryDelayMilliseconds = 500;
+
+    /// <summary>单个分片下载的总耗时上限（秒）。</summary>
+    /// <remarks>
+    /// 停滞看门狗按"读取空闲间隔"计时（见 <see cref="DownloadSegmentBodyAsync"/>），
+    /// 因此一个持续有数据、但整体很慢的分片不会被误杀；这里的总上限只用于兜住
+    /// "每 1 秒来 1 字节"这类永不结束的慢速上游。
+    /// </remarks>
+    private const int SegmentDownloadTimeoutSeconds = 120;
+
+    /// <summary>读取分片正文时的缓冲区大小。</summary>
+    private const int SegmentReadBufferBytes = 64 * 1024;
 
     private readonly IStructuredLogger _logger;
     private readonly string _moduleName = "Recording.Hls";
@@ -44,6 +67,8 @@ public sealed class TsStreamRecorder
     private readonly DateTimeOffset _startedAt;
     private readonly int _playlistRefreshSeconds;
     private readonly int _stallTimeoutSeconds;
+    private readonly int _maxReconnectAttempts;
+    private readonly int _segmentDownloadTimeoutSeconds;
 
     /// <summary>初始化 TS 录制器。</summary>
     /// <param name="segmentPolicy">分片策略。</param>
@@ -58,12 +83,22 @@ public sealed class TsStreamRecorder
     /// "上游无数据"的停滞判定秒数；为 <see langword="null"/> 时使用 <see cref="DefaultStallTimeoutSeconds"/>，
     /// 低于 <see cref="MinimumStallTimeoutSeconds"/> 时按该下限处理（避免误杀慢速分片）。
     /// </param>
+    /// <param name="maxReconnectAttempts">
+    /// 分片下载失败与播放列表刷新失败共用的重试上限；为 <see langword="null"/> 时使用
+    /// <see cref="DefaultMaxReconnectAttempts"/>。
+    /// </param>
+    /// <param name="segmentDownloadTimeoutSeconds">
+    /// 单个分片下载的**总耗时**上限（秒）；为 <see langword="null"/> 时使用 <see cref="SegmentDownloadTimeoutSeconds"/>。
+    /// 它与"读取空闲间隔"是两条独立的边界：前者兜住永不结束的慢速上游，后者兜住真正没有数据的上游。
+    /// </param>
     public TsStreamRecorder(
         SegmentPolicy segmentPolicy,
         DateTimeOffset startedAt,
         IStructuredLogger logger,
         int? playlistRefreshSeconds = null,
-        int? stallTimeoutSeconds = null)
+        int? stallTimeoutSeconds = null,
+        int? maxReconnectAttempts = null,
+        int? segmentDownloadTimeoutSeconds = null)
     {
         ArgumentNullException.ThrowIfNull(segmentPolicy);
         ArgumentNullException.ThrowIfNull(logger);
@@ -72,6 +107,10 @@ public sealed class TsStreamRecorder
         _logger = logger;
         _playlistRefreshSeconds = Math.Max(0, playlistRefreshSeconds ?? PlaylistRefreshSeconds);
         _stallTimeoutSeconds = Math.Max(MinimumStallTimeoutSeconds, stallTimeoutSeconds ?? DefaultStallTimeoutSeconds);
+        _maxReconnectAttempts = Math.Max(0, maxReconnectAttempts ?? DefaultMaxReconnectAttempts);
+        _segmentDownloadTimeoutSeconds = Math.Max(
+            MinimumStallTimeoutSeconds,
+            segmentDownloadTimeoutSeconds ?? SegmentDownloadTimeoutSeconds);
     }
 
     /// <summary>
@@ -92,8 +131,13 @@ public sealed class TsStreamRecorder
     /// 不受已经取消的上层令牌影响。因此返回结果与回调登记的分片始终一致（不会出现"有分片但字节数为 0"）。
     /// 收尾失败时抛出分类为 <see cref="Core.Errors.RecordingErrorCategory.OutputUnavailable"/> 的异常，
     /// 与录制过程中的上游失败（分类 <see cref="Core.Errors.RecordingErrorCategory.MalformedStream"/>）区分。
+    /// <para>
+    /// 上游恢复（分片下载、播放列表刷新）共用一份有上限的预算：预算用尽时返回
+    /// <see cref="RecordingStopReason.ReconnectLimitReached"/> 而不是 <see cref="RecordingStopReason.StreamEnded"/>，
+    /// 避免把"上游取不到"记成"主播下播"。
+    /// </para>
     /// </remarks>
-    /// <exception cref="Core.Errors.RecordingException">播放列表拉取/刷新失败或收尾失败时抛出。</exception>
+    /// <exception cref="Core.Errors.RecordingException">收尾失败（末分片未能落盘）时抛出。</exception>
     public async Task<FlvRecordingResult> RecordFragmentsAsync(
         HttpClient client,
         HlsPlaylist playlist,
@@ -119,6 +163,7 @@ public sealed class TsStreamRecorder
         TsRecordingState state = new();
 
         bool refreshable = false;
+        bool reconnectLimitReached = false;
         RecordingStopReason reason = RecordingStopReason.StreamEnded;
         Exception? finalizeFailure = null;
 
@@ -129,16 +174,34 @@ public sealed class TsStreamRecorder
                 // master 播放列表：切换到第一个 variant 的 media 播放列表，
                 // 之后周期性刷新该 variant 的播放列表（分片地址由解析器解析为绝对地址）。
                 playlistUri = new Uri(playlist.VariantUris[0], UriKind.Absolute);
-                playlist = await WithStallTimeoutAsync(_stallTimeoutSeconds, "拉取播放列表", token => FetchMediaPlaylistAsync(client, playlistUri.ToString(), referer, token), cancellationToken).ConfigureAwait(false);
+                HlsPlaylist? variant = await FetchMediaPlaylistWithRecoveryAsync(
+                    client,
+                    playlistUri,
+                    referer,
+                    room,
+                    state,
+                    cancellationToken).ConfigureAwait(false);
+                if (variant is null)
+                {
+                    reconnectLimitReached = true;
+                }
+                else
+                {
+                    playlist = variant;
+                }
             }
 
             // 只刷新 media 播放列表；含 ENDLIST 的播放列表（点播/已结束）读完即结束，不刷新。
-            refreshable = !playlist.IsMasterPlaylist && !playlist.IsEndList;
+            refreshable = !reconnectLimitReached && !playlist.IsMasterPlaylist && !playlist.IsEndList;
 
-            while (true)
+            while (!reconnectLimitReached)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                await AppendPlaylistAsync(client, playlist, room, outputDirectory, referer, state, onSegmentCompleted, cancellationToken).ConfigureAwait(false);
+                if (!await AppendPlaylistAsync(client, playlist, room, outputDirectory, referer, state, onSegmentCompleted, cancellationToken).ConfigureAwait(false))
+                {
+                    reconnectLimitReached = true;
+                    break;
+                }
 
                 if (!refreshable)
                 {
@@ -156,7 +219,19 @@ public sealed class TsStreamRecorder
 
                 await Task.Delay(TimeSpan.FromSeconds(_playlistRefreshSeconds), cancellationToken).ConfigureAwait(false);
 
-                HlsPlaylist refreshed = await WithStallTimeoutAsync(_stallTimeoutSeconds, "拉取播放列表", token => FetchMediaPlaylistAsync(client, playlistUri.ToString(), referer, token), cancellationToken).ConfigureAwait(false);
+                HlsPlaylist? refreshed = await FetchMediaPlaylistWithRecoveryAsync(
+                    client,
+                    playlistUri,
+                    referer,
+                    room,
+                    state,
+                    cancellationToken).ConfigureAwait(false);
+                if (refreshed is null)
+                {
+                    reconnectLimitReached = true;
+                    break;
+                }
+
                 if (refreshed.SegmentUris.Count == 0)
                 {
                     _logger.Warn(_moduleName, "刷新后的播放列表为空，结束录制。", new Dictionary<string, object?>
@@ -171,7 +246,10 @@ public sealed class TsStreamRecorder
             }
 
             // refreshable 为 true 说明是直播流被用户/上层取消；为 false 说明播放列表已 ENDLIST（直播结束）。
-            reason = refreshable ? RecordingStopReason.UserStopped : RecordingStopReason.StreamEnded;
+            // 重连预算用尽必须与"自然下播"分开：播放列表还有分片却拿不到，是上游失败而不是主播下播。
+            reason = reconnectLimitReached
+                ? RecordingStopReason.ReconnectLimitReached
+                : (refreshable ? RecordingStopReason.UserStopped : RecordingStopReason.StreamEnded);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -211,7 +289,10 @@ public sealed class TsStreamRecorder
     /// <param name="state">会话状态。</param>
     /// <param name="onSegmentCompleted">分片完成回调。</param>
     /// <param name="cancellationToken">取消令牌。</param>
-    private async Task AppendPlaylistAsync(
+    /// <returns>
+    /// 可以继续录制返回 <see langword="true"/>；重连预算已用尽返回 <see langword="false"/>（调用方据此结束并归因）。
+    /// </returns>
+    private async Task<bool> AppendPlaylistAsync(
         HttpClient client,
         HlsPlaylist playlist,
         ResolvedRoom room,
@@ -234,23 +315,25 @@ public sealed class TsStreamRecorder
                 ? playlist.SegmentDurationsSeconds[index]
                 : playlist.TargetDurationSeconds;
 
-            byte[] payload;
-            try
+            SegmentDownloadOutcome outcome = await DownloadSegmentWithRecoveryAsync(
+                client,
+                segmentUri,
+                referer,
+                room,
+                state,
+                cancellationToken).ConfigureAwait(false);
+            if (outcome.ReconnectLimitReached)
             {
-                payload = await WithStallTimeoutAsync(_stallTimeoutSeconds, "下载分片", token => DownloadAsync(client, segmentUri, referer, token), cancellationToken).ConfigureAwait(false);
+                // 失败分片仍留在 Seen 里：这里已经用尽重试预算，再重来一遍只会重复同样的失败。
+                return false;
             }
-            catch (Core.Errors.RecordingException exception)
+
+            if (outcome.Payload is null)
             {
-                state.ReconnectCount++;
-                _logger.LogError(LogLevel.Warn, _moduleName, "HLS 分片下载失败，跳过该分片。", exception, new Dictionary<string, object?>
-                {
-                    ["roomId"] = room.RoomId,
-                    ["reconnectCount"] = state.ReconnectCount,
-                });
                 continue;
             }
 
-            (int payloadOffset, int usableBytes) = AlignToPacketBoundary(payload);
+            (int payloadOffset, int usableBytes) = AlignToPacketBoundary(outcome.Payload);
             if (usableBytes == 0)
             {
                 _logger.Warn(_moduleName, "HLS 分片不含完整 TS 包，已跳过。", new Dictionary<string, object?>
@@ -272,11 +355,80 @@ public sealed class TsStreamRecorder
             }
 
             // 必须从对齐后的偏移开始写：前导垃圾既不是 TS 包，也不该出现在文件里。
-            await state.FileStream!.WriteAsync(payload.AsMemory(payloadOffset, usableBytes), cancellationToken).ConfigureAwait(false);
+            await state.FileStream!.WriteAsync(outcome.Payload.AsMemory(payloadOffset, usableBytes), cancellationToken).ConfigureAwait(false);
             state.CurrentBytes += usableBytes;
             state.CurrentDurationSeconds += segmentDuration;
             state.TimestampMs += (long)Math.Round(segmentDuration * 1000);
             state.LastSegmentUri = segmentUri;
+        }
+
+        return true;
+    }
+
+    /// <summary>下载单个分片，并按共享的重连预算决定"重试 / 放弃该分片 / 结束录制"。</summary>
+    /// <param name="client">HTTP 客户端。</param>
+    /// <param name="segmentUri">分片绝对地址。</param>
+    /// <param name="referer">可选 Referer。</param>
+    /// <param name="room">房间信息（日志上下文）。</param>
+    /// <param name="state">会话状态（累计重连次数）。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>
+    /// 成功时带正文；永久失败（4xx）时为 <see langword="null"/> 且 <c>ReconnectLimitReached</c> 为假（跳过该分片）；
+    /// 重连预算用尽时 <c>ReconnectLimitReached</c> 为真。
+    /// </returns>
+    /// <remarks>
+    /// 过去失败分片加入 <c>Seen</c> 后既不重试也不计入上限，直播中途连续失败会被当成"主播下播"（SP-06）。
+    /// 这里让分片失败与播放列表刷新共用同一份 <c>MaxReconnectAttempts</c> 预算，
+    /// 且区分"这一片确实取不到（4xx，跳过）"与"上游暂时取不到（重试）"。
+    /// </remarks>
+    private async Task<SegmentDownloadOutcome> DownloadSegmentWithRecoveryAsync(
+        HttpClient client,
+        string segmentUri,
+        string? referer,
+        ResolvedRoom room,
+        TsRecordingState state,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            SegmentDownloadResult attempt = await TryDownloadSegmentAsync(client, segmentUri, referer, cancellationToken).ConfigureAwait(false);
+            if (attempt.Payload is not null)
+            {
+                return new SegmentDownloadOutcome(attempt.Payload, ReconnectLimitReached: false);
+            }
+
+            state.ReconnectCount++;
+            if (!attempt.IsRetryable)
+            {
+                _logger.Warn(_moduleName, "HLS 分片下载失败（不可恢复），跳过该分片。", new Dictionary<string, object?>
+                {
+                    ["roomId"] = room.RoomId,
+                    ["reconnectCount"] = state.ReconnectCount,
+                    ["detail"] = attempt.Reason,
+                });
+                return new SegmentDownloadOutcome(null, ReconnectLimitReached: false);
+            }
+
+            if (state.ReconnectCount > _maxReconnectAttempts)
+            {
+                _logger.Warn(_moduleName, "HLS 分片连续下载失败，已达到重连上限，结束录制。", new Dictionary<string, object?>
+                {
+                    ["roomId"] = room.RoomId,
+                    ["reconnectCount"] = state.ReconnectCount,
+                    ["maxReconnectAttempts"] = _maxReconnectAttempts,
+                    ["detail"] = attempt.Reason,
+                });
+                return new SegmentDownloadOutcome(null, ReconnectLimitReached: true);
+            }
+
+            _logger.Warn(_moduleName, "HLS 分片下载失败，准备重试。", new Dictionary<string, object?>
+            {
+                ["roomId"] = room.RoomId,
+                ["reconnectCount"] = state.ReconnectCount,
+                ["maxReconnectAttempts"] = _maxReconnectAttempts,
+                ["detail"] = attempt.Reason,
+            });
+            await DelayBeforeRetryAsync(cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -536,8 +688,8 @@ public sealed class TsStreamRecorder
     /// <param name="cancellationToken">调用方取消令牌。</param>
     /// <returns>请求结果。</returns>
     /// <remarks>
-    /// TS 录制的两个阻塞点（拉播放列表、下载分片）此前没有任何上限：上游不回包时录制会一直显示"录制中"。
-    /// 这里与 FLV 的 <c>ReadWithStallTimeoutAsync</c> 同口径，超时即按上游停滞结束录制。
+    /// 只用于**有限正文**（播放列表）的拉取：整段请求从建连到读完正文共用一个上限。
+    /// 分片下载不能这样包（会把"持续有数据但很慢"的合法分片误杀），见 <see cref="DownloadSegmentBodyAsync"/>。
     /// </remarks>
     private static async Task<T> WithStallTimeoutAsync<T>(
         int stallTimeoutSeconds,
@@ -559,6 +711,71 @@ public sealed class TsStreamRecorder
                 operation + " 超过 " + seconds + " 秒没有数据返回，判定上游停滞。");
         }
     }
+
+    /// <summary>
+    /// 拉取 media 播放列表；失败时按共享的重连预算重试，预算用尽返回 <see langword="null"/>。
+    /// </summary>
+    /// <param name="client">HTTP 客户端。</param>
+    /// <param name="playlistUri">播放列表绝对地址。</param>
+    /// <param name="referer">可选 Referer。</param>
+    /// <param name="room">房间信息（日志上下文）。</param>
+    /// <param name="state">会话状态（累计重连次数）。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>播放列表；重连预算用尽时返回 <see langword="null"/>。</returns>
+    /// <remarks>
+    /// 与分片下载共用同一份 <c>MaxReconnectAttempts</c>：过去刷新失败会立刻上抛，
+    /// 一次抖动就能让整场录制结束，而分片失败却完全没有上限（SP-06）。
+    /// 取消（用户/上层停止）不属于失败，直接按取消上抛。
+    /// </remarks>
+    private async Task<HlsPlaylist?> FetchMediaPlaylistWithRecoveryAsync(
+        HttpClient client,
+        Uri playlistUri,
+        string? referer,
+        ResolvedRoom room,
+        TsRecordingState state,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            try
+            {
+                return await WithStallTimeoutAsync(
+                    _stallTimeoutSeconds,
+                    "拉取播放列表",
+                    token => FetchMediaPlaylistAsync(client, playlistUri.ToString(), referer, token),
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (Core.Errors.RecordingException exception) when (exception.Category == Core.Errors.RecordingErrorCategory.MalformedStream)
+            {
+                state.ReconnectCount++;
+                if (state.ReconnectCount > _maxReconnectAttempts)
+                {
+                    _logger.LogError(LogLevel.Warn, _moduleName, "拉取播放列表连续失败，已达到重连上限，结束录制。", exception, new Dictionary<string, object?>
+                    {
+                        ["roomId"] = room.RoomId,
+                        ["reconnectCount"] = state.ReconnectCount,
+                        ["maxReconnectAttempts"] = _maxReconnectAttempts,
+                    });
+                    return null;
+                }
+
+                _logger.LogError(LogLevel.Warn, _moduleName, "拉取播放列表失败，准备重试。", exception, new Dictionary<string, object?>
+                {
+                    ["roomId"] = room.RoomId,
+                    ["reconnectCount"] = state.ReconnectCount,
+                    ["maxReconnectAttempts"] = _maxReconnectAttempts,
+                });
+                await DelayBeforeRetryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>重试前的固定短等待（取消时立即退出）。</summary>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>异步任务。</returns>
+    private static Task DelayBeforeRetryAsync(CancellationToken cancellationToken) =>
+        Task.Delay(TimeSpan.FromMilliseconds(RetryDelayMilliseconds), cancellationToken);
+
     private static async Task<HlsPlaylist> FetchMediaPlaylistAsync(
         HttpClient client,
         string playlistUri,
@@ -592,26 +809,149 @@ public sealed class TsStreamRecorder
         return await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task<byte[]> DownloadAsync(
+    /// <summary>下载一个分片：成功返回正文，失败返回可重试/不可重试的判定。</summary>
+    /// <param name="client">HTTP 客户端。</param>
+    /// <param name="uri">分片绝对地址。</param>
+    /// <param name="referer">可选 Referer。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>下载结果。</returns>
+    /// <remarks>
+    /// 等待响应头用停滞窗口兜底；正文按**读取空闲间隔**计时（见 <see cref="DownloadSegmentBodyAsync"/>），
+    /// 因此不再用一枚"请求前设置一次"的 <c>CancelAfter</c> 限制整段下载耗时（SP-07）。
+    /// </remarks>
+    private async Task<SegmentDownloadResult> TryDownloadSegmentAsync(
         HttpClient client,
         string uri,
         string? referer,
         CancellationToken cancellationToken)
     {
-        using HttpRequestMessage request = new(HttpMethod.Get, uri);
+        using HttpRequestMessage request = CreateSegmentRequest(uri, referer);
+        HttpResponseMessage response;
+        try
+        {
+            using CancellationTokenSource headerStall = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            headerStall.CancelAfter(TimeSpan.FromSeconds(_stallTimeoutSeconds));
+            response = await client
+                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, headerStall.Token)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return SegmentDownloadResult.Transient($"等待响应头超过 {_stallTimeoutSeconds} 秒");
+        }
+        catch (HttpRequestException exception)
+        {
+            // 只记错误类别，不记异常原文：原文可能带上完整的分片地址（含签名参数）。
+            return SegmentDownloadResult.Transient("请求分片失败（" + exception.HttpRequestError + "）");
+        }
+
+        using (response)
+        {
+            if (!response.IsSuccessStatusCode)
+            {
+                // 4xx 视为"这一片确实取不到"（直播切片过期/被清理）：重试没有意义，跳过它继续录。
+                // 408（请求超时）与 429（限流）属于临时状态，仍然走重试。
+                int status = (int)response.StatusCode;
+                bool permanent = status is >= 400 and < 500
+                    && response.StatusCode is not (HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests);
+                string reason = $"下载分片失败：HTTP {status}";
+                return permanent ? SegmentDownloadResult.Permanent(reason) : SegmentDownloadResult.Transient(reason);
+            }
+
+            using Stream body = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            return await DownloadSegmentBodyAsync(body, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// 读取分片正文：**每次读到新数据都重置**停滞计时，另用独立的总耗时上限兜住"永远很慢"的上游。
+    /// </summary>
+    /// <param name="body">上游正文流。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>下载结果（成功时带完整正文）。</returns>
+    /// <remarks>
+    /// 过去用一枚请求前设置好、下载中不再刷新的 <c>CancelAfter</c>，实际限制的是**总下载耗时**：
+    /// 每 300 毫秒持续到达的合法分片会在约 2 秒时被判成"没有数据返回"并整片丢弃（SP-07）。
+    /// 这里按读取空闲间隔计时，持续有数据的分片不会被中断；总上限另用
+    /// <see cref="SegmentDownloadTimeoutSeconds"/>，两条边界互不替代。
+    /// </remarks>
+    private async Task<SegmentDownloadResult> DownloadSegmentBodyAsync(Stream body, CancellationToken cancellationToken)
+    {
+        using CancellationTokenSource total = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        total.CancelAfter(TimeSpan.FromSeconds(_segmentDownloadTimeoutSeconds));
+        using MemoryStream buffer = new();
+        byte[] chunk = new byte[SegmentReadBufferBytes];
+        while (true)
+        {
+            int read;
+            try
+            {
+                // 每一轮都以"当前时刻"为起点重新计时：只要读到数据，下一个窗口就是完整的 stall 时长。
+                using CancellationTokenSource idle = CancellationTokenSource.CreateLinkedTokenSource(total.Token);
+                idle.CancelAfter(TimeSpan.FromSeconds(_stallTimeoutSeconds));
+                read = await body.ReadAsync(chunk, idle.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                return SegmentDownloadResult.Transient(
+                    total.IsCancellationRequested
+                        ? $"分片下载超过 {_segmentDownloadTimeoutSeconds} 秒仍未结束"
+                        : $"分片正文超过 {_stallTimeoutSeconds} 秒没有新数据");
+            }
+            catch (IOException exception)
+            {
+                // 连接被上游/中间设备重置：按上游暂时失败处理（可重试），不把整场录制判成失败。
+                return SegmentDownloadResult.Transient("读取分片正文失败（" + exception.GetType().Name + "）");
+            }
+
+            if (read == 0)
+            {
+                return SegmentDownloadResult.Success(buffer.ToArray());
+            }
+
+            buffer.Write(chunk, 0, read);
+        }
+    }
+
+    /// <summary>构造分片请求（带浏览器 UA 与可选 Referer）。</summary>
+    /// <param name="uri">分片绝对地址。</param>
+    /// <param name="referer">可选 Referer。</param>
+    /// <returns>请求（调用方负责释放）。</returns>
+    private static HttpRequestMessage CreateSegmentRequest(string uri, string? referer)
+    {
+        HttpRequestMessage request = new(HttpMethod.Get, uri);
         if (!string.IsNullOrWhiteSpace(referer))
         {
             request.Headers.TryAddWithoutValidation("Referer", referer);
         }
 
-        using HttpResponseMessage response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
-        {
-            throw new Core.Errors.RecordingException(
-                Core.Errors.RecordingErrorCategory.MalformedStream,
-                $"下载分片失败：HTTP {(int)response.StatusCode}。");
-        }
-
-        return await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+        return request;
     }
+
+    /// <summary>一次分片下载的结果。</summary>
+    /// <param name="Payload">成功时的完整正文；失败时为 <see langword="null"/>。</param>
+    /// <param name="IsRetryable">失败是否可以重试（超时、连接失败、5xx、408/429 为真；其余 4xx 为假）。</param>
+    /// <param name="Reason">失败原因（写日志用，不含签名地址）。</param>
+    private readonly record struct SegmentDownloadResult(byte[]? Payload, bool IsRetryable, string Reason)
+    {
+        /// <summary>构造成功结果。</summary>
+        /// <param name="payload">完整正文。</param>
+        /// <returns>成功结果。</returns>
+        public static SegmentDownloadResult Success(byte[] payload) => new(payload, IsRetryable: false, string.Empty);
+
+        /// <summary>构造"上游暂时失败、可以重试"的结果。</summary>
+        /// <param name="reason">失败原因。</param>
+        /// <returns>失败结果。</returns>
+        public static SegmentDownloadResult Transient(string reason) => new(null, IsRetryable: true, reason);
+
+        /// <summary>构造"这一片确实取不到、重试没有意义"的结果（4xx）。</summary>
+        /// <param name="reason">失败原因。</param>
+        /// <returns>失败结果。</returns>
+        public static SegmentDownloadResult Permanent(string reason) => new(null, IsRetryable: false, reason);
+    }
+
+    /// <summary>一次分片下载 + 重试的最终结论。</summary>
+    /// <param name="Payload">成功时的完整正文；跳过或失败时为 <see langword="null"/>。</param>
+    /// <param name="ReconnectLimitReached">重连预算是否已用尽（调用方据此结束录制并归因）。</param>
+    private readonly record struct SegmentDownloadOutcome(byte[]? Payload, bool ReconnectLimitReached);
 }

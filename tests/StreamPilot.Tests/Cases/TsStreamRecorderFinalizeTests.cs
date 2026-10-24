@@ -188,9 +188,14 @@ public sealed class TsStreamRecorderFinalizeTests
         ReadAfterReleaseCheck(Path.Combine(temp.Path, result.Segments[0].FileName), SegmentBytes);
     }
 
-    /// <summary>刷新播放列表失败上抛时，收尾必须已经完成。</summary>
-    [TestMethod("TS 录制：刷新播放列表失败上抛但收尾已完成")]
-    public async Task FinalizesBeforePropagatingPlaylistRefreshFailure()
+    /// <summary>刷新播放列表连续失败：按重连预算重试，用尽后以"重连上限"结束，且收尾必须已完成。</summary>
+    /// <remarks>
+    /// 旧实现对刷新失败"一次就上抛"、对分片失败又"完全没有上限"（SP-06）。现在两类失败共用一份
+    /// <c>MaxReconnectAttempts</c> 预算：预算内重试，用尽后返回
+    /// <see cref="RecordingStopReason.ReconnectLimitReached"/>，不能记成"主播下播"。
+    /// </remarks>
+    [TestMethod("TS 录制：刷新播放列表失败按重连上限结束且收尾已完成")]
+    public async Task StopsWithReconnectLimitWhenPlaylistRefreshKeepsFailing()
     {
         byte[] payload = BuildSegmentPayload(fill: 0x55);
         using TempDirectory temp = new();
@@ -204,14 +209,100 @@ public sealed class TsStreamRecorderFinalizeTests
             BuildPlaylist(endList: false, ("seg-1.ts", SegmentDurationSeconds)),
             new Uri(PlaylistUri));
 
-        RecordingException failure = await Assert.ThrowsAsync<RecordingException>(
-            () => RecordAsync(client, playlist, temp.Path, completed, logger: logger, playlistRefreshSeconds: 0)).ConfigureAwait(false);
+        FlvRecordingResult result = await RecordAsync(
+            client,
+            playlist,
+            temp.Path,
+            completed,
+            logger: logger,
+            playlistRefreshSeconds: 0,
+            maxReconnectAttempts: 1).ConfigureAwait(false);
 
-        Assert.Equal(RecordingErrorCategory.MalformedStream, failure.Category, "上游刷新失败必须保持上游错误分类，而不是收尾错误");
-        Assert.Equal(1, completed.Count, "上抛前必须已完成收尾并登记当前分片");
+        Assert.Equal(RecordingStopReason.ReconnectLimitReached, result.StopReason, "刷新失败必须归因为重连上限，而不是自然下播");
+        Assert.Equal(2, result.ReconnectCount, "一次失败 + 一次重试 = 2 次尝试（上限为 1 次重试）");
+        Assert.Equal(3, stub.RequestCount(PlaylistUri), "播放列表请求次数必须有界（首次 + 1 次刷新 + 1 次重试）");
+        Assert.Equal(1, completed.Count, "结束前必须已完成收尾并登记当前分片");
         Assert.Equal(SegmentBytes, completed[0].Bytes);
         ReadAfterReleaseCheck(Path.Combine(temp.Path, completed[0].FileName), SegmentBytes);
+        Assert.True(logger.HasLevel(LogLevel.Warn), "刷新失败必须记录日志");
         Assert.False(logger.HasLevel(LogLevel.Error), "上游失败本身不在录制器内记 Error（由上层会话记录）");
+    }
+
+    /// <summary>分片连续无法下载：重试次数受上限约束，并以"重连上限"结束而不是"自然下播"。</summary>
+    /// <remarks>
+    /// 复现 SP-06 的第二半：旧实现里失败分片加入 <c>Seen</c> 后既不重试也不计入上限，
+    /// <c>MaxReconnectAttempts</c> 对 TS 完全无效，最终把上游失败记成 <see cref="RecordingStopReason.StreamEnded"/>。
+    /// </remarks>
+    [TestMethod("TS 录制：分片失败重试受上限约束并归因为重连上限")]
+    public async Task StopsWithReconnectLimitWhenSegmentsKeepFailing()
+    {
+        byte[] payload = BuildSegmentPayload(fill: 0x56);
+        using TempDirectory temp = new();
+        List<RecordingSegment> completed = [];
+        RecordingLogger logger = new();
+        RecorderHttpStub stub = new RecorderHttpStub()
+            .ServeText(PlaylistUri, BuildPlaylist(endList: true, (SegmentOneUri, SegmentDurationSeconds), (SegmentTwoUri, SegmentDurationSeconds)))
+            .ServeBytes(SegmentOneUri, payload)
+            .Fail(SegmentTwoUri, HttpStatusCode.InternalServerError);
+        using HttpClient client = new(stub);
+        HlsPlaylist playlist = HlsPlaylistParser.Parse(
+            BuildPlaylist(endList: true, ("seg-1.ts", SegmentDurationSeconds), ("seg-2.ts", SegmentDurationSeconds)),
+            new Uri(PlaylistUri));
+
+        FlvRecordingResult result = await RecordAsync(
+            client,
+            playlist,
+            temp.Path,
+            completed,
+            logger: logger,
+            maxReconnectAttempts: 1).ConfigureAwait(false);
+
+        Assert.Equal(RecordingStopReason.ReconnectLimitReached, result.StopReason, "分片连续失败必须归因为重连上限");
+        Assert.Equal(2, result.ReconnectCount, "一次失败 + 一次重试 = 2 次尝试（上限为 1 次重试）");
+        Assert.Equal(2, stub.RequestCount(SegmentTwoUri), "失败分片的重试次数必须有界");
+        Assert.Equal(1, completed.Count, "已写入的分片仍必须收尾登记");
+        Assert.Equal(SegmentBytes, result.TotalBytes);
+        ReadAfterReleaseCheck(Path.Combine(temp.Path, completed[0].FileName), SegmentBytes);
+    }
+
+    /// <summary>
+    /// 持续有数据但整体很慢的分片不能被停滞看门狗误杀。
+    /// </summary>
+    /// <remarks>
+    /// 复现 SP-07：旧看门狗在请求前设置一次 <c>CancelAfter</c>，下载中不按数据进度刷新，
+    /// 实际限制的是**总下载耗时**——分片每 400 毫秒稳定到达一个 TS 包、总耗时 2.4 秒（超过 2 秒停滞窗口）时
+    /// 会被判成"没有数据返回"并整片丢弃。按读取空闲间隔计时后必须完整落盘。
+    /// </remarks>
+    [TestMethod("TS 录制：持续有数据的慢分片不被停滞看门狗中断")]
+    public async Task SlowButSteadySegmentIsRecordedCompletely()
+    {
+        const int packetCount = 6;
+        const int packetIntervalMs = 400;
+        byte[] payload = BuildSegmentPayload(fill: 0x57, packetCount);
+        using TempDirectory temp = new();
+        List<RecordingSegment> completed = [];
+        RecordingLogger logger = new();
+        RecorderHttpStub stub = new RecorderHttpStub()
+            .ServeText(PlaylistUri, BuildPlaylist(endList: true, (SegmentOneUri, SegmentDurationSeconds)))
+            .ServePacedBytes(SegmentOneUri, payload, packetIntervalMs);
+        using HttpClient client = new(stub);
+        HlsPlaylist playlist = HlsPlaylistParser.Parse(
+            BuildPlaylist(endList: true, ("seg-1.ts", SegmentDurationSeconds)),
+            new Uri(PlaylistUri));
+
+        FlvRecordingResult result = await RecordAsync(
+            client,
+            playlist,
+            temp.Path,
+            completed,
+            logger: logger,
+            stallTimeoutSeconds: 2).ConfigureAwait(false);
+
+        Assert.Equal(RecordingStopReason.StreamEnded, result.StopReason, "慢但持续有数据的分片必须正常录完");
+        Assert.Equal(0, result.ReconnectCount, "持续有数据时不得判定为上游停滞");
+        Assert.Equal(packetCount * TsStreamRecorder.TsPacketSize, result.TotalBytes, "分片必须完整落盘，而不是整片丢弃");
+        Assert.Equal(1, completed.Count);
+        ReadAfterReleaseCheck(Path.Combine(temp.Path, completed[0].FileName), packetCount * TsStreamRecorder.TsPacketSize);
     }
 
     /// <summary>连续两次轮换：分片数正确、每个分片独立可读。</summary>
@@ -309,6 +400,8 @@ public sealed class TsStreamRecorderFinalizeTests
     /// <param name="policy">分片策略；为 <see langword="null"/> 时使用默认策略。</param>
     /// <param name="logger">日志替身；为 <see langword="null"/> 时使用空日志。</param>
     /// <param name="playlistRefreshSeconds">播放列表刷新间隔（秒）。</param>
+    /// <param name="stallTimeoutSeconds">停滞判定秒数；为 <see langword="null"/> 时使用录制器默认值。</param>
+    /// <param name="maxReconnectAttempts">重试上限；为 <see langword="null"/> 时使用录制器默认值。</param>
     /// <returns>录制结果。</returns>
     private static Task<FlvRecordingResult> RecordAsync(
         HttpClient client,
@@ -318,13 +411,17 @@ public sealed class TsStreamRecorderFinalizeTests
         CancellationToken cancellationToken = default,
         SegmentPolicy? policy = null,
         IStructuredLogger? logger = null,
-        int? playlistRefreshSeconds = null)
+        int? playlistRefreshSeconds = null,
+        int? stallTimeoutSeconds = null,
+        int? maxReconnectAttempts = null)
     {
         TsStreamRecorder recorder = new(
             policy ?? new SegmentPolicy(),
             DateTimeOffset.Now,
             logger ?? NullStructuredLogger.Instance,
-            playlistRefreshSeconds);
+            playlistRefreshSeconds,
+            stallTimeoutSeconds,
+            maxReconnectAttempts);
 
         return recorder.RecordFragmentsAsync(
             client,
@@ -396,11 +493,12 @@ public sealed class TsStreamRecorderFinalizeTests
 
     /// <summary>构造整包对齐的 TS 分片字节（每个包以同步字节开头）。</summary>
     /// <param name="fill">包内填充字节（用于区分不同分片）。</param>
+    /// <param name="packetCount">包数量；缺省为 <see cref="PacketCount"/>。</param>
     /// <returns>分片字节。</returns>
-    private static byte[] BuildSegmentPayload(byte fill)
+    private static byte[] BuildSegmentPayload(byte fill, int packetCount = PacketCount)
     {
-        byte[] payload = new byte[PacketCount * TsStreamRecorder.TsPacketSize];
-        for (int packet = 0; packet < PacketCount; packet++)
+        byte[] payload = new byte[packetCount * TsStreamRecorder.TsPacketSize];
+        for (int packet = 0; packet < packetCount; packet++)
         {
             int offset = packet * TsStreamRecorder.TsPacketSize;
             payload[offset] = TsStreamRecorder.TsSyncByte;

@@ -705,12 +705,23 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// 解析当前输入的房间。
     /// </summary>
     /// <returns>异步任务。</returns>
-    public async Task ResolveAsync()
+    /// <remarks>「解析房间」与点击预设走这里：解析成功后按设置里的开关决定是否自动开始播放。</remarks>
+    public Task ResolveAsync() => ResolveCoreAsync(playAfterResolve: true);
+
+    /// <summary>
+    /// 解析当前输入的房间，并由调用方决定"解析成功后是否自动播放"。
+    /// </summary>
+    /// <param name="playAfterResolve">
+    /// 解析成功后是否按「解析成功后自动播放」开关自动开始播放。
+    /// 自动重解析与主动换档传 <see langword="false"/>：它们各自只做一次播放决定，避免一轮产生两份播放计划。
+    /// </param>
+    /// <returns>解析成功并拿到房间信息返回 <see langword="true"/>。</returns>
+    private async Task<bool> ResolveCoreAsync(bool playAfterResolve)
     {
         if (string.IsNullOrWhiteSpace(_roomInput))
         {
             StatusMessage = "请先输入房间号或直播间链接。";
-            return;
+            return false;
         }
 
         IsBusy = true;
@@ -730,7 +741,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                 ClearRoomInfo();
                 StatusMessage = PlatformDetectionHint;
                 AppendLog("解析取消：" + PlatformDetectionHint);
-                return;
+                return false;
             }
 
             ApplyPlatform(effective);
@@ -747,7 +758,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             if (query is null)
             {
                 StatusMessage = "请先输入房间号或直播间链接。";
-                return;
+                return false;
             }
 
             StatusMessage = "正在解析…";
@@ -765,7 +776,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                 ClearRoomInfo(ResolveMessages.DescribeLiveStatus(outcome.Failure));
                 AppendLog(StatusMessage);
                 RaiseCommandStates();
-                return;
+                return false;
             }
 
             _currentRoom = outcome.Room;
@@ -777,7 +788,12 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             PersistLastInput();
 
             // 自动开始播放（是否播放由设置里的开关决定；mpv 外挂播放同属"开始播放"）。
-            await PlayAsync(automatic: true).ConfigureAwait(true);
+            if (playAfterResolve)
+            {
+                await PlayAsync(automatic: true).ConfigureAwait(true);
+            }
+
+            return true;
         }
         finally
         {
@@ -1097,12 +1113,27 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// 自动重新解析后**只下发一次**播放（播放页报告所有候选都连不上时使用）。
+    /// </summary>
+    /// <remarks>
+    /// 解析与播放各管一段：<see cref="ResolveCoreAsync"/> 只负责拿到新地址，播放决定只在这里做一次。
+    /// 过去先调 <see cref="ResolveAsync"/>（它自己会按开关自动播放一次）再调 <see cref="PlayAsync"/>，
+    /// 一轮重解析会生成两份播放计划、两次 play 消息（SP-02）。
+    /// <para>
+    /// 这里的续播不受「解析成功后自动播放」开关约束：用户本来就在看，线路失效后由宿主接续，
+    /// 关掉自动播放的用户手动开始后同样要能续上（否则关掉开关就变成"一断就只能手动点"）。
+    /// </para>
+    /// </remarks>
+    /// <returns>异步任务。</returns>
     private async Task ReResolveAsync()
     {
         try
         {
-            await ResolveAsync().ConfigureAwait(true);
-            await PlayAsync().ConfigureAwait(true);
+            if (await ResolveCoreAsync(playAfterResolve: false).ConfigureAwait(true))
+            {
+                await PlayAsync(automatic: false).ConfigureAwait(true);
+            }
         }
         catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
         {
@@ -1242,10 +1273,16 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 播放页切换画质档位：记住档位键，按该档位重新解析并重新下发播放计划。
+    /// 播放页切换画质档位：记住档位键，按该档位重新解析并**恰好下发一次**播放计划。
     /// </summary>
     /// <param name="qualityKey">档位键；<see langword="null"/> 表示平台最高档。</param>
     /// <returns>异步任务。</returns>
+    /// <remarks>
+    /// 换档是用户主动替换当前播放：解析阶段不播放，解析成功后显式下发一次播放。
+    /// 过去这里只调 <see cref="ResolveAsync"/>，播放与否交给「解析成功后自动播放」开关——
+    /// 关掉开关后换档只解析不切流，用户要继续看必须再点一次「开始播放」（SP-08）；
+    /// 而两处都调 <see cref="PlayAsync"/> 又会重复下发播放计划。
+    /// </remarks>
     private async Task ApplyQualityAsync(string? qualityKey)
     {
         if (_currentRoom is null || string.Equals(qualityKey, _preferredQualityKey, StringComparison.Ordinal))
@@ -1256,11 +1293,12 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         _preferredQualityKey = qualityKey;
         AppendLog("切换画质：" + (qualityKey ?? QualityOption.BestFlag));
         _automaticReResolveCount = 0;
-        /*
-          重新解析后会按「解析成功后自动播放」的开关决定是否播放（见 ResolveAsync），
-          这里不再额外下发一次播放：过去两处都调 PlayAsync，一次换档会生成两份播放计划。
-        */
-        await ResolveAsync().ConfigureAwait(true);
+
+        if (await ResolveCoreAsync(playAfterResolve: false).ConfigureAwait(true))
+        {
+            // 用户主动换档，与「解析成功后自动播放」无关：一次计划、一次 play 消息。
+            await PlayAsync(automatic: false).ConfigureAwait(true);
+        }
     }
 
     /// <summary>

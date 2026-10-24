@@ -96,16 +96,43 @@ public sealed class RelayRegistry
         }
     }
 
-    /// <summary>从本地回环地址反解出令牌并释放。</summary>
-    /// <param name="localUrl">本地地址。</param>
-    public void ReleaseByLocalUrl(string localUrl)
+    /// <summary>按令牌取出中继目标且**不刷新**活跃时间。</summary>
+    /// <param name="token">中继令牌。</param>
+    /// <param name="target">取出的目标。</param>
+    /// <returns>找到返回 <see langword="true"/>。</returns>
+    /// <remarks>
+    /// 回收链路（释放父中继时反查它是不是播放列表）用这个方法：回收不是访问，
+    /// 用 <see cref="TryResolve"/> 会把一条马上要被释放的注册续命。
+    /// </remarks>
+    public bool TryPeek(string token, out RelayTarget? target)
+    {
+        lock (_gate)
+        {
+            if (!_entries.TryGetValue(token, out Entry? entry))
+            {
+                target = null;
+                return false;
+            }
+
+            target = entry.Target;
+            return true;
+        }
+    }
+
+    /// <summary>从本地回环地址（或裸令牌）里取出中继令牌。</summary>
+    /// <param name="localUrl">本地地址（形如 <c>http://127.0.0.1:端口/relay/{token}</c>）或裸令牌。</param>
+    /// <returns>令牌；输入为空或取不出令牌时返回 <see langword="null"/>。</returns>
+    /// <remarks>
+    /// 未启动监听的离线路径里地址可能是相对的（<c>/relay/{token}</c>）甚至是裸令牌，
+    /// 三种形态都按"路径最后一段"处理，调用方不必关心自己拿到的是哪一种。
+    /// </remarks>
+    public static string? ExtractToken(string localUrl)
     {
         if (string.IsNullOrWhiteSpace(localUrl))
         {
-            return;
+            return null;
         }
 
-        // 未启动监听的离线路径里地址可能是相对的（"/relay/{token}"），按路径最后一段同样能释放。
         string path = Uri.TryCreate(localUrl, UriKind.Absolute, out Uri? uri)
             ? uri.AbsolutePath
             : localUrl.Split('?')[0];
@@ -113,10 +140,21 @@ public sealed class RelayRegistry
         string[] segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (segments.Length == 0)
         {
-            return;
+            return null;
         }
 
-        Release(segments[^1]);
+        string token = segments[^1];
+        return token.Length == 0 ? null : token;
+    }
+
+    /// <summary>从本地回环地址反解出令牌并释放。</summary>
+    /// <param name="localUrl">本地地址。</param>
+    public void ReleaseByLocalUrl(string localUrl)
+    {
+        if (ExtractToken(localUrl) is { } token)
+        {
+            Release(token);
+        }
     }
 
     /// <summary>清空所有注册（用于停止服务）。</summary>

@@ -2,6 +2,7 @@ namespace StreamPilot.Tests.Support;
 
 using System.Net;
 using System.Text;
+using StreamPilot.Recording.Hls;
 
 /// <summary>
 /// 录制器测试用的 HTTP 替身：按地址脚本化响应，并记录每个地址收到的请求次数。
@@ -82,6 +83,36 @@ internal sealed class RecorderHttpStub : HttpMessageHandler
         return this;
     }
 
+    /// <summary>注册"每次请求都返回指定错误状态"的路由（模拟分片/播放列表持续不可用）。</summary>
+    /// <param name="uri">请求地址。</param>
+    /// <param name="statusCode">返回的状态码。</param>
+    /// <returns>当前替身（便于链式注册）。</returns>
+    public RecorderHttpStub Fail(string uri, HttpStatusCode statusCode)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(uri);
+        _routes[uri] = (_, _) => Task.FromResult(new HttpResponseMessage(statusCode));
+        return this;
+    }
+
+    /// <summary>
+    /// 注册"按固定间隔逐字节产出"的路由（模拟持续有数据但整体很慢的分片）。
+    /// </summary>
+    /// <param name="uri">请求地址。</param>
+    /// <param name="payload">响应体字节。</param>
+    /// <param name="chunkIntervalMilliseconds">每段数据之间的间隔（毫秒）。</param>
+    /// <returns>当前替身（便于链式注册）。</returns>
+    /// <remarks>按一个 TS 包为一段产出，用来验证停滞看门狗按"读取空闲间隔"而不是"总下载耗时"计时。</remarks>
+    public RecorderHttpStub ServePacedBytes(string uri, byte[] payload, int chunkIntervalMilliseconds)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(uri);
+        ArgumentNullException.ThrowIfNull(payload);
+        _routes[uri] = (_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new PacedStream(payload, TsStreamRecorder.TsPacketSize, chunkIntervalMilliseconds)),
+        });
+        return this;
+    }
+
     /// <summary>查询指定地址收到的请求次数。</summary>
     /// <param name="uri">请求地址。</param>
     /// <returns>请求次数；从未请求过返回 0。</returns>
@@ -104,6 +135,68 @@ internal sealed class RecorderHttpStub : HttpMessageHandler
     {
         Content = new StringContent(text, Encoding.UTF8),
     };
+
+    /// <summary>按固定间隔分段产出数据的只读流（模拟慢速但持续有数据的上游）。</summary>
+    /// <param name="payload">完整响应体。</param>
+    /// <param name="chunkBytes">每段产出的字节数。</param>
+    /// <param name="intervalMilliseconds">相邻两段之间的间隔（毫秒）。</param>
+    private sealed class PacedStream(byte[] payload, int chunkBytes, int intervalMilliseconds) : Stream
+    {
+        private int _position;
+
+        /// <inheritdoc />
+        public override bool CanRead => true;
+
+        /// <inheritdoc />
+        public override bool CanSeek => false;
+
+        /// <inheritdoc />
+        public override bool CanWrite => false;
+
+        /// <inheritdoc />
+        public override long Length => payload.Length;
+
+        /// <inheritdoc />
+        public override long Position
+        {
+            get => _position;
+            set => throw new NotSupportedException("只读流不支持定位。");
+        }
+
+        /// <inheritdoc />
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (_position >= payload.Length)
+            {
+                return 0;
+            }
+
+            await Task.Delay(intervalMilliseconds, cancellationToken).ConfigureAwait(false);
+            int size = Math.Min(Math.Min(chunkBytes, buffer.Length), payload.Length - _position);
+            payload.AsMemory(_position, size).CopyTo(buffer);
+            _position += size;
+            return size;
+        }
+
+        /// <inheritdoc />
+        public override int Read(byte[] buffer, int offset, int count) =>
+            ReadAsync(buffer.AsMemory(offset, count), CancellationToken.None).AsTask().GetAwaiter().GetResult();
+
+        /// <inheritdoc />
+        public override void Flush()
+        {
+            // 只读流没有需要刷新的内容。
+        }
+
+        /// <inheritdoc />
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException("只读流不支持定位。");
+
+        /// <inheritdoc />
+        public override void SetLength(long value) => throw new NotSupportedException("只读流不支持改长度。");
+
+        /// <inheritdoc />
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException("只读流不支持写入。");
+    }
 
     /// <summary>构造一个只在令牌取消时才完成的响应任务（不占用计时器）。</summary>
     /// <param name="cancellationToken">请求取消令牌。</param>

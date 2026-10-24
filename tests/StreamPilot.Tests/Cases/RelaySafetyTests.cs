@@ -165,8 +165,14 @@ public sealed class RelaySafetyTests
         Assert.Equal(BridgeHost.BridgeRoute.NotFound, BridgeHost.ResolveRoute("GET", "/web/index.html"));
     }
 
-    /// <summary>上游被重定向到回环地址：最终地址判定为不允许，转发入口直接判定失败。</summary>
-    [TestMethod("中继安全：重定向到回环地址被拒绝")]
+    /// <summary>
+    /// 上游被重定向到回环地址：**逐跳校验在发送前**完成，回环目标不会收到任何请求。
+    /// </summary>
+    /// <remarks>
+    /// 旧实现依赖 <c>AllowAutoRedirect</c> 自动跳转，中间地址（回环/私网）已经收到一次 GET 才轮到应用层
+    /// 检查最终地址（SP-04）。这里除了断言"判定失败"，还断言替身只收到**第一跳**（公网地址）的请求。
+    /// </remarks>
+    [TestMethod("中继安全：重定向到回环地址在发送前被拒绝")]
     public async Task RedirectToLoopbackIsRejected()
     {
         using RedirectingHandler handler = new("http://127.0.0.1:5566/health");
@@ -175,11 +181,68 @@ public sealed class RelaySafetyTests
         RelayTarget target = new() { UpstreamUrl = "https://cdn.example.com/live.flv" };
         BridgeHost.RelaySendResult result = await host.TrySendUpstreamAsync(target);
 
-        Assert.True(result.TimedOut, "最终地址不被允许时必须判定为失败（调用方据此回 502）");
+        Assert.True(result.TimedOut, "最终地址不被允许时必须判定为失败");
+        Assert.True(result.Blocked, "失败原因必须是「目标地址被拒」（调用方据此回 502 而不是 504）");
         Assert.Null(result.Response, "被拒绝的响应不得交给调用方");
+        Assert.Equal(1, handler.RequestCount, "只允许发出第一跳；回环目标不得收到任何请求");
         Assert.False(
             BridgeHost.IsAllowedUpstreamUrl(new Uri("http://127.0.0.1:5566/health")),
             "重定向后的回环地址必须被判为不允许");
+    }
+
+    /// <summary>公网 → 公网的重定向链逐跳跟随（对照组，避免"一律拒绝跳转"的假通过）。</summary>
+    [TestMethod("中继安全：公网重定向链逐跳跟随")]
+    public async Task RedirectChainToPublicHostIsFollowed()
+    {
+        using RedirectChainHandler handler = new("https://cdn2.example.com/live/final.flv");
+        await using BridgeHost host = CreateHost(handler);
+
+        RelayTarget target = new() { UpstreamUrl = "https://cdn.example.com/live.flv" };
+        BridgeHost.RelaySendResult result = await host.TrySendUpstreamAsync(target);
+
+        Assert.False(result.TimedOut, "两跳公网重定向必须成功");
+        Assert.Equal(2, handler.RequestCount, "每一跳都单独发送（不再依赖自动跳转）");
+        Assert.Equal(
+            "https://cdn2.example.com/live/final.flv",
+            result.Response!.RequestMessage!.RequestUri!.ToString(),
+            "最终响应必须来自第二跳的地址");
+    }
+
+    /// <summary>
+    /// 释放父中继时，按**完整本地地址**递归回收它改写出的所有子注册。
+    /// </summary>
+    /// <remarks>
+    /// 复现 SP-03：生产调用者传给 <c>ReleaseRelay</c> 的是 <c>http://127.0.0.1:端口/relay/{token}</c>，
+    /// 而子节点集合按"播放列表上游地址"分组、元素是裸令牌，过去用完整地址匹配永远命中不了，
+    /// 释放父节点后子注册仍可访问。这里用生产形态的完整地址释放，断言子节点与父节点一起失效。
+    /// </remarks>
+    [TestMethod("中继子节点：释放完整父地址时递归回收子注册")]
+    public async Task ReleasingParentUrlReleasesChildRegistrations()
+    {
+        using SlowBodyHandler handler = new(TimeSpan.Zero);
+        await using BridgeHost host = CreateHost(handler);
+
+        const string PlaylistUrl = "https://cdn.example.com/live/index.m3u8";
+        RelayTarget target = new()
+        {
+            UpstreamUrl = PlaylistUrl,
+            Kind = RelayKind.HlsPlaylist,
+        };
+
+        // 模拟生产路径：父节点先在中继注册表里登记，播放页拿到的就是它的完整本地地址。
+        string parentToken = host.RegisterRelayCore(target);
+        string parentLocalUrl = "http://127.0.0.1:5566/relay/" + parentToken;
+
+        BridgeHost.PlaylistFetchResult fetched = await host.TryReadPlaylistAsync(target, ShortPlaylistTimeout);
+        string childUrl = FirstChildUrl(fetched.Playlist!);
+        Assert.True(host.IsRelayRegistered(childUrl), "改写播放列表后子节点必须可用");
+        Assert.Equal(2, host.RelayCount, "父节点 + 一个子节点");
+
+        host.ReleaseRelay(parentLocalUrl);
+
+        Assert.False(host.IsRelayRegistered(childUrl), "释放完整父地址后子注册必须一并失效");
+        Assert.False(host.IsRelayRegistered(parentLocalUrl), "父注册本身必须失效");
+        Assert.Equal(0, host.RelayCount, "不得残留任何注册");
     }
 
     /// <summary>上游响应头在超时窗口之后返回缺失：判定为超时，并记 Warn。</summary>
@@ -410,17 +473,54 @@ public sealed class RelaySafetyTests
         /// <param name="location">重定向目标地址。</param>
         public RedirectingHandler(string location) => _location = location;
 
+        /// <summary>收到的请求次数（用于断言"被拒目标没有收到任何请求"）。</summary>
+        public int RequestCount { get; private set; }
+
         /// <inheritdoc />
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            ArgumentNullException.ThrowIfNull(request);
+            RequestCount++;
             HttpResponseMessage response = new(HttpStatusCode.Redirect)
             {
-                // 真实 HttpClient（AllowAutoRedirect = true）跟随后会把最终地址写回 RequestMessage，
-                // 这里把替身响应的 RequestMessage 指向 Location，等价于"已经跟到了最终地址"。
+                // 真实 HttpClient 跟随后会把最终地址写回 RequestMessage；这里把替身响应的 RequestMessage
+                // 指向 Location，等价于"上游给出了一个跳转目标"。
                 RequestMessage = new HttpRequestMessage(HttpMethod.Get, _location),
             };
             response.Headers.Location = new Uri(_location);
             return Task.FromResult(response);
+        }
+    }
+
+    /// <summary>第一次返回 302、之后返回 200 的替身（模拟公网 CDN 之间的正常跳转）。</summary>
+    private sealed class RedirectChainHandler : HttpMessageHandler
+    {
+        private readonly string _location;
+
+        /// <summary>初始化替身。</summary>
+        /// <param name="location">第一跳的重定向目标（公网地址）。</param>
+        public RedirectChainHandler(string location) => _location = location;
+
+        /// <summary>收到的请求次数。</summary>
+        public int RequestCount { get; private set; }
+
+        /// <inheritdoc />
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            RequestCount++;
+            if (RequestCount == 1)
+            {
+                HttpResponseMessage redirect = new(HttpStatusCode.Redirect) { RequestMessage = request };
+                redirect.Headers.Location = new Uri(_location);
+                return Task.FromResult(redirect);
+            }
+
+            HttpResponseMessage ok = new(HttpStatusCode.OK)
+            {
+                RequestMessage = request,
+                Content = new StringContent("ok"),
+            };
+            return Task.FromResult(ok);
         }
     }
 

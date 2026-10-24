@@ -345,10 +345,15 @@ public sealed class RecordingSession : IRecordingSession
         // 同上：共享客户端不可释放。
         HttpClient client = GetStreamingClient(httpClients);
         Uri playlistUri = new(_candidate.Url, UriKind.Absolute);
-        string content = await FetchPlaylistAsync(client, playlistUri, _candidate.HttpReferer, _cancellation.Token).ConfigureAwait(false);
+        string content = await FetchFirstPlaylistAsync(client, playlistUri, _cancellation.Token).ConfigureAwait(false);
         HlsPlaylist playlist = HlsPlaylistParser.Parse(content, playlistUri);
 
-        TsStreamRecorder recorder = new(policy, DateTimeOffset.Now, _logger, stallTimeoutSeconds: _stallTimeoutSeconds);
+        TsStreamRecorder recorder = new(
+            policy,
+            DateTimeOffset.Now,
+            _logger,
+            stallTimeoutSeconds: _stallTimeoutSeconds,
+            maxReconnectAttempts: _maxReconnectAttempts);
         FlvRecordingResult result = await recorder.RecordFragmentsAsync(
             client,
             playlist,
@@ -360,6 +365,39 @@ public sealed class RecordingSession : IRecordingSession
             _cancellation.Token).ConfigureAwait(false);
 
         ApplyResult(result);
+    }
+
+    /// <summary>
+    /// 拉取首个 HLS 播放列表，带**有界**的停滞超时。
+    /// </summary>
+    /// <param name="client">HTTP 客户端。</param>
+    /// <param name="playlistUri">播放列表绝对地址。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>播放列表正文。</returns>
+    /// <exception cref="Core.Errors.RecordingException">上游在停滞窗口内没有任何响应时抛出。</exception>
+    /// <remarks>
+    /// 首个播放列表请求过去只受"用户取消"约束：上游不回包时录制会一直停在"录制中"，
+    /// 计数与重连都是 0，用户只能手动停止（SP-06）。这里与分片下载同口径，
+    /// 超过停滞窗口即按上游停滞结束，并归入上游错误分类（区别于输出/收尾失败）。
+    /// </remarks>
+    private async Task<string> FetchFirstPlaylistAsync(
+        HttpClient client,
+        Uri playlistUri,
+        CancellationToken cancellationToken)
+    {
+        int seconds = Math.Max(TsStreamRecorder.MinimumStallTimeoutSeconds, _stallTimeoutSeconds);
+        using CancellationTokenSource stall = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        stall.CancelAfter(TimeSpan.FromSeconds(seconds));
+        try
+        {
+            return await FetchPlaylistAsync(client, playlistUri, _candidate.HttpReferer, stall.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new Core.Errors.RecordingException(
+                Core.Errors.RecordingErrorCategory.MalformedStream,
+                $"拉取首个 HLS 播放列表超过 {seconds} 秒没有响应，判定上游停滞。");
+        }
     }
 
     /// <summary>

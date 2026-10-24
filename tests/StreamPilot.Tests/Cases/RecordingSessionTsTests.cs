@@ -124,6 +124,36 @@ public sealed class RecordingSessionTsTests
         AssertArtifactReleased(session.OutputDirectory);
     }
 
+    /// <summary>
+    /// 首个播放列表一直不响应：必须在上限内结束会话，而不是无限停在"录制中"。
+    /// </summary>
+    /// <remarks>
+    /// 复现 SP-06：首个 m3u8 请求过去只受"用户取消"约束，上游不回包时录制一直显示进行中、
+    /// 重连计数为 0，只能手动停止。现在首个播放列表与分片/刷新共用同一份停滞窗口。
+    /// </remarks>
+    [TestMethod("TS 录制会话：首个播放列表无响应时有界结束")]
+    public async Task StopsWhenFirstPlaylistNeverResponds()
+    {
+        using TempDirectory temp = new();
+        using LoopbackHttpServer server = new();
+        server.Stall(PlaylistPath);
+        RecordingLogger logger = new();
+        using HttpClientFactory clients = new(new NetworkOptions(), logger);
+
+        await using RecordingSession session = await RecordingSession.StartAsync(
+            BuildRequest(server.AbsoluteUri(PlaylistPath), temp.Path),
+            clients,
+            stallTimeoutSeconds: 2,
+            maxReconnectAttempts: 1,
+            logger).ConfigureAwait(false);
+
+        JsonElement metadata = await WaitForCompletedMetadataAsync(session.MetadataPath, TimeSpan.FromSeconds(15)).ConfigureAwait(false);
+
+        Assert.Equal(RecordingStopReason.Failed, ReadStopReason(metadata), "首个播放列表停滞必须归因为上游失败");
+        Assert.Equal(0, metadata.GetProperty("segments").GetArrayLength(), "没有任何分片被写入");
+        Assert.False(session.Status.IsRecording, "会话必须结束，不能停在录制中");
+    }
+
     /// <summary>读取侧车元数据里的停止原因（大小写不敏感，避免依赖枚举序列化的命名策略）。</summary>
     /// <param name="metadata">元数据根节点。</param>
     /// <returns>停止原因。</returns>
