@@ -265,6 +265,98 @@ public sealed class TsStreamRecorderFinalizeTests
         ReadAfterReleaseCheck(Path.Combine(temp.Path, completed[0].FileName), SegmentBytes);
     }
 
+    /// <summary>分片持续返回 4xx：跳过但不重试，且**同样计入连续失败上限**。</summary>
+    /// <remarks>
+    /// 复现上一轮修复的残留：永久失败在预算判断之前就返回，上限永远触发不了，
+    /// 直播会一直"进行中"却写不出数据，ENDLIST 则被记成"自然下播"。
+    /// </remarks>
+    [TestMethod("TS 录制：分片持续 4xx 也计入连续失败上限")]
+    public async Task StopsWhenSegmentsKeepReturningClientErrors()
+    {
+        using TempDirectory temp = new();
+        List<RecordingSegment> completed = [];
+        RecordingLogger logger = new();
+        RecorderHttpStub stub = new RecorderHttpStub()
+            .ServeText(
+                PlaylistUri,
+                BuildPlaylist(
+                    endList: true,
+                    (SegmentOneUri, SegmentDurationSeconds),
+                    (SegmentTwoUri, SegmentDurationSeconds),
+                    (SegmentThreeUri, SegmentDurationSeconds)))
+            .Fail(SegmentOneUri, HttpStatusCode.NotFound)
+            .Fail(SegmentTwoUri, HttpStatusCode.NotFound)
+            .Fail(SegmentThreeUri, HttpStatusCode.NotFound);
+        using HttpClient client = new(stub);
+        HlsPlaylist playlist = HlsPlaylistParser.Parse(
+            BuildPlaylist(
+                endList: true,
+                ("seg-1.ts", SegmentDurationSeconds),
+                ("seg-2.ts", SegmentDurationSeconds),
+                ("seg-3.ts", SegmentDurationSeconds)),
+            new Uri(PlaylistUri));
+
+        FlvRecordingResult result = await RecordAsync(
+            client,
+            playlist,
+            temp.Path,
+            completed,
+            logger: logger,
+            maxReconnectAttempts: 1).ConfigureAwait(false);
+
+        Assert.Equal(RecordingStopReason.ReconnectLimitReached, result.StopReason, "连续 4xx 必须归因为重连上限");
+        Assert.Equal(2, result.ReconnectCount, "两次连续 4xx 达到上限（上限为 1）");
+        Assert.Equal(0, result.Segments.Count, "没有分片可登记");
+        Assert.Equal(0, result.TotalBytes);
+        Assert.Equal(1, stub.RequestCount(SegmentOneUri), "4xx 不重试：每个分片只请求一次");
+        Assert.Equal(1, stub.RequestCount(SegmentTwoUri));
+        Assert.Equal(0, stub.RequestCount(SegmentThreeUri), "达到上限后不得再尝试后续分片");
+        Assert.True(logger.HasLevel(LogLevel.Warn), "连续失败必须记录日志");
+    }
+
+    /// <summary>全部分片都取不到、但未达到上限时，归因必须是失败而不是自然下播。</summary>
+    /// <remarks>
+    /// 旧实现即使只有 3 个分片、上限 5，也会以 <see cref="RecordingStopReason.StreamEnded"/> 结束并写 0 字节，
+    /// 用户读起来像"主播下播了，只是没录到"。
+    /// </remarks>
+    [TestMethod("TS 录制：全部分片取不到时归因为失败")]
+    public async Task ReportsFailureWhenNothingCouldBeWritten()
+    {
+        using TempDirectory temp = new();
+        List<RecordingSegment> completed = [];
+        RecorderHttpStub stub = new RecorderHttpStub()
+            .ServeText(
+                PlaylistUri,
+                BuildPlaylist(
+                    endList: true,
+                    (SegmentOneUri, SegmentDurationSeconds),
+                    (SegmentTwoUri, SegmentDurationSeconds),
+                    (SegmentThreeUri, SegmentDurationSeconds)))
+            .Fail(SegmentOneUri, HttpStatusCode.NotFound)
+            .Fail(SegmentTwoUri, HttpStatusCode.NotFound)
+            .Fail(SegmentThreeUri, HttpStatusCode.NotFound);
+        using HttpClient client = new(stub);
+        HlsPlaylist playlist = HlsPlaylistParser.Parse(
+            BuildPlaylist(
+                endList: true,
+                ("seg-1.ts", SegmentDurationSeconds),
+                ("seg-2.ts", SegmentDurationSeconds),
+                ("seg-3.ts", SegmentDurationSeconds)),
+            new Uri(PlaylistUri));
+
+        FlvRecordingResult result = await RecordAsync(
+            client,
+            playlist,
+            temp.Path,
+            completed,
+            maxReconnectAttempts: 5).ConfigureAwait(false);
+
+        Assert.Equal(RecordingStopReason.Failed, result.StopReason, "一个字节都没写进去时不得记成自然下播");
+        Assert.Equal(3, result.ReconnectCount, "三个分片各失败一次（4xx 不重试）");
+        Assert.Equal(0, result.Segments.Count);
+        Assert.Equal(0, result.TotalBytes);
+    }
+
     /// <summary>
     /// 持续有数据但整体很慢的分片不能被停滞看门狗误杀。
     /// </summary>

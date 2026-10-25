@@ -134,7 +134,8 @@ public sealed class TsStreamRecorder
     /// <para>
     /// 上游恢复（分片下载、播放列表刷新）共用一份有上限的预算：预算用尽时返回
     /// <see cref="RecordingStopReason.ReconnectLimitReached"/> 而不是 <see cref="RecordingStopReason.StreamEnded"/>，
-    /// 避免把"上游取不到"记成"主播下播"。
+    /// 避免把"上游取不到"记成"主播下播"；尝试过分片却一个字节都没写进去时返回
+    /// <see cref="RecordingStopReason.Failed"/>。
     /// </para>
     /// </remarks>
     /// <exception cref="Core.Errors.RecordingException">收尾失败（末分片未能落盘）时抛出。</exception>
@@ -247,9 +248,12 @@ public sealed class TsStreamRecorder
 
             // refreshable 为 true 说明是直播流被用户/上层取消；为 false 说明播放列表已 ENDLIST（直播结束）。
             // 重连预算用尽必须与"自然下播"分开：播放列表还有分片却拿不到，是上游失败而不是主播下播。
+            // 另一个同样不能算"自然下播"的情形：尝试过分片、却一个字节都没写进去。
             reason = reconnectLimitReached
                 ? RecordingStopReason.ReconnectLimitReached
-                : (refreshable ? RecordingStopReason.UserStopped : RecordingStopReason.StreamEnded);
+                : (state.ReconnectCount > 0 && state.CurrentBytes == 0 && state.Segments.Count == 0
+                    ? RecordingStopReason.Failed
+                    : (refreshable ? RecordingStopReason.UserStopped : RecordingStopReason.StreamEnded));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -360,6 +364,9 @@ public sealed class TsStreamRecorder
             state.CurrentDurationSeconds += segmentDuration;
             state.TimestampMs += (long)Math.Round(segmentDuration * 1000);
             state.LastSegmentUri = segmentUri;
+
+            // 真的写进了一个分片：连续失败窗口就此结束，下一次失败重新从 1 开始计。
+            state.ConsecutiveFailures = 0;
         }
 
         return true;
@@ -370,16 +377,20 @@ public sealed class TsStreamRecorder
     /// <param name="segmentUri">分片绝对地址。</param>
     /// <param name="referer">可选 Referer。</param>
     /// <param name="room">房间信息（日志上下文）。</param>
-    /// <param name="state">会话状态（累计重连次数）。</param>
+    /// <param name="state">会话状态（累计重连次数 + 连续失败次数）。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>
     /// 成功时带正文；永久失败（4xx）时为 <see langword="null"/> 且 <c>ReconnectLimitReached</c> 为假（跳过该分片）；
-    /// 重连预算用尽时 <c>ReconnectLimitReached</c> 为真。
+    /// 连续失败用尽预算时 <c>ReconnectLimitReached</c> 为真。
     /// </returns>
     /// <remarks>
     /// 过去失败分片加入 <c>Seen</c> 后既不重试也不计入上限，直播中途连续失败会被当成"主播下播"（SP-06）。
     /// 这里让分片失败与播放列表刷新共用同一份 <c>MaxReconnectAttempts</c> 预算，
-    /// 且区分"这一片确实取不到（4xx，跳过）"与"上游暂时取不到（重试）"。
+    /// 且区分"这一片确实取不到（4xx，跳过、不重试）"与"上游暂时取不到（重试）"。
+    /// <para>
+    /// 上限按**连续失败**计（成功写入一个分片即清零），4xx 跳过同样计入：
+    /// 否则连续 4xx（切片过期、Referer 被拒）永远不会触发上限，录制会一直"进行中"却写不出任何数据。
+    /// </para>
     /// </remarks>
     private async Task<SegmentDownloadOutcome> DownloadSegmentWithRecoveryAsync(
         HttpClient client,
@@ -398,33 +409,39 @@ public sealed class TsStreamRecorder
             }
 
             state.ReconnectCount++;
-            if (!attempt.IsRetryable)
-            {
-                _logger.Warn(_moduleName, "HLS 分片下载失败（不可恢复），跳过该分片。", new Dictionary<string, object?>
-                {
-                    ["roomId"] = room.RoomId,
-                    ["reconnectCount"] = state.ReconnectCount,
-                    ["detail"] = attempt.Reason,
-                });
-                return new SegmentDownloadOutcome(null, ReconnectLimitReached: false);
-            }
+            state.ConsecutiveFailures++;
 
-            if (state.ReconnectCount > _maxReconnectAttempts)
+            // 上限判断必须在"永久失败直接跳过"之前：4xx 也要消耗连续失败预算。
+            if (state.ConsecutiveFailures > _maxReconnectAttempts)
             {
                 _logger.Warn(_moduleName, "HLS 分片连续下载失败，已达到重连上限，结束录制。", new Dictionary<string, object?>
                 {
                     ["roomId"] = room.RoomId,
                     ["reconnectCount"] = state.ReconnectCount,
+                    ["consecutiveFailures"] = state.ConsecutiveFailures,
                     ["maxReconnectAttempts"] = _maxReconnectAttempts,
                     ["detail"] = attempt.Reason,
                 });
                 return new SegmentDownloadOutcome(null, ReconnectLimitReached: true);
             }
 
+            if (!attempt.IsRetryable)
+            {
+                _logger.Warn(_moduleName, "HLS 分片下载失败（不可恢复），跳过该分片。", new Dictionary<string, object?>
+                {
+                    ["roomId"] = room.RoomId,
+                    ["reconnectCount"] = state.ReconnectCount,
+                    ["consecutiveFailures"] = state.ConsecutiveFailures,
+                    ["detail"] = attempt.Reason,
+                });
+                return new SegmentDownloadOutcome(null, ReconnectLimitReached: false);
+            }
+
             _logger.Warn(_moduleName, "HLS 分片下载失败，准备重试。", new Dictionary<string, object?>
             {
                 ["roomId"] = room.RoomId,
                 ["reconnectCount"] = state.ReconnectCount,
+                ["consecutiveFailures"] = state.ConsecutiveFailures,
                 ["maxReconnectAttempts"] = _maxReconnectAttempts,
                 ["detail"] = attempt.Reason,
             });
@@ -587,8 +604,16 @@ public sealed class TsStreamRecorder
         /// <summary>下一个分片序号。</summary>
         public int SegmentIndex { get; set; }
 
-        /// <summary>分片下载失败次数。</summary>
+        /// <summary>分片下载失败次数（累计值，用于展示与元数据）。</summary>
         public int ReconnectCount { get; set; }
+
+        /// <summary>连续失败次数（成功写入一个分片即清零），用于重连上限判定。</summary>
+        /// <remarks>
+        /// 4xx 分片会被跳过而不重试，但同样计入这里：否则"每一片都取不到"永远触发不了上限，
+        /// 录制会停在"进行中"却写不出任何数据。用连续值而不是累计值，
+        /// 是为了让偶发失败的长时录制不会因为历史累计而提前结束。
+        /// </remarks>
+        public int ConsecutiveFailures { get; set; }
 
         /// <summary>最近写入的分片地址。</summary>
         public string? LastSegmentUri { get; set; }
@@ -719,7 +744,7 @@ public sealed class TsStreamRecorder
     /// <param name="playlistUri">播放列表绝对地址。</param>
     /// <param name="referer">可选 Referer。</param>
     /// <param name="room">房间信息（日志上下文）。</param>
-    /// <param name="state">会话状态（累计重连次数）。</param>
+    /// <param name="state">会话状态（累计重连次数 + 连续失败次数）。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>播放列表；重连预算用尽时返回 <see langword="null"/>。</returns>
     /// <remarks>
@@ -748,12 +773,14 @@ public sealed class TsStreamRecorder
             catch (Core.Errors.RecordingException exception) when (exception.Category == Core.Errors.RecordingErrorCategory.MalformedStream)
             {
                 state.ReconnectCount++;
-                if (state.ReconnectCount > _maxReconnectAttempts)
+                state.ConsecutiveFailures++;
+                if (state.ConsecutiveFailures > _maxReconnectAttempts)
                 {
                     _logger.LogError(LogLevel.Warn, _moduleName, "拉取播放列表连续失败，已达到重连上限，结束录制。", exception, new Dictionary<string, object?>
                     {
                         ["roomId"] = room.RoomId,
                         ["reconnectCount"] = state.ReconnectCount,
+                        ["consecutiveFailures"] = state.ConsecutiveFailures,
                         ["maxReconnectAttempts"] = _maxReconnectAttempts,
                     });
                     return null;
@@ -763,6 +790,7 @@ public sealed class TsStreamRecorder
                 {
                     ["roomId"] = room.RoomId,
                     ["reconnectCount"] = state.ReconnectCount,
+                    ["consecutiveFailures"] = state.ConsecutiveFailures,
                     ["maxReconnectAttempts"] = _maxReconnectAttempts,
                 });
                 await DelayBeforeRetryAsync(cancellationToken).ConfigureAwait(false);
