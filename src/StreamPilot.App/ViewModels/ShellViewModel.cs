@@ -222,6 +222,18 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// </summary>
     private string _presetResolveFailure = string.Empty;
 
+    /// <summary>
+    /// 最近一次"新增预设"解析失败的分类。
+    /// </summary>
+    /// <remarks>
+    /// 只用来区分"房间确实不存在/链接不可用"与"房间存在但当前不可播"：
+    /// 后者（未开播、轮播/重播）仍然允许保存预设——预设是书签，没必要等主播开播才能收藏。
+    /// </remarks>
+    private ResolveFailure _presetResolveFailureKind = ResolveFailure.Unknown;
+
+    /// <summary>最近一次"新增预设"解析实际使用的平台（对话框的平台选"自动"时由链接识别得到）。</summary>
+    private PlatformId _presetResolvePlatform = PlatformId.Unknown;
+
     /// <summary>预设列表当前选中项（见 <see cref="SelectedPresetItem"/>）。</summary>
     private PresetItemViewModel? _selectedPresetItem;
     private string _roomInput = string.Empty;
@@ -1655,9 +1667,10 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                 return;
             }
 
-            if (outcome.Failure == ResolveFailure.NotLive)
+            if (outcome.Failure is ResolveFailure.NotLive or ResolveFailure.Replaying)
             {
-                // 未开播时平台不返回主播名：传预设名，展示仍以用户设定的名称为准。
+                // 未开播/轮播时平台不返回主播名：传预设名，展示仍以用户设定的名称为准。
+                // 轮播归到"未开播"而不是"检查失败"：房间是有效的，只是现在没得看。
                 item.ApplyOffline(item.Preset.Name);
                 return;
             }
@@ -1716,13 +1729,14 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 新增预设：弹出三字段对话框（主播名称 + 直播链接 + 平台），解析成功后保存并在列表里选中它。
+    /// 新增预设：弹出三字段对话框（主播名称 + 直播链接 + 平台），房间有效时保存并在列表里选中它。
     /// </summary>
     /// <remarks>
     /// 预设内容全部来自对话框，不读取「直播源」卡片里当前的输入；平台取对话框里选中的值
     /// （链接能识别出平台时对话框会自动改选，用户也可以手动指定），
     /// 解析走与「解析房间」相同的 <see cref="IRoomResolver"/> 流程。
-    /// 解析失败或超时一律不保存：地址不可用的预设只会让用户在列表里反复点到解析失败。
+    /// 只有"房间存在、当前不可播"（未开播 / 轮播）仍保存：预设是"以后一键打开"的书签，
+    /// 没必要等主播开播才能收藏；房间不存在、网络错误、风控与非法输入仍然拒绝保存。
     /// </remarks>
     /// <returns>异步任务。</returns>
     private async Task SavePresetAsync()
@@ -1732,7 +1746,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 「新增预设」对话框的校验回调：按对话框选定的平台解析直播链接，成功则保存预设并返回 <see langword="null"/>。
+    /// 「新增预设」对话框的校验回调：按对话框选定的平台解析直播链接，房间有效则保存预设并返回 <see langword="null"/>。
     /// </summary>
     /// <param name="anchorName">主播名称（作为预设名）。</param>
     /// <param name="link">直播链接或房间号。</param>
@@ -1758,24 +1772,58 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         }
 
         ResolvedRoom? room = await ResolvePresetLinkAsync(input, platform).ConfigureAwait(true);
-        if (room is null)
+        bool offline = room is null && IsPresetSavableWithoutLiveStream(_presetResolveFailureKind);
+        if (room is null && !offline)
         {
             return PresetResolveFailureMessage();
         }
 
-        RoomPreset preset = new(name, room.Platform, BuildPresetRoomInput(room));
+        /*
+          未开播 / 轮播时解析不会返回房间对象，但链接本身是有效的（平台已经认出这个房间）：
+          预设是"以后一键打开"的书签，没必要等主播开播才能收藏。
+          平台取解析实际使用的值（对话框选"自动"时由链接识别得到），输入沿用用户填写的内容。
+        */
+        PlatformId presetPlatform = room?.Platform ?? _presetResolvePlatform;
+        string presetInput = room is null ? RoomInputNormalizer.Normalize(input) : BuildPresetRoomInput(room);
+        RoomPreset preset = new(name, presetPlatform, presetInput);
         if (!_presetStore.Add(preset))
         {
             return $"保存预设失败：请检查名称（最长 {PresetStore.MaxNameLength} 字）与链接。";
         }
 
+        ResetPresetResolveState();
+
         // 重建列表并把新预设设为选中项，用户在列表里能立刻看到它。
         RefreshPresetItems(preset);
-        StatusMessage = $"已新增预设「{name}」（{ResolvePlatformName(room.Platform)}），"
-            + $"正在后台检测它是否开播（当前共 {PresetItems.Count} 个）。";
-        AppendLog("已新增预设：" + name + " → " + preset.RoomInput);
+        StatusMessage = offline
+            ? $"已新增预设「{name}」（{ResolvePlatformName(presetPlatform)}），该房间当前未开播/轮播，开播后点它即可观看（当前共 {PresetItems.Count} 个）。"
+            : $"已新增预设「{name}」（{ResolvePlatformName(presetPlatform)}），正在后台检测它是否开播（当前共 {PresetItems.Count} 个）。";
+        AppendLog(offline
+            ? "已新增预设（当前未开播/轮播，仍已保存）：" + name + " → " + preset.RoomInput
+            : "已新增预设：" + name + " → " + preset.RoomInput);
         _ = RefreshPresetStatusAsync();
         return null;
+    }
+
+    /// <summary>
+    /// 解析失败是否仍然允许保存预设。
+    /// </summary>
+    /// <param name="failure">解析失败分类。</param>
+    /// <returns>允许保存返回 <see langword="true"/>。</returns>
+    /// <remarks>
+    /// 只有"房间存在、只是当前不可播"的两类放行：未开播（<see cref="ResolveFailure.NotLive"/>）与
+    /// 轮播/重播（<see cref="ResolveFailure.Replaying"/>）。房间不存在、网络错误、风控、输入非法
+    /// 一律仍然拒绝保存——那些预设点开后只会反复失败。
+    /// </remarks>
+    private static bool IsPresetSavableWithoutLiveStream(ResolveFailure failure) =>
+        failure is ResolveFailure.NotLive or ResolveFailure.Replaying;
+
+    /// <summary>清空"新增预设"上一次解析留下的失败原因、分类与平台。</summary>
+    private void ResetPresetResolveState()
+    {
+        _presetResolveFailure = string.Empty;
+        _presetResolveFailureKind = ResolveFailure.Unknown;
+        _presetResolvePlatform = PlatformId.Unknown;
     }
 
     /// <summary>解析"新增预设"对话框里的直播链接；带超时保护，绝不无限等待。</summary>
@@ -1784,6 +1832,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <returns>解析出的房间；失败或超时返回 <see langword="null"/>。</returns>
     private async Task<ResolvedRoom?> ResolvePresetLinkAsync(string input, PlatformId platform)
     {
+        // 每次校验都从干净状态开始：上一次的失败分类不能影响这一次能否保存。
+        ResetPresetResolveState();
+
         RoomQuery? query = BuildPresetQuery(input, platform);
         if (query is null)
         {
@@ -1799,6 +1850,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                 return outcome.Room;
             }
 
+            _presetResolveFailureKind = outcome.Failure;
             _presetResolveFailure = outcome.Message.Length > 0
                 ? outcome.Message
                 : ResolveMessages.DescribeFailure(outcome.Failure);
@@ -1839,8 +1891,12 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         if (effective == PlatformId.Unknown)
         {
             _presetResolveFailure = PresetPlatformHint;
+            _presetResolveFailureKind = ResolveFailure.InvalidInput;
             return null;
         }
+
+        // 记下实际使用的平台：未开播/轮播时拿不到房间对象，保存预设要靠它。
+        _presetResolvePlatform = effective;
 
         bool looksLikeUrl = RoomInputNormalizer.LooksLikeUrl(normalized);
 
@@ -1864,7 +1920,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     private string PresetResolveFailureMessage()
     {
         string reason = _presetResolveFailure.Length > 0 ? _presetResolveFailure : ResolveMessages.DescribeFailure(ResolveFailure.Unknown);
-        _presetResolveFailure = string.Empty;
+        ResetPresetResolveState();
         AppendLog("新增预设解析失败：" + reason + "（未保存）");
         return PresetResolveFailurePrefix + reason + PresetNotSavedSuffix;
     }
