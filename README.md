@@ -19,8 +19,8 @@ Windows 桌面直播工具：**多平台低延迟播放 + 直播回放录制 + m
 
 ## 2. 安装
 
-1. 解压 `StreamPilot-windows-v0.2.0.zip`，得到同名文件夹；
-2. 双击文件夹内的 `StreamPilot-windows-v0.2.0.exe`；
+1. 解压 `StreamPilot-windows-v0.2.1.zip`，得到同名文件夹；
+2. 双击文件夹内的 `StreamPilot-windows-v0.2.1.exe`；
 3. 首次启动若提示缺少 **WebView2 运行时**，安装一次 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)（Win10 1803+ 与 Win11 通常自带）。
 
 程序为绿色软件：不写注册表、不注册服务，卸载只需删除程序文件夹，用户数据位于独立目录（见第 8 节）。
@@ -237,7 +237,7 @@ StreamPilot/
 | 前端回归测试 | **81 / 81 通过**（`tests/web/player-core.test.js`，`node --test`） |
 | 静态红线自检 | 通过 |
 | `node build/analyze-csharp.mjs` | **120 文件 / 28540 行 / 190 类型 / 966 方法**，未发现结构性问题 |
-| 发布产物 | `StreamPilot-windows-v0.2.0.zip`（附校验值文件，见 `build\publish.ps1`） |
+| 发布产物 | `StreamPilot-windows-v0.2.1.zip`（附校验值文件，见 `build\publish.ps1`） |
 | 真实房间实测（B站 814） | 解析 12 条候选；**经真实中继 12/12 返回媒体数据**（FLV 文件头、HLS 播放列表改写后的切片、TS 同步字节） |
 | 播放页控制条几何实测 | 无头 Edge 渲染真实页面（`node tests/web/layout-probe/run-probe.js`，档位 / 画质下拉按真实运行态填好选项），1280→480 px 逐档 × 3 快照（「追帧」/「停止追帧」/ 停止追帧 + 长状态行）：**14 宽度 × 3 快照 = 42 次测量，0 处重叠**；控制条单行阈值随画质档位名宽度变化——普通档位名（最宽 `1080P 高码率`）时 **1024 px 起单行**，带 HDR / 高帧率 后缀的最宽档位名（下拉被 `max-width: 220px` 收敛）时 **1120 px 起单行**；1024–620 px 为两行，560 px 起为三行 |
 
