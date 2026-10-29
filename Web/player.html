@@ -182,14 +182,14 @@
     #lineSelect {
       cursor: pointer;
       border-radius: 8px;
-      height: 36px;
-      padding: 0 10px;
+      height: 34px;
+      padding: 0 8px;
       border: 1px solid #c7cdd6;
       background: #ffffff;
       color: #1f2329;
       font-family: inherit;
-      font-size: 15px;
-      max-width: 220px;
+      font-size: 14px;
+      max-width: 210px;
     }
 
     #qualitySelect:hover,
@@ -205,7 +205,7 @@
     #playBtn,
     #pauseBtn,
     #stopBtn {
-      padding: 6px 12px;
+      padding: 5px 10px;
       font-size: 13px;
       border-radius: 6px;
     }
@@ -216,11 +216,10 @@
     }
 
     #fsBtn {
-      padding: 10px 18px;
-      font-size: 15px;
+      padding: 8px 14px;
+      font-size: 14px;
       border-radius: 8px;
-      /* 换行到下一行时也独占行尾靠右，和其他控件分开，不参与同一行的空间争夺 */
-      margin-left: auto;
+      /* 与其他控件同行排列（不再用 margin-left:auto 独占行尾，否则会被挤到下一行） */
     }
 
     #stage {
@@ -331,8 +330,8 @@
     #controls {
       display: flex;
       align-items: center;
-      gap: 10px;
-      row-gap: 8px;
+      gap: 6px;
+      row-gap: 6px;
       padding: 8px 10px;
       /* 窄窗口时换行（并保留行间距）而不是把控件压扁、压到彼此身上 */
       flex-wrap: wrap;
@@ -382,12 +381,12 @@
       音量读数另有 #volumeLabel 文字，缩短滑块不影响读数。
     */
     #volume {
-      width: 90px;
+      width: 60px;
     }
 
     #volumeLabel {
       color: #6b7280;
-      min-width: 46px;
+      min-width: 36px;
       text-align: right;
     }
   </style>
@@ -423,9 +422,9 @@
           <span class="qualityLabel">追帧档位</span>
           <select id="targetSelect"></select>
         </label>
-        <button type="button" id="playBtn" title="播放左侧已解析的直播间">开始播放</button>
-        <button type="button" id="pauseBtn">暂停播放</button>
-        <button type="button" id="stopBtn" title="结束播放会话并关闭画面（与「暂停」不同）">停止播放</button>
+        <button type="button" id="playBtn" title="播放左侧已解析的直播间">播放</button>
+        <button type="button" id="pauseBtn">暂停</button>
+        <button type="button" id="stopBtn" title="结束播放会话并关闭画面（与「暂停」不同）">停止</button>
         <label id="lineBox" for="lineSelect">
           <span class="qualityLabel">线路</span>
           <select id="lineSelect"></select>
@@ -2101,7 +2100,7 @@
       /** 刷新"暂停播放 / 继续播放"按钮文案与画面状态提示。 */
       function updatePauseButton() {
         const paused = state.pausedByUser;
-        elements.pauseBtn.textContent = paused ? '继续播放' : '暂停播放';
+        elements.pauseBtn.textContent = paused ? '继续' : '暂停';
         elements.pauseBtn.title = paused ? '从当前位置继续播放' : '暂停但不结束会话（地址与缓冲保留）';
       }
 

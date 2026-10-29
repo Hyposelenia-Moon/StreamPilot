@@ -822,8 +822,8 @@ test('底部控制条允许换行且不得用绝对定位把控件叠在一起',
   assert.equal(/row-gap:\s*\d/.test(controlsRule), true, '换行后必须有行间距，行与行不能贴着（堆叠感）');
   assert.equal(/position:\s*(absolute|fixed)/.test(controlsRule), false, '控制条自身不能绝对定位');
 
-  // 靠右的「全屏」用 margin-left: auto 独占行尾：换行后仍与左侧按钮分开，不参与同一行的空间争夺。
-  assert.equal(/margin-left:\s*auto/.test(extractRule(html, '#fsBtn')), true, '右下角的全屏按钮必须靠 auto 外边距独占行尾');
+  // 全屏与其他控件同行排列（不用 margin-left:auto 独占行尾，否则会被挤到下一行）。
+  assert.equal(/margin-left:\s*auto/.test(extractRule(html, '#fsBtn')), false, '全屏按钮不得用 auto 外边距独占行尾（会挤到下一行）');
 
   // 控制条里任何控件都不许绝对定位到别的控件上面。
   const children = html.slice(html.indexOf('<div id="controls">'), html.indexOf('<div id="statusLine">'));
