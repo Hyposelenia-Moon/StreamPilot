@@ -13,10 +13,9 @@ using StreamPilot.Tests.Support;
 /// "等上游响应头"与"HLS 播放列表正文读取"的有限超时，以及长连接不被这两条超时误杀。
 /// </summary>
 /// <remarks>
-/// 全部离线运行：用 <see cref="HttpMessageHandler"/> 替身替代真实 CDN，
-/// 通过 <c>BridgeHost</c> 的 internal 构造函数与 internal 转发入口注入
-/// （见 <c>TrySendUpstreamAsync</c> / <c>TryReadPlaylistAsync</c> / <c>TryOpenUpstreamStreamAsync</c> 的 remarks），
-/// 因此不启动 <c>HttpListener</c>、不访问网络。
+/// 除"客户端断开"那条用真实 Kestrel 监听外，其余全部离线运行：用 <see cref="HttpMessageHandler"/> 替身
+/// 替代真实 CDN，通过 <c>BridgeHost</c> 的 internal 构造函数与 internal 转发入口注入
+/// （见 <c>TrySendUpstreamAsync</c> / <c>TryReadPlaylistAsync</c> 的 remarks），不访问网络。
 /// </remarks>
 [TestClass]
 public sealed class RelaySafetyTests
@@ -401,6 +400,49 @@ public sealed class RelaySafetyTests
     /// <param name="headerTimeout">等响应头超时。</param>
     /// <param name="idleTimeout">空闲看门狗窗口。</param>
     /// <returns>被测实例。</returns>
+    /// <summary>
+    /// 客户端断开后必须立刻取消上游读取，而不是等下一次写失败或空闲看门狗。
+    /// </summary>
+    /// <remarks>
+    /// 这是把中继从 <c>HttpListener</c> 迁到 Kestrel 的直接原因：<c>HttpListener</c> 拿不到
+    /// "客户端已断开"，只能在下一次写入失败时才发现，上游连接因此多挂几十秒；
+    /// 斗鱼这类"同一签名地址只允许 1 条并发"的平台，下一次重连正好撞上就会被上游切断（F5）。
+    /// </remarks>
+    [TestMethod("中继：客户端断开后立刻取消上游连接")]
+    public async Task AbortingClientCancelsUpstream()
+    {
+        using StreamingHandler handler = new();
+        await using BridgeHost host = new(
+            new BridgeOptions { PreferredPort = 45871, MaxPort = 45871 },
+            static () => null,
+            NullStructuredLogger.Instance,
+            handler,
+            ShortHeaderTimeout,
+            ShortPlaylistTimeout,
+            GenerousIdleTimeout);
+        host.Start();
+        Assert.True(host.IsRunning, "桥接必须成功启动");
+
+        string url = host.RegisterRelay(new RelayTarget { UpstreamUrl = "https://cdn.example/live.flv" });
+
+        using HttpClient client = new() { Timeout = TimeSpan.FromSeconds(10) };
+        using (HttpResponseMessage response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false))
+        {
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.True(handler.Stream is not null, "上游请求必须已经发出");
+            await using Stream body = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+            byte[] buffer = new byte[16];
+            int read = await body.ReadAsync(buffer).ConfigureAwait(false);
+            Assert.True(read > 0, "中继必须先把上游数据转发给客户端");
+        }
+
+        // 上面 using 结束时客户端连接已断开：Kestrel 的 RequestAborted 必须立刻取消上游读取。
+        Task finished = await Task.WhenAny(handler.Stream!.Cancelled, Task.Delay(TimeSpan.FromSeconds(5))).ConfigureAwait(false);
+        Assert.True(
+            ReferenceEquals(finished, handler.Stream.Cancelled),
+            "客户端断开后必须立刻取消上游读取（否则旧连接会一直占着平台的唯一并发名额）");
+    }
+
     private static BridgeHost CreateHost(
         HttpMessageHandler handler,
         RecordingLogger? logger = null,
@@ -689,5 +731,100 @@ public sealed class RelaySafetyTests
 
         /// <inheritdoc />
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException("只读流不支持写入。");
+    }
+
+    /// <summary>返回"先给一段数据、之后一直阻塞到取消"的上游响应。</summary>
+    private sealed class StreamingHandler : HttpMessageHandler
+    {
+        /// <summary>本次响应的上游流（用于断言它被取消）。</summary>
+        public AbortAwareStream? Stream { get; private set; }
+
+        /// <inheritdoc />
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Stream = new AbortAwareStream();
+            HttpResponseMessage response = new(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(Stream),
+                RequestMessage = request,
+            };
+            response.Content.Headers.ContentType = new("video/x-flv");
+            return Task.FromResult(response);
+        }
+    }
+
+    /// <summary>先产出固定字节、之后阻塞到被取消的只读流。</summary>
+    private sealed class AbortAwareStream : Stream
+    {
+        private readonly TaskCompletionSource _cancelled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _served;
+
+        /// <summary>上游读取被取消时完成。</summary>
+        public Task Cancelled => _cancelled.Task;
+
+        /// <inheritdoc />
+        public override bool CanRead => true;
+
+        /// <inheritdoc />
+        public override bool CanSeek => false;
+
+        /// <inheritdoc />
+        public override bool CanWrite => false;
+
+        /// <inheritdoc />
+        public override long Length => throw new NotSupportedException("直播流没有已知长度。");
+
+        /// <inheritdoc />
+        public override long Position
+        {
+            get => _served;
+            set => throw new NotSupportedException("只读流不支持定位。");
+        }
+
+        /// <inheritdoc />
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (_served < SniffBytes)
+            {
+                int size = Math.Min(buffer.Length, SniffBytes - _served);
+                buffer.Span[..size].Fill((byte)0x47);
+                _served += size;
+                return size;
+            }
+
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                _cancelled.TrySetResult();
+                throw;
+            }
+
+            return 0;
+        }
+
+        /// <inheritdoc />
+        public override int Read(byte[] buffer, int offset, int count) =>
+            ReadAsync(buffer.AsMemory(offset, count), CancellationToken.None).AsTask().GetAwaiter().GetResult();
+
+        /// <inheritdoc />
+        public override void Flush()
+        {
+            // 只读流没有需要刷新的内容。
+        }
+
+        /// <inheritdoc />
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException("只读流不支持定位。");
+
+        /// <inheritdoc />
+        public override void SetLength(long value) => throw new NotSupportedException("只读流不支持改长度。");
+
+        /// <inheritdoc />
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException("只读流不支持写入。");
+
+        /// <summary>先产出的字节数：够中继完成内容嗅探即可。</summary>
+        private const int SniffBytes = 64;
     }
 }

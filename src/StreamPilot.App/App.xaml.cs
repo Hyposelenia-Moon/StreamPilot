@@ -111,6 +111,20 @@ public partial class App : WpfApplication
     /// <inheritdoc />
     protected override void OnExit(ExitEventArgs e)
     {
+        // 桥接现在由 Kestrel 托管：进程退出前要显式停止宿主，让在途中继连接走完取消链，
+        // 而不是靠进程结束把套接字一起带走（否则上游会一直挂到对端超时）。
+        if (_bridge is not null)
+        {
+            try
+            {
+                _bridge.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                _fileLogger?.LogError(LogLevel.Warn, "App", "停止桥接服务失败。", exception);
+            }
+        }
+
         if (_httpClients is not null)
         {
             _httpClients.Dispose();

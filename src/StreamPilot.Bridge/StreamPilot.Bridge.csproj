@@ -13,6 +13,14 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!--
+      中继改用 Kestrel 托管：HttpListener 拿不到 HttpContext.RequestAborted，
+      客户端断开时只能靠"写失败"才发现，上游连接会多挂几十秒（见 ADR 0005/0007 的 F5 残留）。
+    -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\StreamPilot.Core\StreamPilot.Core.csproj" />
   </ItemGroup>
 

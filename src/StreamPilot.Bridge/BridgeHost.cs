@@ -3,6 +3,11 @@ namespace StreamPilot.Bridge;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using StreamPilot.Core.Configuration;
 using StreamPilot.Core.Errors;
 using StreamPilot.Core.Http;
@@ -11,7 +16,7 @@ using StreamPilot.Core.Runtime;
 using StreamPilot.Core.Services;
 
 /// <summary>
-/// 内嵌的本地桥接服务（只用 <see cref="HttpListener"/>，只监听 127.0.0.1）。
+/// 内嵌的本地桥接服务（Kestrel 托管，只监听 127.0.0.1）。
 /// </summary>
 /// <remarks>
 /// <para>提供的能力：</para>
@@ -24,8 +29,7 @@ using StreamPilot.Core.Services;
 /// </list>
 /// <para>安全约束：</para>
 /// <list type="bullet">
-///   <item>前缀固定为 <c>http://127.0.0.1:{port}/</c>，由 <see cref="LoopbackOnlyGuard"/> 强制校验；</item>
-///   <item>不引入 ASP.NET Core，避免额外框架依赖与体积；</item>
+///   <item>绑定地址固定为 <see cref="IPAddress.Loopback"/>，并由 <see cref="LoopbackOnlyGuard"/> 再做一次校验；</item>
 ///   <item><c>Access-Control-Allow-Origin</c> 只回播放页的实际来源（<see cref="PlayerPageOrigin"/>），不再使用 <c>*</c>；</item>
 ///   <item>中继目的地址只允许公网 <c>http</c>/<c>https</c>（见 <see cref="IsAllowedUpstreamUrl(string)"/>）；</item>
 ///   <item>所有处理器都有 try/catch，异常记录日志并返回结构化错误，不吞异常。</item>
@@ -168,8 +172,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
 
     private readonly CancellationTokenSource _shutdown = new();
     private readonly SemaphoreSlim _outputLock = new(1, 1);
-    private HttpListener? _listener;
-    private Task? _acceptLoop;
+    private WebApplication? _app;
     private bool _disposed;
 
     /// <summary>初始化桥接服务。</summary>
@@ -275,7 +278,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     }
 
     /// <inheritdoc />
-    public bool IsRunning => _listener?.IsListening ?? false;
+    public bool IsRunning => _app is not null;
 
     /// <inheritdoc />
     public int Port { get; private set; }
@@ -329,14 +332,13 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
 
         int preferred = Math.Clamp(_bridgeOptions.PreferredPort, 1024, 65535);
         int maximum = Math.Clamp(Math.Max(preferred, _bridgeOptions.MaxPort), preferred, 65535);
-        HttpListenerException? lastError = null;
+        Exception? lastError = null;
 
         for (int port = preferred; port <= maximum; port++)
         {
-            if (TryStartOnPort(port, out int boundPort, out HttpListenerException? error))
+            if (TryStartOnPort(port, out int boundPort, out Exception? error))
             {
                 Port = boundPort;
-                _acceptLoop = Task.Run(() => AcceptLoopAsync(_shutdown.Token), CancellationToken.None);
                 _logger.Info(_moduleName, "桥接服务已启动。", new Dictionary<string, object?>
                 {
                     ["address"] = BaseAddress,
@@ -347,10 +349,9 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
             lastError = error;
         }
 
-        if (TryStartOnPort(GetEphemeralPort(), out int ephemeralPort, out HttpListenerException? ephemeralError))
+        if (TryStartOnPort(GetEphemeralPort(), out int ephemeralPort, out Exception? ephemeralError))
         {
             Port = ephemeralPort;
-            _acceptLoop = Task.Run(() => AcceptLoopAsync(_shutdown.Token), CancellationToken.None);
             _logger.Info(_moduleName, "桥接服务已启动（系统分配端口）。", new Dictionary<string, object?>
             {
                 ["address"] = BaseAddress,
@@ -446,30 +447,36 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
 
         _disposed = true;
         await _shutdown.CancelAsync().ConfigureAwait(false);
-        _listener?.Stop();
-        _listener?.Close();
-        _listener = null;
-        _registry.Clear();
 
-        if (_acceptLoop is not null)
+        WebApplication? app = _app;
+        _app = null;
+        if (app is not null)
         {
             try
             {
-                await _acceptLoop.ConfigureAwait(false);
+                // 先停止接收新请求并等在途请求收尾，再释放宿主。
+                using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(2));
+                await app.StopAsync(timeout.Token).ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (Exception exception) when (exception is OperationCanceledException or IOException or ObjectDisposedException)
             {
-                // 关闭过程中的取消属于正常路径。
+                _logger.Debug(_moduleName, "停止桥接监听超时或已被释放。", new Dictionary<string, object?>
+                {
+                    ["detail"] = exception.Message,
+                });
             }
+
+            await app.DisposeAsync().ConfigureAwait(false);
         }
 
+        _registry.Clear();
         _shutdown.Dispose();
         _relayClient.Dispose();
         _outputLock.Dispose();
         _logger.Info(_moduleName, "桥接服务已停止。");
     }
 
-    private bool TryStartOnPort(int port, out int boundPort, out HttpListenerException? error)
+    private bool TryStartOnPort(int port, out int boundPort, out Exception? error)
     {
         boundPort = 0;
         error = null;
@@ -478,26 +485,99 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
             return false;
         }
 
-        string prefix = LoopbackOnlyGuard.BuildPrefix(port);
-        LoopbackOnlyGuard.EnsureLoopback(prefix);
-        HttpListener listener = new();
-        listener.Prefixes.Add(prefix);
+        // 防御性校验：Kestrel 只允许绑定回环地址，这里再用同一个守卫复核一次，
+        // 避免将来有人把 Listen(IPAddress.Loopback) 改成通配地址而不被测试发现。
+        LoopbackOnlyGuard.EnsureLoopback(LoopbackOnlyGuard.BuildPrefix(port));
+
+        WebApplication? app = null;
         try
         {
-            listener.Start();
-            _listener = listener;
+            app = BuildApplication(port);
+            // Start 是同步 API（WPF 启动阶段调用），Kestrel 启动本身很短，这里同步等待即可。
+            app.StartAsync().GetAwaiter().GetResult();
+            _app = app;
             boundPort = port;
             return true;
         }
-        catch (HttpListenerException exception)
+        catch (IOException exception)
         {
             error = exception;
-            listener.Close();
+            DisposeApplication(app);
             _logger.Debug(_moduleName, "端口被占用，尝试下一个端口。", new Dictionary<string, object?>
             {
                 ["port"] = port,
             });
             return false;
+        }
+        catch (SocketException exception)
+        {
+            /*
+              端口被别的进程独占时 Windows 返回的是 WSAEACCES（10013，"访问权限不允许"），
+              而不是"地址已在使用"。它一样属于"这个端口拿不到"，必须继续试下一个，
+              否则桥接会带着异常冒到启动流程，把整个程序拖下水（实测两个实例同时启动即触发）。
+            */
+            error = exception;
+            DisposeApplication(app);
+            _logger.Debug(_moduleName, "端口无法绑定，尝试下一个端口。", new Dictionary<string, object?>
+            {
+                ["port"] = port,
+                ["socketError"] = exception.SocketErrorCode.ToString(),
+            });
+            return false;
+        }
+        catch (InvalidOperationException exception)
+        {
+            error = exception;
+            DisposeApplication(app);
+            _logger.Debug(_moduleName, "端口无法绑定，尝试下一个端口。", new Dictionary<string, object?>
+            {
+                ["port"] = port,
+            });
+            return false;
+        }
+    }
+
+    /// <summary>构造一套只监听回环地址的 Kestrel 宿主。</summary>
+    /// <param name="port">监听端口。</param>
+    /// <returns>尚未启动的宿主。</returns>
+    private WebApplication BuildApplication(int port)
+    {
+        WebApplicationBuilder builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions
+        {
+            ApplicationName = typeof(BridgeHost).Assembly.GetName().Name,
+            EnvironmentName = Environments.Production,
+        });
+
+        // 桥接自己写结构化日志；Kestrel 的默认 provider 会把"Now listening on..."之类的日志
+        // 丢给控制台（WPF 下无人消费），这里直接清空 provider。
+        builder.Services.RemoveAll<Microsoft.Extensions.Logging.ILoggerProvider>();
+        builder.WebHost.ConfigureKestrel(options =>
+        {
+            options.AddServerHeader = false;
+            options.Listen(IPAddress.Loopback, port);
+        });
+
+        WebApplication app = builder.Build();
+        app.Run((RequestDelegate)HandleContextAsync);
+        return app;
+    }
+
+    /// <summary>释放一套未启动成功（或已停止）的宿主。</summary>
+    /// <param name="app">宿主，可为 <see langword="null"/>。</param>
+    private static void DisposeApplication(WebApplication? app)
+    {
+        if (app is null)
+        {
+            return;
+        }
+
+        try
+        {
+            app.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
+        catch (Exception exception) when (exception is ObjectDisposedException or InvalidOperationException or IOException)
+        {
+            // 启动失败后的清理，失败不影响"换下一个端口"。
         }
     }
 
@@ -510,43 +590,6 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         return port;
     }
 
-    private async Task AcceptLoopAsync(CancellationToken cancellationToken)
-    {
-        HttpListener? listener = _listener;
-        if (listener is null)
-        {
-            return;
-        }
-
-        while (!cancellationToken.IsCancellationRequested && listener.IsListening)
-        {
-            HttpListenerContext? context = null;
-            try
-            {
-                context = await listener.GetContextAsync().ConfigureAwait(false);
-            }
-            catch (HttpListenerException) when (cancellationToken.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (ObjectDisposedException)
-            {
-                return;
-            }
-            catch (InvalidOperationException)
-            {
-                return;
-            }
-
-            if (context is null)
-            {
-                continue;
-            }
-
-            _ = Task.Run(() => HandleContextAsync(context), CancellationToken.None);
-        }
-    }
-
     /// <summary>
     /// 把请求行（方法 + 路径）解析成路由结论。
     /// </summary>
@@ -557,7 +600,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// 预检（<c>OPTIONS</c>）只为**已知路由**（<c>/relay</c>、<c>/play</c>、<c>/health</c>）返回
     /// <see cref="BridgeRoute.Preflight"/>：过去任意路径的 <c>OPTIONS</c> 都会拿到 204 + CORS，
     /// 等于向本机任意页面确认"这个回环端口上什么路径都有人应答"；收紧后未知路径的预检与普通请求
-    /// 一样是 404（最小攻击面）。方法是纯函数，因此离线用例可以直接断言，不必启动 <c>HttpListener</c>。
+    /// 一样是 404（最小攻击面）。方法是纯函数，因此离线用例可以直接断言，不必启动桥接监听。
     /// </remarks>
     internal static BridgeRoute ResolveRoute(string method, string path)
     {
@@ -583,12 +626,12 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         return isPlay ? BridgeRoute.Play : BridgeRoute.Health;
     }
 
-    private async Task HandleContextAsync(HttpListenerContext context)
+    private async Task HandleContextAsync(HttpContext context)
     {
         try
         {
-            string path = context.Request.Url?.AbsolutePath ?? "/";
-            switch (ResolveRoute(context.Request.HttpMethod, path))
+            string path = context.Request.Path.Value ?? "/";
+            switch (ResolveRoute(context.Request.Method, path))
             {
                 case BridgeRoute.Preflight:
                     await WriteEmptyAsync(context, HttpStatusCode.NoContent, includePrivateNetworkHeader: true).ConfigureAwait(false);
@@ -607,11 +650,19 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
                     return;
             }
         }
-        catch (Exception exception) when (exception is BridgeException or IOException or HttpListenerException or ObjectDisposedException or InvalidOperationException or HttpRequestException)
+        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+        {
+            // 页面停止播放 / 切线路时客户端会直接断开：这是正常路径，不是桥接故障。
+            _logger.Debug(_moduleName, "客户端已断开桥接请求。", new Dictionary<string, object?>
+            {
+                ["path"] = context.Request.Path.Value,
+            });
+        }
+        catch (Exception exception) when (exception is BridgeException or IOException or ObjectDisposedException or InvalidOperationException or HttpRequestException)
         {
             _logger.LogError(LogLevel.Warn, _moduleName, "处理桥接请求失败。", exception, new Dictionary<string, object?>
             {
-                ["path"] = context.Request.Url?.AbsolutePath,
+                ["path"] = context.Request.Path.Value,
             });
 
             HttpStatusCode status = exception is BridgeException or HttpRequestException
@@ -627,41 +678,30 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
             {
                 await WriteTextAsync(context, status, "{\"error\":\"" + error + "\"}").ConfigureAwait(false);
             }
-            catch (Exception writeFailure) when (writeFailure is IOException or HttpListenerException or ObjectDisposedException or InvalidOperationException)
+            catch (Exception writeFailure) when (writeFailure is IOException or ObjectDisposedException or InvalidOperationException or OperationCanceledException)
             {
                 _logger.LogError(LogLevel.Debug, _moduleName, "写入错误响应失败（客户端可能已断开）。", writeFailure);
             }
         }
-        finally
-        {
-            try
-            {
-                context.Response.Close();
-            }
-            catch (ObjectDisposedException)
-            {
-                // 已关闭。
-            }
-        }
     }
 
-    private async Task HandleHealthAsync(HttpListenerContext context)
+    private async Task HandleHealthAsync(HttpContext context)
     {
         string body = $"{{\"status\":\"ok\",\"version\":\"{AppVersion.Current}\",\"port\":{Port},\"relayCount\":{_registry.Count}}}";
         await WriteTextAsync(context, HttpStatusCode.OK, body).ConfigureAwait(false);
     }
 
-    private async Task HandlePlayAsync(HttpListenerContext context)
+    private async Task HandlePlayAsync(HttpContext context)
     {
-        string? url = context.Request.QueryString["url"];
+        string? url = context.Request.Query["url"].ToString();
         if (string.IsNullOrWhiteSpace(url) || !IsAllowedMpvUrl(url))
         {
             await WriteTextAsync(context, HttpStatusCode.BadRequest, "{\"error\":\"invalid-url\"}").ConfigureAwait(false);
             return;
         }
 
-        string? title = context.Request.QueryString["title"];
-        string? referer = context.Request.QueryString["referer"];
+        string? title = context.Request.Query["title"].ToString();
+        string? referer = context.Request.Query["referer"].ToString();
         try
         {
             bool started = await PlayWithMpvAsync(url, title, referer, CancellationToken.None).ConfigureAwait(false);
@@ -680,18 +720,18 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         }
     }
 
-    private async Task HandleRelayAsync(HttpListenerContext context, string path)
+    private async Task HandleRelayAsync(HttpContext context, string path)
     {
         // 中继只提供 GET /relay/{token}：注册一律走进程内的 IPlaybackBridge.RegisterRelay。
         // 过去这里还有一条 POST 注册路由，它没有任何身份校验、又允许任意来源读取，
         // 本机任意网页都能注册自己的回环地址再读回数据（SP-02）。播放页从不使用它
         // （Web/player.html 只 fetch 候选地址；候选地址由 PlaybackCoordinator 在进程内注册），
         // 因此直接关闭该路由（最小攻击面），而不是补一层令牌校验。
-        if (!string.Equals(context.Request.HttpMethod, "GET", StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(context.Request.Method, "GET", StringComparison.OrdinalIgnoreCase))
         {
             _logger.Warn(_moduleName, "中继路由拒绝非 GET 请求（注册只能进程内发起）。", new Dictionary<string, object?>
             {
-                ["method"] = context.Request.HttpMethod,
+                ["method"] = context.Request.Method,
             });
             await WriteTextAsync(context, HttpStatusCode.NotFound, "{\"error\":\"not-found\"}").ConfigureAwait(false);
             return;
@@ -942,7 +982,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     private async Task<bool> EnsureUpstreamAddressAllowedAsync(
         HttpResponseMessage response,
         RelayTarget target,
-        HttpListenerContext context)
+        HttpContext context)
     {
         Uri? finalAddress = response.RequestMessage?.RequestUri;
         if (finalAddress is null || IsAllowedUpstreamUrl(finalAddress))
@@ -962,7 +1002,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// <summary>上游超时后的收尾：回 504（日志已由 <see cref="ReportUpstreamTimeout"/> 记录）。</summary>
     /// <param name="context">当前请求。</param>
     /// <param name="moduleOperation">发生超时的环节（写入响应体便于页面侧定位）。</param>
-    private Task FailUpstreamTimeoutAsync(HttpListenerContext context, string moduleOperation) =>
+    private Task FailUpstreamTimeoutAsync(HttpContext context, string moduleOperation) =>
         FailUpstreamAsync(context, HttpStatusCode.GatewayTimeout, "upstream-timeout", moduleOperation);
 
     /// <summary>上游判定失败后的收尾：按失败原因回 502 / 504，状态码与错误码都不含签名地址。</summary>
@@ -972,7 +1012,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// <param name="moduleOperation">发生失败的环节（写入响应体便于页面侧定位）。</param>
     /// <returns>异步任务。</returns>
     private Task FailUpstreamAsync(
-        HttpListenerContext context,
+        HttpContext context,
         HttpStatusCode status,
         string error,
         string moduleOperation) =>
@@ -1133,7 +1173,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     }
 
     private async Task StreamRelayAsync(
-        HttpListenerContext context,
+        HttpContext context,
         RelayTarget target,
         string token,
         CancellationToken leaseToken)
@@ -1226,7 +1266,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
 
         if (response.Content.Headers.ContentLength is { } length)
         {
-            context.Response.ContentLength64 = length;
+            context.Response.ContentLength = length;
         }
 
         CopyOptionalHeader(response, context, "Accept-Ranges");
@@ -1340,7 +1380,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// 上游半开连接时页面只会看到一次明确的 504，而不是无限等下去。
     /// </para>
     /// </remarks>
-    private async Task ServePlaylistAsync(HttpListenerContext context, RelayTarget target)
+    private async Task ServePlaylistAsync(HttpContext context, RelayTarget target)
     {
         PlaylistFetchResult fetched = await TryReadPlaylistAsync(target, _playlistDownloadTimeout).ConfigureAwait(false);
         if (fetched.Blocked)
@@ -1362,7 +1402,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         if (fetched.StatusCode != (int)HttpStatusCode.OK || fetched.Playlist is null)
         {
             context.Response.StatusCode = fetched.StatusCode;
-            context.Response.ContentLength64 = 0;
+            context.Response.ContentLength = 0;
             return;
         }
 
@@ -1372,17 +1412,17 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// <summary>把（改写后的）播放列表文本写回客户端。</summary>
     /// <param name="context">当前请求。</param>
     /// <param name="playlist">播放列表文本。</param>
-    private async Task WritePlaylistAsync(HttpListenerContext context, string playlist)
+    private async Task WritePlaylistAsync(HttpContext context, string playlist)
     {
         byte[] payload = Encoding.UTF8.GetBytes(playlist);
 
         context.Response.StatusCode = (int)HttpStatusCode.OK;
         context.Response.ContentType = HlsPlaylistContentType;
-        context.Response.ContentLength64 = payload.Length;
+        context.Response.ContentLength = payload.Length;
         await _outputLock.WaitAsync().ConfigureAwait(false);
         try
         {
-            await context.Response.OutputStream.WriteAsync(payload).ConfigureAwait(false);
+            await context.Response.Body.WriteAsync(payload, context.RequestAborted).ConfigureAwait(false);
         }
         finally
         {
@@ -1747,21 +1787,29 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// <param name="prefix">嗅探时已经读出的字节（需先转发给客户端），可为空。</param>
     private async Task PumpWithIdleTimeoutAsync(
         Stream upstream,
-        HttpListenerContext context,
+        HttpContext context,
         RelayTarget target,
         string token,
         CancellationToken leaseToken,
         ReadOnlyMemory<byte> prefix = default)
     {
         byte[] buffer = new byte[RelayBufferBytes];
-        using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token, leaseToken);
+        /*
+          把 RequestAborted 纳入取消链是本轮迁移的核心收益：HttpListener 拿不到"客户端已断开"，
+          只能等下一次写失败（或在空闲看门狗 30 秒后）才发现，上游连接因此会多挂几十秒；
+          斗鱼这类"同一签名地址只允许 1 条并发"的平台，下一次重连正好撞上就会被切断。
+        */
+        using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(
+            _shutdown.Token,
+            leaseToken,
+            context.RequestAborted);
         long nextTouchAt = Environment.TickCount64 + (RelayTouchIntervalSeconds * 1000L);
         _registry.Touch(token);
         try
         {
             if (!prefix.IsEmpty)
             {
-                await context.Response.OutputStream.WriteAsync(prefix, linked.Token).ConfigureAwait(false);
+                await context.Response.Body.WriteAsync(prefix, linked.Token).ConfigureAwait(false);
             }
 
             while (true)
@@ -1774,7 +1822,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
                     break;
                 }
 
-                await context.Response.OutputStream.WriteAsync(buffer.AsMemory(0, read), linked.Token).ConfigureAwait(false);
+                await context.Response.Body.WriteAsync(buffer.AsMemory(0, read), linked.Token).ConfigureAwait(false);
 
                 if (Environment.TickCount64 >= nextTouchAt)
                 {
@@ -1784,13 +1832,20 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
                 }
             }
 
-            await context.Response.OutputStream.FlushAsync(_shutdown.Token).ConfigureAwait(false);
+            await context.Response.Body.FlushAsync(linked.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!_shutdown.IsCancellationRequested)
         {
             if (leaseToken.IsCancellationRequested)
             {
                 _logger.Debug(_moduleName, "同一中继的新连接已接管，旧连接关闭。", new Dictionary<string, object?>
+                {
+                    ["host"] = TryGetHost(target.UpstreamUrl),
+                });
+            }
+            else if (context.RequestAborted.IsCancellationRequested)
+            {
+                _logger.Debug(_moduleName, "客户端提前断开中继连接，已同时关闭上游连接。", new Dictionary<string, object?>
                 {
                     ["host"] = TryGetHost(target.UpstreamUrl),
                 });
@@ -1803,7 +1858,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
                 });
             }
         }
-        catch (HttpListenerException exception)
+        catch (IOException exception)
         {
             _logger.Debug(_moduleName, "客户端提前断开中继连接。", new Dictionary<string, object?>
             {
@@ -1816,7 +1871,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// <param name="response">上游响应。</param>
     /// <param name="context">当前请求。</param>
     /// <param name="name">头名。</param>
-    private static void CopyOptionalHeader(HttpResponseMessage response, HttpListenerContext context, string name)
+    private static void CopyOptionalHeader(HttpResponseMessage response, HttpContext context, string name)
     {
         if (response.Headers.TryGetValues(name, out IEnumerable<string>? values))
         {
@@ -1830,18 +1885,18 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     private static string? TryGetHost(string url) =>
         Uri.TryCreate(url, UriKind.Absolute, out Uri? uri) ? uri.Host : null;
 
-    private async Task WriteTextAsync(HttpListenerContext context, HttpStatusCode status, string body)
+    private async Task WriteTextAsync(HttpContext context, HttpStatusCode status, string body)
     {
         byte[] payload = Encoding.UTF8.GetBytes(body);
         context.Response.StatusCode = (int)status;
         context.Response.ContentType = "application/json; charset=utf-8";
-        context.Response.ContentLength64 = payload.Length;
+        context.Response.ContentLength = payload.Length;
         ApplyCorsHeaders(context, includePrivateNetworkHeader: false);
 
         await _outputLock.WaitAsync().ConfigureAwait(false);
         try
         {
-            await context.Response.OutputStream.WriteAsync(payload).ConfigureAwait(false);
+            await context.Response.Body.WriteAsync(payload, context.RequestAborted).ConfigureAwait(false);
         }
         finally
         {
@@ -1849,10 +1904,10 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         }
     }
 
-    private static Task WriteEmptyAsync(HttpListenerContext context, HttpStatusCode status, bool includePrivateNetworkHeader)
+    private static Task WriteEmptyAsync(HttpContext context, HttpStatusCode status, bool includePrivateNetworkHeader)
     {
         context.Response.StatusCode = (int)status;
-        context.Response.ContentLength64 = 0;
+        context.Response.ContentLength = 0;
         ApplyCorsHeaders(context, includePrivateNetworkHeader);
         return Task.CompletedTask;
     }
@@ -1874,7 +1929,7 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// 而不是每个 <c>OPTIONS</c> 都返回：规范要求它只出现在声明了私有网络访问的预检响应上。
     /// </para>
     /// </remarks>
-    private static void ApplyCorsHeaders(HttpListenerContext context, bool includePrivateNetworkHeader)
+    private static void ApplyCorsHeaders(HttpContext context, bool includePrivateNetworkHeader)
     {
         context.Response.Headers["Access-Control-Allow-Origin"] = PlayerPageOrigin;
         context.Response.Headers["Vary"] = HeaderNameOrigin;
