@@ -63,6 +63,24 @@ internal static class FlvTestData
         return [frameType, 0x01, 0x00, 0x00, 0x00, 0x02, 0xAA, 0xBB];
     }
 
+    /// <summary>构造一个 HEVC（B站 HDR）sequence header 载荷：FrameType=1 | CodecId=12，HEVCPacketType=0。</summary>
+    /// <returns>载荷字节。</returns>
+    /// <remarks>
+    /// B站 HDR 直播用 legacy FLV 的 CodecId=12 承载 HEVC：字节 1 仍是 PacketType（0=sequence header），
+    /// 因此"是否需要缓存解码器配置"与 AVC 走同一判定，但录制器不能只认 AVC。
+    /// </remarks>
+    public static byte[] BuildHevcSequenceHeaderPayload() =>
+        [0x1C, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x20, 0x00, 0x00, 0x00, 0x90];
+
+    /// <summary>构造一个 HEVC（B站 HDR）NALU 载荷（可作为关键帧使用）。</summary>
+    /// <param name="isKeyFrame">是否关键帧。</param>
+    /// <returns>载荷字节。</returns>
+    public static byte[] BuildHevcNaluPayload(bool isKeyFrame)
+    {
+        byte frameType = isKeyFrame ? (byte)0x1C : (byte)0x2C;
+        return [frameType, 0x01, 0x00, 0x00, 0x00, 0x02, 0xAA, 0xBB];
+    }
+
     /// <summary>构造一个 AAC sequence header 载荷。</summary>
     /// <returns>载荷字节。</returns>
     public static byte[] BuildAacSequenceHeaderPayload() => [0xAF, 0x00, 0x12, 0x10];

@@ -92,6 +92,28 @@ internal sealed class LoopbackHttpServer : IDisposable
         return this;
     }
 
+    /// <summary>
+    /// 注册"按块慢速下发"的路由：正文分块写出，最后再保持连接若干毫秒。
+    /// </summary>
+    /// <param name="path">请求路径（以 <c>/</c> 开头）。</param>
+    /// <param name="payload">响应体字节。</param>
+    /// <param name="chunkBytes">每块字节数。</param>
+    /// <param name="chunkIntervalMs">相邻两块之间的间隔（毫秒）。</param>
+    /// <param name="trailingHoldMs">正文写完后再保持连接的时间（毫秒），用于观察"仍在录制"的中间态。</param>
+    /// <returns>当前服务器（便于链式注册）。</returns>
+    /// <remarks>
+    /// 录制会话的实时进度只在数据持续到达时推进；一次性把正文写完，测试就只能在录制结束后才看得到状态，
+    /// 无法覆盖"录制中就能读到时长与字节"的路径。
+    /// </remarks>
+    public LoopbackHttpServer ServePacedBytes(string path, byte[] payload, int chunkBytes, int chunkIntervalMs, int trailingHoldMs = 0)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        ArgumentNullException.ThrowIfNull(payload);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(chunkBytes);
+        _routes[path] = new LoopbackRoute(IsStall: false, payload, "video/x-flv", chunkBytes, chunkIntervalMs, trailingHoldMs);
+        return this;
+    }
+
     /// <summary>注册"连接后永不响应"的路由（模拟上游卡住，客户端只能靠取消令牌脱身）。</summary>
     /// <param name="path">请求路径（以 <c>/</c> 开头）。</param>
     /// <returns>当前服务器（便于链式注册）。</returns>
@@ -216,7 +238,14 @@ internal sealed class LoopbackHttpServer : IDisposable
                 return;
             }
 
-            await WriteResponseAsync(client, OkStatusLine, route?.Body ?? EmptyBody, route?.ContentType ?? "application/octet-stream").ConfigureAwait(false);
+            await WriteResponseAsync(
+                client,
+                OkStatusLine,
+                route?.Body ?? EmptyBody,
+                route?.ContentType ?? "application/octet-stream",
+                route?.ChunkBytes ?? 0,
+                route?.ChunkIntervalMs ?? 0,
+                route?.TrailingHoldMs ?? 0).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is IOException or SocketException or ObjectDisposedException or OperationCanceledException)
         {
@@ -284,7 +313,17 @@ internal sealed class LoopbackHttpServer : IDisposable
     /// <param name="statusLine">状态行。</param>
     /// <param name="body">响应体。</param>
     /// <param name="contentType">内容类型。</param>
-    private static async Task WriteResponseAsync(TcpClient client, string statusLine, byte[] body, string contentType)
+    /// <param name="chunkBytes">分块大小；0 表示一次写完。</param>
+    /// <param name="chunkIntervalMs">分块间隔（毫秒）。</param>
+    /// <param name="trailingHoldMs">正文写完后保持连接的时间（毫秒）。</param>
+    private static async Task WriteResponseAsync(
+        TcpClient client,
+        string statusLine,
+        byte[] body,
+        string contentType,
+        int chunkBytes,
+        int chunkIntervalMs,
+        int trailingHoldMs)
     {
         StringBuilder head = new();
         head.Append(statusLine);
@@ -296,15 +335,41 @@ internal sealed class LoopbackHttpServer : IDisposable
         await stream.WriteAsync(Encoding.ASCII.GetBytes(head.ToString())).ConfigureAwait(false);
         if (body.Length > 0)
         {
-            await stream.WriteAsync(body).ConfigureAwait(false);
+            if (chunkBytes <= 0)
+            {
+                await stream.WriteAsync(body).ConfigureAwait(false);
+            }
+            else
+            {
+                for (int offset = 0; offset < body.Length; offset += chunkBytes)
+                {
+                    int size = Math.Min(chunkBytes, body.Length - offset);
+                    await stream.WriteAsync(body.AsMemory(offset, size)).ConfigureAwait(false);
+                    await stream.FlushAsync().ConfigureAwait(false);
+                    if (chunkIntervalMs > 0 && offset + size < body.Length)
+                    {
+                        await Task.Delay(chunkIntervalMs).ConfigureAwait(false);
+                    }
+                }
+            }
         }
 
         await stream.FlushAsync().ConfigureAwait(false);
+        if (trailingHoldMs > 0)
+        {
+            await Task.Delay(trailingHoldMs).ConfigureAwait(false);
+        }
     }
 
     /// <summary>一条脚本化路由。</summary>
     /// <param name="IsStall">是否"永不响应"。</param>
     /// <param name="Body">响应体。</param>
     /// <param name="ContentType">内容类型。</param>
-    private sealed record LoopbackRoute(bool IsStall, byte[] Body, string ContentType);
+    private sealed record LoopbackRoute(
+        bool IsStall,
+        byte[] Body,
+        string ContentType,
+        int ChunkBytes = 0,
+        int ChunkIntervalMs = 0,
+        int TrailingHoldMs = 0);
 }

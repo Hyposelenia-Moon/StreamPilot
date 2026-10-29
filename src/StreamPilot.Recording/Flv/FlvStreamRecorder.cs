@@ -77,6 +77,7 @@ public sealed class FlvStreamRecorder
     /// <param name="maxReconnectAttempts">最大重连次数。</param>
     /// <param name="onSegmentCompleted">分片完成回调，可为 <see langword="null"/>。</param>
     /// <param name="cancellationToken">取消令牌。</param>
+    /// <param name="onProgress">进度回调（每写入一个标签调用一次），可为 <see langword="null"/>。</param>
     /// <returns>录制结果。</returns>
     /// <exception cref="Core.Errors.RecordingException">首次连接失败且无法重试时抛出。</exception>
     public async Task<FlvRecordingResult> RecordAsync(
@@ -88,7 +89,8 @@ public sealed class FlvStreamRecorder
         int stallTimeoutSeconds,
         int maxReconnectAttempts,
         Action<RecordingSegment>? onSegmentCompleted,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<RecordingProgress>? onProgress = null)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(room);
@@ -96,7 +98,12 @@ public sealed class FlvStreamRecorder
 
         Directory.CreateDirectory(outputDirectory);
 
-        SessionState session = new() { RoomId = room.RoomId, FileExtension = RecordingFileNaming.ExtensionFor(format) };
+        SessionState session = new()
+        {
+            RoomId = room.RoomId,
+            FileExtension = RecordingFileNaming.ExtensionFor(format),
+            OnProgress = onProgress,
+        };
         long safeMaxDurationMs = Math.Max(1, maxDurationMinutes) * (long)RecordingLimits.MillisecondsPerMinute;
 
         try
@@ -285,11 +292,14 @@ public sealed class FlvStreamRecorder
     {
         if (tag.Type == FlvTagType.Script)
         {
+            // onMetaData 通常早于第一个分片写入器到达：必须先存在会话上，建分片时再写入。
+            session.ScriptTag = tag;
             session.Writer?.RememberScriptTag(tag);
             return;
         }
 
-        if (tag.IsSequenceHeader())
+        bool isSequenceHeader = tag.IsSequenceHeader();
+        if (isSequenceHeader)
         {
             bool encodingChanged = HandleSequenceHeader(session, tag);
             if (encodingChanged && session.Writer is not null)
@@ -301,12 +311,25 @@ public sealed class FlvStreamRecorder
                 });
                 await RollSegmentAsync(session, onSegmentCompleted, cancellationToken).ConfigureAwait(false);
             }
-
-            await EnsureWriterAsync(session, room, outputDirectory, tag.TimestampMs, cancellationToken).ConfigureAwait(false);
-            return;
         }
 
-        await EnsureWriterAsync(session, room, outputDirectory, tag.TimestampMs, cancellationToken).ConfigureAwait(false);
+        bool writerCreated = await EnsureWriterAsync(session, room, outputDirectory, tag.TimestampMs, cancellationToken).ConfigureAwait(false);
+
+        if (isSequenceHeader)
+        {
+            /*
+              新建写入器时已经把缓存的序列头写进分片了（见 EnsureWriterAsync），这里不能重复写；
+              但写入器已经存在时，这个序列头就是**首次出现**（典型：视频头先到、音频头后到，
+              或反过来），必须补写进当前分片，否则该分片缺少解码器配置、整段无法解码。
+            */
+            if (!writerCreated && session.Writer is not null)
+            {
+                await session.Writer.WriteTagAsync(tag, cancellationToken).ConfigureAwait(false);
+                session.ReportProgress();
+            }
+
+            return;
+        }
 
         if (tag.IsVideoKeyFrame() && session.Writer is not null && _policy.ShouldSplit(session.Writer.BytesWritten, tag.TimestampMs))
         {
@@ -321,6 +344,10 @@ public sealed class FlvStreamRecorder
 
         await session.Writer.WriteTagAsync(tag, cancellationToken).ConfigureAwait(false);
         session.AdvanceMediaDuration(tag.TimestampMs);
+
+        // 每写到媒体标签就回报一次进度：分片可能长达数小时（默认 10 GB / 480 分钟），
+        // 只在分片完成时结算会让界面整场都停在“00:00:00 · 0.0 MiB”。
+        session.ReportProgress();
     }
 
     /// <summary>
@@ -331,7 +358,8 @@ public sealed class FlvStreamRecorder
     /// <param name="outputDirectory">输出目录。</param>
     /// <param name="firstDataTimestampMs">本分片首个待写入标签的时间戳（分片基准）。</param>
     /// <param name="cancellationToken">取消令牌。</param>
-    private async Task EnsureWriterAsync(
+    /// <returns>本次调用新建了写入器返回 <see langword="true"/>；写入器已存在返回 <see langword="false"/>。</returns>
+    private async Task<bool> EnsureWriterAsync(
         SessionState session,
         ResolvedRoom room,
         string outputDirectory,
@@ -340,13 +368,19 @@ public sealed class FlvStreamRecorder
     {
         if (session.Writer is not null)
         {
-            return;
+            return false;
         }
 
         FlvSegmentWriter writer = CreateWriter(session, room, outputDirectory);
         writer.BeginSegment(firstDataTimestampMs);
+        if (session.ScriptTag is not null)
+        {
+            writer.RememberScriptTag(session.ScriptTag);
+        }
+
         await writer.WriteSequenceHeadersAsync(session.VideoHeader, session.AudioHeader, cancellationToken).ConfigureAwait(false);
         session.Writer = writer;
+        return true;
     }
 
     private static bool HandleSequenceHeader(SessionState session, FlvTag tag)
@@ -471,11 +505,23 @@ public sealed class FlvStreamRecorder
         /// <summary>当前分片写入器。</summary>
         public FlvSegmentWriter? Writer { get; set; }
 
-        /// <summary>最近一次 AVC sequence header。</summary>
+        /// <summary>最近一次 AVC/HEVC sequence header。</summary>
         public FlvTag? VideoHeader { get; set; }
 
         /// <summary>最近一次 AAC sequence header。</summary>
         public FlvTag? AudioHeader { get; set; }
+
+        /// <summary>
+        /// 最近一次 onMetaData 脚本标签。
+        /// </summary>
+        /// <remarks>
+        /// 直播流开头的 onMetaData 早于第一个分片写入器到达，因此必须存在会话上：
+        /// 只在 <see cref="Writer"/> 存在时记住会让首分片（以及后续分片）永久丢掉元数据。
+        /// </remarks>
+        public FlvTag? ScriptTag { get; set; }
+
+        /// <summary>进度回调（可为 <see langword="null"/>）。</summary>
+        public Action<RecordingProgress>? OnProgress { get; set; }
 
         /// <summary>已完成的分片。</summary>
         public List<RecordingSegment> Segments { get; } = [];
@@ -504,6 +550,10 @@ public sealed class FlvStreamRecorder
         /// 误当成"已录制时长"，导致刚开始录制就命中时长上限而丢数据。
         /// </remarks>
         public long SessionDurationMs => CompletedMediaDurationMs + ConnectionMediaDurationMs;
+
+        /// <summary>把当前分片的已写字节与会话媒体时长回报给调用方。</summary>
+        public void ReportProgress() =>
+            OnProgress?.Invoke(new RecordingProgress(Writer?.BytesWritten ?? 0, SessionDurationMs));
 
         /// <summary>
         /// 释放当前分片写入器（幂等：已经收尾过则什么也不做）。

@@ -116,17 +116,29 @@ public sealed class FlvSegmentWriter : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(tag);
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        if (_awaitingFirstDataTag)
+        /*
+          时间基准只由**第一个媒体数据标签**决定：序列头（AVC/HEVC 的 PacketType=0、AAC 的
+          AACPacketType=0）自带会话起始时间戳，先到的那一路会把基准提前定在 0，
+          随后真正的首帧（例如 ts=12499 的关键帧）就不再被重定基到 0，分片时长随之虚增。
+        */
+        bool isInitializationTag = tag.IsSequenceHeader();
+        if (_awaitingFirstDataTag && !isInitializationTag)
         {
             BeginSegment(tag.TimestampMs);
             _awaitingFirstDataTag = false;
         }
-        else if (_payloadBytes == 0)
+        else if (_payloadBytes == 0 && !isInitializationTag)
         {
             BeginSegment(tag.TimestampMs);
         }
 
-        long rebased = Math.Max(0, tag.TimestampMs - _baseTimestampMs);
+        /*
+          序列头一律写 0：它们是解码器初始化数据，不是时间线上的帧。直播流里这两路头的时间戳
+          并不一致——加入直播时视频头常是 0，而 AAC 头带的是"开播至今"的时间戳（实测 4831206 ms，
+          约 80 分钟）——照原样写入会让文件出现一个 80 分钟的假时间戳，播放器与转封装工具的时长、
+          定位都会跟着错乱。
+        */
+        long rebased = isInitializationTag ? 0 : Math.Max(0, tag.TimestampMs - _baseTimestampMs);
         _lastTimestampMs = rebased;
 
         _headerBuffer[0] = (byte)tag.Type;

@@ -42,6 +42,18 @@ public sealed record RecordingSegment
 }
 
 /// <summary>
+/// 录制进度：当前分片已写入的字节数与会话累计的媒体时长。
+/// </summary>
+/// <param name="SegmentBytes">**当前分片**已写入的字节数（不含已完成分片）。</param>
+/// <param name="SessionDurationMs">整场会话累计的媒体时长（毫秒，含已完成分片）。</param>
+/// <remarks>
+/// 会话状态里的字节数与时长只在分片**完成后**才结算（默认 10 GB / 480 分钟才切分），
+/// 若只依赖它，界面在整场录制期间会一直显示"00:00:00 · 0.0 MiB"。
+/// 录制器在写入过程中按标签/分片回报本结构，会话据此拼出实时状态。
+/// </remarks>
+public readonly record struct RecordingProgress(long SegmentBytes, long SessionDurationMs);
+
+/// <summary>
 /// 录制会话状态快照，用于 UI 展示。
 /// </summary>
 public sealed record RecordingStatus

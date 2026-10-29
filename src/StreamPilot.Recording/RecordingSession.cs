@@ -30,6 +30,13 @@ public sealed class RecordingSession : IRecordingSession
     private readonly int _maxReconnectAttempts;
     private Task _worker = Task.CompletedTask;
     private RecordingStatus _status;
+
+    /// <summary>当前分片已写入但尚未结算的字节数（由录制器回报）。</summary>
+    private long _liveSegmentBytes;
+
+    /// <summary>整场会话累计的媒体时长（毫秒，含已结算分片；由录制器回报）。</summary>
+    private long _liveSessionDurationMs;
+
     private RecordingStopReason _stopReason;
     private bool _stopRequested;
     private bool _disposed;
@@ -57,8 +64,41 @@ public sealed class RecordingSession : IRecordingSession
     /// <inheritdoc />
     public Guid SessionId { get; }
 
-    /// <inheritdoc />
-    public RecordingStatus Status => _status;
+    /// <summary>
+    /// 当前状态快照；录制中把"已写但未结算"的进度叠加进去。
+    /// </summary>
+    /// <remarks>
+    /// 状态字段只在分片**完成后**结算，而分片上限默认 10 GB / 480 分钟——
+    /// 只看 <c>_status</c> 会让界面整场都显示"00:00:00 · 0.0 MiB"。
+    /// 这里叠加录制器回报的实时进度：字节取当前分片已写量；时长按"会话累计 − 已结算"折算，
+    /// 避免与已结算分片重复计时。
+    /// </remarks>
+    public RecordingStatus Status
+    {
+        get
+        {
+            RecordingStatus status = _status;
+            if (!status.IsRecording)
+            {
+                return status;
+            }
+
+            long liveBytes = Volatile.Read(ref _liveSegmentBytes);
+            long sessionMs = Volatile.Read(ref _liveSessionDurationMs);
+            long completedMs = (long)status.Duration.TotalMilliseconds;
+            long liveMs = sessionMs > completedMs ? sessionMs - completedMs : 0;
+            if (liveBytes <= 0 && liveMs <= 0)
+            {
+                return status;
+            }
+
+            return status with
+            {
+                TotalBytes = status.TotalBytes + Math.Max(0, liveBytes),
+                Duration = status.Duration + TimeSpan.FromMilliseconds(liveMs),
+            };
+        }
+    }
 
     /// <inheritdoc />
     public RecordingStopReason StopReason => _stopReason;
@@ -333,7 +373,8 @@ public sealed class RecordingSession : IRecordingSession
             _stallTimeoutSeconds,
             _maxReconnectAttempts,
             OnSegmentCompleted,
-            _cancellation.Token).ConfigureAwait(false);
+            _cancellation.Token,
+            OnProgress).ConfigureAwait(false);
 
         ApplyResult(result);
     }
@@ -362,7 +403,8 @@ public sealed class RecordingSession : IRecordingSession
             _outputDirectory,
             _candidate.HttpReferer,
             OnSegmentCompleted,
-            _cancellation.Token).ConfigureAwait(false);
+            _cancellation.Token,
+            OnProgress).ConfigureAwait(false);
 
         ApplyResult(result);
     }
@@ -408,6 +450,21 @@ public sealed class RecordingSession : IRecordingSession
     private static HttpClient GetStreamingClient(HttpClientFactory httpClients) =>
         httpClients.GetStreamingClient();
 
+    /// <summary>记录录制器回报的实时进度（录制线程调用，读取侧用 <see cref="Volatile"/> 保证可见性）。</summary>
+    /// <param name="progress">进度快照。</param>
+    private void OnProgress(RecordingProgress progress)
+    {
+        Volatile.Write(ref _liveSegmentBytes, Math.Max(0, progress.SegmentBytes));
+        Volatile.Write(ref _liveSessionDurationMs, Math.Max(0, progress.SessionDurationMs));
+    }
+
+    /// <summary>清零实时进度：分片结算后不能继续叠加（否则字节与时长会被重复计算）。</summary>
+    private void ResetProgress()
+    {
+        Volatile.Write(ref _liveSegmentBytes, 0);
+        Volatile.Write(ref _liveSessionDurationMs, 0);
+    }
+
     private void ApplyResult(FlvRecordingResult result)
     {
         // 调用方显式停止过（StopAsync(reason)）时以它为准：录制器只知道"令牌被取消"，
@@ -415,6 +472,7 @@ public sealed class RecordingSession : IRecordingSession
         _stopReason = _stopRequested && result.StopReason == RecordingStopReason.UserStopped
             ? _stopReason
             : result.StopReason;
+        ResetProgress();
         _status = BuildStatus(
             _request.Room,
             isRecording: false,
@@ -428,6 +486,7 @@ public sealed class RecordingSession : IRecordingSession
     private void OnSegmentCompleted(RecordingSegment segment)
     {
         _metadataWriter.RecordSegment(segment);
+        ResetProgress();
         _status = _status with
         {
             TotalBytes = _status.TotalBytes + segment.Bytes,

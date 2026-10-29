@@ -2,6 +2,7 @@ namespace StreamPilot.App.ViewModels;
 
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
@@ -1076,7 +1077,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         };
 
         _recordingSession = await _recording.StartAsync(request, CancellationToken.None).ConfigureAwait(true);
-        RecordingSummary = $"录制中：{_recordingSession.Status.CurrentFileName}";
+
+        // 立刻用与定时刷新同一套格式显示：等首个分片结算才出进度，会让整场录制停在“录制中：”。
+        RefreshRecordingStatus();
         StatusMessage = "录制已开始，输出目录：" + RecordingDirectory;
         AppendLog("录制已开始：" + RecordingDirectory);
         RaiseCommandStates();
@@ -1115,7 +1118,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
         RecordingStatus status = _recordingSession.Status;
         RecordingSummary = status.IsRecording
-            ? $"录制中 {status.Duration:hh\\:mm\\:ss} · {status.TotalBytes / (1024.0 * 1024.0):F1} MiB · 分片 {status.CurrentSegmentIndex + 1} · 重连 {status.ReconnectCount}"
+            ? FormatRecordingStatus(status)
             : "录制已结束（" + _recordingSession.StopReason + "）";
 
         if (!status.IsRecording)
@@ -1123,6 +1126,29 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             _recordingSession = null;
             RaiseCommandStates();
         }
+    }
+
+    /// <summary>
+    /// 把录制状态格式化成一行摘要（录制中每秒刷新一次）。
+    /// </summary>
+    /// <param name="status">状态快照。</param>
+    /// <returns>摘要文本。</returns>
+    /// <remarks>
+    /// 刚开录、还没写下任何数据时单独给一句"正在连接"：此时 0 字节 0 秒是事实，
+    /// 但和"卡住了"看起来一样，明确说出来才不会被当成故障。
+    /// 时长超过 24 小时按"总小时:分:秒"显示（<see cref="TimeSpan"/> 的 hh 会回绕）。
+    /// </remarks>
+    private static string FormatRecordingStatus(RecordingStatus status)
+    {
+        if (status.TotalBytes <= 0 && status.Duration <= TimeSpan.Zero)
+        {
+            return "录制中 · 正在连接直播流…";
+        }
+
+        string duration = status.Duration.TotalHours >= 24
+            ? FormattableString.Invariant($"{(int)status.Duration.TotalHours}:{status.Duration.Minutes:D2}:{status.Duration.Seconds:D2}")
+            : status.Duration.ToString(@"hh\:mm\:ss", CultureInfo.InvariantCulture);
+        return $"录制中 {duration} · {status.TotalBytes / (1024.0 * 1024.0):F1} MiB · 分片 {status.CurrentSegmentIndex + 1} · 重连 {status.ReconnectCount}";
     }
 
     /// <summary>

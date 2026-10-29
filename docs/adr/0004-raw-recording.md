@@ -52,13 +52,18 @@
 
 - **不设上限**：设置界面按 GiB / 小时填写并换算成字节 / 分钟；`SegmentPolicyOptions.Normalize()` 只把非法值（0、负数、小于 64 MiB 的字节上限、小于 1 分钟的时长上限）回退到默认值，不再夹取大值，因此用户可以按需把分片调得很大。
 
-- **FLV 关键帧判定**：`VideoTag`（tagType=9）且 `AVCPacketType == 1`，且首字节低 4 位 `FrameType == 1`（keyframe）。切分点必须在**该帧的 tag 起始处**，保证新分片首帧可解码。
+- **FLV 关键帧判定**：`VideoTag`（tagType=9）、`PacketType == 1`（AVC 的 `AVCPacketType` / HEVC 的 `HEVCPacketType`），且首字节高 4 位 `FrameType == 1`（keyframe）。切分点必须在**该帧的 tag 起始处**，保证新分片首帧可解码。
 - **FLV 分片头**：新分片写入
   1. Header：`FLV\x01`、flags（保留 hasVideo/hasAudio 位）、`0x00000009`；
   2. `PreviousTagSize0 = 0`；
   3. 缓存的 `onMetaData` 脚本标签（tagType=18，首标签）；
-  4. 缓存的 `AVC sequence header`（`AVCPacketType == 0`）与 `AAC sequence header`（`AACPacketType == 0`）。
-- **时间戳重定基**：分片内时间戳统一减去分片首帧时间戳（保持相对连续性），并把相对偏移写回 tag 头（3 字节 + 扩展字节）。这样每个分片可独立播放。**这是对载荷之外唯一的时间戳改写，且不触碰编码数据**。
+  4. 缓存的视频 sequence header（AVC `AVCPacketType == 0` / B站 HDR 的 HEVC `CodecId=12, HEVCPacketType == 0`）与 `AAC sequence header`（`AACPacketType == 0`）。
+- **序列头晚到必须补写**：直播流的标签顺序不固定（实测 HDR 房间是 `script → 音频头 → 视频头`）。
+  分片写入器由**第一个**到达的序列头创建，此时另一路头还不存在；后到的序列头必须补写进当前分片，
+  否则首分片缺少 hvcC/ASC，播放器会报 "No start code is found" 或没有声音。
+- **onMetaData 必须存在会话上**：流开头的脚本标签早于写入器创建，只在写入器存在时缓存会永久丢掉元数据；
+  现在由会话保存并在每个新分片开头重新写入。
+- **时间戳重定基**：分片内时间戳统一减去**首个媒体数据标签**的时间戳（保持相对连续性），并把相对偏移写回 tag 头（3 字节 + 扩展字节）。这样每个分片可独立播放。**这是对载荷之外唯一的时间戳改写，且不触碰编码数据**。序列头本身不参与基准选择：它们自带会话起始时间戳，先到的那一路会把基准提前定在 0，导致真正的首帧（例如 HDR 样本的 ts=12499 关键帧）不被重定基。序列头自身**一律写 0**：加入直播时两路头的时间戳并不一致（实测 B站 28576：视频头 0、AAC 头 4831206 即开播 80 分钟），照原样写会让文件出现 80 分钟的假时间戳，播放器与转封装工具的时长、定位随之错乱。
 - **TS 分片**：以 m3u8 的分片为切分单位，累计字节/时长达到阈值时在分片边界切分；不做时间戳重定基（TS 播放器从 `PCR` 与 PTS 自行对齐），分片直接以 `.ts` 保存。
 
 ### 4. 断流重连

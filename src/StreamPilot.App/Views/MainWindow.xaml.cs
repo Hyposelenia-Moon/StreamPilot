@@ -64,11 +64,12 @@ public partial class MainWindow : Window
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
+        // 状态刷新与播放内核无关：即使 WebView2 初始化失败，录制时长/字节也要照常更新。
+        _statusTimer.Start();
         try
         {
             PlayerHostContainer.Children.Add(_playerHost);
             await _playerHost.InitializeAsync().ConfigureAwait(true);
-            _statusTimer.Start();
         }
         catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
         {

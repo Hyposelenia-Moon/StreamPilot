@@ -124,6 +124,7 @@ public sealed class TsStreamRecorder
     /// <param name="referer">可选 Referer。</param>
     /// <param name="onSegmentCompleted">分片完成回调，可为 <see langword="null"/>。</param>
     /// <param name="cancellationToken">取消令牌。</param>
+    /// <param name="onProgress">进度回调（每写成一个分片调用一次），可为 <see langword="null"/>。</param>
     /// <returns>录制结果。</returns>
     /// <remarks>
     /// 收尾（关闭末分片 + 登记末分片 + 计算最终结果）是必达的：正常结束、播放列表 ENDLIST、
@@ -147,7 +148,8 @@ public sealed class TsStreamRecorder
         string outputDirectory,
         string? referer,
         Action<RecordingSegment>? onSegmentCompleted,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<RecordingProgress>? onProgress = null)
     {
         ArgumentNullException.ThrowIfNull(client);
         ArgumentNullException.ThrowIfNull(playlist);
@@ -161,7 +163,7 @@ public sealed class TsStreamRecorder
 
         Directory.CreateDirectory(outputDirectory);
 
-        TsRecordingState state = new();
+        TsRecordingState state = new() { OnProgress = onProgress };
 
         bool refreshable = false;
         bool reconnectLimitReached = false;
@@ -367,6 +369,10 @@ public sealed class TsStreamRecorder
 
             // 真的写进了一个分片：连续失败窗口就此结束，下一次失败重新从 1 开始计。
             state.ConsecutiveFailures = 0;
+
+            // 每写完一个分片回报进度：分片可能很密（直播通常 2~4 秒一个），
+            // 界面上的时长与字节数据此按秒推进，而不是等整场结束。
+            state.ReportProgress();
         }
 
         return true;
@@ -623,6 +629,15 @@ public sealed class TsStreamRecorder
 
         /// <summary>已写入的总时长（秒）。</summary>
         public double TotalDurationSeconds { get; set; }
+
+        /// <summary>进度回调（可为 <see langword="null"/>）。</summary>
+        public Action<RecordingProgress>? OnProgress { get; set; }
+
+        /// <summary>把当前分片的已写字节与会话累计媒体时长回报给调用方。</summary>
+        public void ReportProgress() =>
+            OnProgress?.Invoke(new RecordingProgress(
+                CurrentBytes,
+                (long)Math.Round((TotalDurationSeconds + CurrentDurationSeconds) * 1000)));
     }
 
     /// <summary>
