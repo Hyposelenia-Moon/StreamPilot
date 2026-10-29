@@ -3,6 +3,7 @@ namespace StreamPilot.Recording;
 using StreamPilot.Core.Http;
 using StreamPilot.Core.Logging;
 using StreamPilot.Core.Models;
+using StreamPilot.Core.Parsers;
 using StreamPilot.Core.Services;
 using StreamPilot.Recording.Flv;
 using StreamPilot.Recording.Hls;
@@ -218,7 +219,10 @@ public sealed class RecordingSession : IRecordingSession
             return request.Candidate;
         }
 
-        foreach (StreamCandidate candidate in request.Room.Candidates)
+        // 录制独立建连，不共享播放连接；但候选选择要与播放一致地"先按画质排序"，
+        // 否则直接取接口原始顺序会命中 AVC 蓝光，HDR 房间就录不到 HEVC/HDR 码流。
+        IReadOnlyList<StreamCandidate> ordered = CandidateOrdering.Prioritize(request.Room.Candidates);
+        foreach (StreamCandidate candidate in ordered)
         {
             if (candidate.IsRecordable())
             {

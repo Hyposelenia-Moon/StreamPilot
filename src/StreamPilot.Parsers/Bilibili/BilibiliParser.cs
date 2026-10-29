@@ -56,7 +56,12 @@ internal sealed class BilibiliParser : PlatformParserBase
     private const string PlayInfoQueryPrefix = "?protocol=0,1&format=0,1,2&codec=0,1&qn=";
 
     /// <summary>getRoomPlayInfo 的固定查询参数尾部（后接数字房间号）。</summary>
-    private const string PlayInfoQuerySuffix = "&platform=web&ptype=8&dolby=5&panorama=1&room_id=";
+    /// <remarks>
+    /// <c>hdr_type=0,1</c> 与 <c>eotf=0,1,2</c> 缺一不可：不带它们 B站只返回 AVC 蓝光，
+    /// HEVC/HDR（原画 HDR、4K/HDR 等）整条 stream 都会被隐藏，StreamPilot 因此永远拿不到 HDR 流。
+    /// </remarks>
+    private const string PlayInfoQuerySuffix =
+        "&platform=web&ptype=8&dolby=5&panorama=1&hdr_type=0,1&eotf=0,1,2&room_id=";
 
     /// <summary>播放候选需要携带的 Referer（B站 CDN 校验来源）。</summary>
     private const string PlaybackReferer = "https://live.bilibili.com/";
