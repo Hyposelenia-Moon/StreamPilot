@@ -313,7 +313,7 @@ public sealed class RelaySafetyTests
     /// 回归背景：过去每次刷新都会把上一版子节点全部释放，播放器仍在用的切片会 404；
     /// 现在保留最近两代，只回收更早的一代。
     /// </remarks>
-    [TestMethod("中继子节点：按代回收，上一代仍可访问、更早一代被释放")]
+    [TestMethod("中继子节点：旧代在宽限期内保留，数量按代数上限收敛")]
     public async Task PlaylistChildrenAreRetainedByGeneration()
     {
         using SlowBodyHandler handler = new(TimeSpan.Zero);
@@ -339,8 +339,12 @@ public sealed class RelaySafetyTests
         BridgeHost.PlaylistFetchResult third = await host.TryReadPlaylistAsync(target, ShortPlaylistTimeout);
         string thirdChild = FirstChildUrl(third.Playlist!);
         Assert.True(host.IsRelayRegistered(thirdChild), "最新一代子节点必须可用");
-        Assert.False(host.IsRelayRegistered(firstChild), "更早一代必须被回收，避免无限增长");
-        Assert.True(host.RelayCount <= retainedCount + 2, "刷新不应让注册数持续增长");
+        Assert.True(
+            host.IsRelayRegistered(firstChild),
+            "宽限期（60 秒）内的旧一代必须保留：慢链路上该切片可能还在下载，提前释放会变成 404");
+        Assert.True(
+            host.RelayCount <= 1 + (2 * 8),
+            "刷新不应让注册数无限增长（每个列表最多 8 代，每代 2 条子地址），实际 " + host.RelayCount);
 
         host.ReleaseRelay(thirdChild);
         Assert.False(host.IsRelayRegistered(thirdChild), "显式释放后子节点必须立刻失效");

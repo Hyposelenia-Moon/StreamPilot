@@ -30,6 +30,8 @@
 
 - 仅 `hls_src` 一个候选 → `StreamFormat.HlsTs`、`Codec = Avc`、`Quality = Unknown`、
   `HttpReferer = https://www.bigo.tv/`；
+- 地址自带的时效（`?expire=` / `?expires=`，秒或毫秒）由 `UrlExpiry.TryRead` 写入 `ExpiresAt`：
+  Bigo 没有备选线路，读不出过期时间就只能等页面探测失败后才触发重新解析；
 - `Title = roomTopic`、`Anchor = nick_name`、`Category` 为空。
 
 ## 失败判定
@@ -57,5 +59,5 @@
 - **需要登录**：匿名请求可能返回 `needLogin: true` 且不带主播名/HLS 地址，此时会得到
   `Rejected`（"Bigo 要求登录后才能读取直播信息"），而不是"未开播"；
 - **地区限制**：Bigo 对部分地区（含中国大陆 IP）拒绝访问，此时会得到 `NetworkError` 或 `ParseError`；
-- 不提供画质/多线路信息（接口只返回单个 HLS 地址）；
+- 不提供画质/多线路信息（接口只返回单个 HLS 地址），失败时只能靠"重新解析"换新签名地址；
 - 不解析"轮播"状态。

@@ -59,7 +59,9 @@
 
 - 响应头（所有响应，**含中继响应**）：`Access-Control-Allow-Origin: *`（仅回环地址，风险可接受）、`Access-Control-Allow-Methods: GET, POST, HEAD, OPTIONS`、`Access-Control-Allow-Headers: *`、`Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges`、`Cache-Control: no-store`。
 - **修复参考项目缺陷**：`Access-Control-Allow-Private-Network` 只在 `OPTIONS` 且请求头包含 `Access-Control-Request-Private-Network: true` 时返回。
-- 中继 token：32 字节 `RandomNumberGenerator` → Base64Url；内存字典 `token → RelayTarget`，上限 64 条，10 分钟未访问淘汰；**不落盘**（避免把签名 URL 持久化）。
+- 中继 token：32 字节 `RandomNumberGenerator` → Base64Url；内存字典 `token → RelayTarget`，**上限 256 条**，**10 分钟无活动**淘汰（长连接转发期间每 30 秒 `Touch` 续命，否则 FLV 播到第 11 分钟时条目已被清掉、断流重连会 404）；**不落盘**（避免把签名 URL 持久化）。
+  - 播放列表改写出来的子注册是**批量**产生的，按 `ProvisionalRelaySeconds = 90` 秒"试用期"淘汰：从未被真正请求过就回收（探测会拉一次列表但不会再请求切片），首个真实请求转正；满额时优先淘汰这些未使用的子注册，避免把正在播放的切片挤掉（旧上限 64 条时会）。
+  - 子节点按"时间 + 数量"双约束保留：单代至少存活 60 秒、每个列表最多 8 代（只按代数保留 2 代会误杀慢链路上仍在下载的切片）。
 - 所有处理器都必须 try/catch 并返回结构化错误（`{"error":"..."}`），**禁止吞异常**：捕获后记录 `Error` 日志并把摘要返回给调用方。
 - 关闭流程：`HttpListener.Stop()` + 取消所有进行中的中继 `CancellationTokenSource`，`Dispose` 幂等。
 

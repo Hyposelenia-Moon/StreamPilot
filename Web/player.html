@@ -977,11 +977,57 @@
         }
 
         report(outbound.CHECKING, '正在并行检查 ' + run.candidates.length + ' 条线路…', run);
-        const results = await Promise.all(run.candidates.map(function probe(item) {
-          return probeCandidate(run, item);
-        }));
+
+        /*
+          探测只用于"排序"，不该决定首帧何时出现：等满全部探测会把起播拖到最慢那条的超时
+          （实测 B站 8 条候选时固定多等 3.0 秒）。这里最多等 PROBE_START_DEADLINE_MS，
+          到点后中止仍在飞的探测，把没完成的按"结果不确定"排队——顺序语义不变（不确定的排在已知可用之后），
+          但不再阻塞起播。
+        */
+        const results = new Array(run.candidates.length).fill(null);
+        const probes = run.candidates.map(function probe(item, index) {
+          return probeCandidate(run, item).then(function remember(result) {
+            results[index] = result;
+            return result;
+          });
+        });
+        await Promise.race([
+          Promise.all(probes),
+          new Promise(function waitStartDeadline(resolve) {
+            window.setTimeout(resolve, core.PROBE_START_DEADLINE_MS);
+          }),
+        ]);
         if (!isActive(run)) {
           return [];
+        }
+
+        // 到点后结束仍在飞的探测：它们会占着浏览器的同源连接名额，挡住真正的播放连接。
+        for (const controller of run.controllers) {
+          try {
+            controller.abort();
+          } catch (abortError) {
+            logToHost(core.LOG_LEVELS.WARN, '探测到点后中止连接失败：' + (abortError && abortError.message));
+          }
+        }
+
+        let pendingProbes = 0;
+        for (let index = 0; index < results.length; index += 1) {
+          if (results[index] === null) {
+            pendingProbes += 1;
+            results[index] = {
+              outcome: 'inconclusive',
+              elapsedMs: null,
+              statusCode: null,
+              errorName: 'probe-deadline',
+              errorMessage: null,
+            };
+          }
+        }
+
+        if (pendingProbes > 0) {
+          logToHost(
+            core.LOG_LEVELS.INFO,
+            '探测在 ' + core.PROBE_START_DEADLINE_MS + ' ms 内未全部完成（' + pendingProbes + ' 条按"不确定"处理），先按已确认结果起播');
         }
 
         const entries = [];
@@ -1007,9 +1053,13 @@
         }
 
         if (entries.length === 0) {
-          const message = '所有线路都拒绝了内置播放器的请求（可能未开播、地区受限或已被平台限流）。';
-          setHintLocked(message, 'error', 10000);
+          /*
+            全部候选都返回 404/410（地址已失效）时，继续重试没有意义：直接请宿主强制重新解析，
+            而不是把"请点 mpv 播放"当成终点（宿主侧对自动重解析有次数上限）。
+          */
+          const message = '所有线路都拒绝了内置播放器的请求（线路地址可能已失效）。';
           report(outbound.ERROR, message, run, null, { rejectedCount: rejected.length });
+          requestFreshSources(run, message);
           return [];
         }
 
@@ -1276,6 +1326,26 @@
 
             const detail = String(data.details || data.type || 'HLS 错误');
             if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+              /*
+                只有"编码缺失"才是真的不可播；bufferAppendError / bufferStalledError 等
+                先让 hls.js 重建媒体源通常就能恢复。旧实现把所有 fatal MEDIA_ERROR 都当成
+                HEVC 不支持并永久停播，一次 MSE 抖动就变成"请改用 mpv"。
+              */
+              if (!core.isHlsCodecErrorDetail(detail) && run.mediaRecoverAttempts < 1) {
+                run.mediaRecoverAttempts += 1;
+                logToHost(core.LOG_LEVELS.WARN, 'HLS 媒体错误，尝试重建媒体源：' + detail);
+                try {
+                  if (typeof player.swapAudioCodec === 'function') {
+                    player.swapAudioCodec();
+                  }
+
+                  player.recoverMediaError();
+                  return;
+                } catch (recoverError) {
+                  logToHost(core.LOG_LEVELS.WARN, 'HLS 媒体错误恢复失败：' + (recoverError && recoverError.message));
+                }
+              }
+
               handleHevcUnsupported(run, candidate, detail);
               return;
             }
@@ -1294,6 +1364,22 @@
         const message = hevcMseSupported
           ? '该直播流实际为 HEVC 编码，但系统拒绝了对应的 MSE 解码器；请改用左栏「mpv 播放」。'
           : '该直播流实际为 HEVC（H.265）编码，当前系统不支持 HEVC 解码，请改用左栏「mpv 播放」。';
+
+        /*
+          候选按"画质优先、同档 AVC 在前"排序，所以 HDR/高帧率房间的 HEVC 可能排第一。
+          系统没有 HEVC 解码器时不该直接判死：后面还有 H.264 线路就自动换过去，
+          只有"剩下的全是 HEVC"才提示改用 mpv（否则用户会以为这个房间根本播不了）。
+        */
+        const hasFallback = run.queue
+          .slice(1)
+          .some(function notHevc(item) { return item.codec !== 'hevc'; });
+        if (hasFallback) {
+          logToHost(core.LOG_LEVELS.WARN, 'HEVC 解码不可用，自动切换到下一条线路：' + description);
+          report(outbound.WARNING, 'HEVC 解码不可用，正在切换线路…', run, candidate, { errorMessage: description });
+          switchToNextCandidate(run, candidate, 'HEVC 解码不可用');
+          return;
+        }
+
         report(outbound.ERROR, message, run, candidate, { errorMessage: description });
         stopRun(run);
         destroyPlayer();
@@ -1702,6 +1788,13 @@
             : '没有可用的候选线路。';
           setHintLocked(message, 'error', 20000);
           report(outbound.ERROR, message, null, null, { unsupportedCount: normalized.unsupportedCount });
+
+          // 零候选多半是"平台签名已过期"：请宿主强制重新解析一次（有上限），而不是停在这里。
+          if (normalized.unsupportedCount === 0 && !state.refreshRequested) {
+            state.refreshRequested = true;
+            report(outbound.REFRESH_NEEDED, '没有可用的候选线路（可能已过期）', null, null);
+          }
+
           return;
         }
 
@@ -1738,6 +1831,8 @@
           lastTelemetryReportedAt: 0,
           /** 本次缓冲失控里已经自行处置（恢复播放 / 追帧）的次数。 */
           runawayChaseAttempts: 0,
+          /** 本会话已尝试过的 hls.js 媒体错误恢复次数（只允许一次，避免无限重建）。 */
+          mediaRecoverAttempts: 0,
           /** 上一次缓冲失控自行处置的时间戳（0 表示还没处置过）。 */
           runawayHandledAt: 0,
           /** 是否保留库内自动追帧；false 表示用户点了「停止追帧」（不暂停播放）。 */
@@ -1761,9 +1856,14 @@
 
         run.queue = queue;
         if (queue.length === 0) {
+          // 探测阶段已经请求过宿主重新解析时不再叠一条提示（否则状态行会被两条错误来回覆盖）。
+          if (run.refreshRequested) {
+            return;
+          }
+
           const message = normalized.unsupportedCount > 0
             ? '所有候选线路都不被本页支持，请点击「mpv 播放」。'
-            : '所有候选线路都拒绝了内置播放器的请求，请点击「mpv 播放」或稍后重试。';
+            : '所有候选线路都拒绝了内置播放器的请求，请稍后重试或改用「mpv 播放」。';
           setHintLocked(message, 'error', 10000);
           report(outbound.ERROR, message, run, null, { mode: run.mode });
           return;

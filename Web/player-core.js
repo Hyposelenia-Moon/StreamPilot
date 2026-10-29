@@ -42,6 +42,15 @@ const STREAM_ENDED_REASON_MARKER = '连接已结束';
 const PROBE_TIMEOUT_MS = 3000;
 
 /**
+ * 启动期最多为"探测排序"等待的时间（毫秒）。
+ *
+ * 探测只影响候选顺序，不应该决定首帧何时出现：等满全部探测会把起播拖到最慢那条的
+ * PROBE_TIMEOUT_MS（实测 B站 8 条候选时固定多等 3.0 秒）。到点即中止未完成的探测，
+ * 未完成的候选按"结果不确定"排在已知可用之后——顺序语义不变，起播不再被拖住。
+ */
+const PROBE_START_DEADLINE_MS = 600;
+
+/**
  * 探测可以据此"否决"候选的 HTTP 状态码。
  *
  * 只有 404/410 表示地址本身不存在或已失效；其余状态（含 403、5xx）与网络错误、
@@ -1699,6 +1708,22 @@ function isMseError(errorDetail, mpegts) {
 }
 
 /**
+ * 判断 hls.js 的媒体错误是否属于"编码不被支持"（而不是可恢复的 MSE 抖动）。
+ *
+ * 只有明确的编解码器缺失才该直接放弃；其余 MEDIA_ERROR（bufferAppendError、
+ * bufferStalledError 等）先走 `recoverMediaError()` 通常能恢复，直接判死会把
+ * 一次抖动放大成"永久停播 + 误报 HEVC"。
+ * @param {string} detail hls.js 的 data.details。
+ * @returns {boolean} 属于编码不支持返回 true。
+ */
+function isHlsCodecErrorDetail(detail) {
+  const text = String(detail || '');
+  return text === 'bufferAddCodecError'
+    || text === 'manifestIncompatibleCodecsError'
+    || text === 'bufferIncompatibleCodecsError';
+}
+
+/**
  * 判断错误描述是否表明 HEVC 解码器被系统拒绝。
  * @param {string} description 错误描述。
  * @returns {boolean} 是 HEVC 不受支持返回 true。
@@ -1714,6 +1739,7 @@ const StreamPilotPlayerCore = {
   MAX_RECONNECTS_PER_CANDIDATE,
   MAX_RECONNECTS_FOR_ENDED_STREAM,
   PROBE_TIMEOUT_MS,
+  PROBE_START_DEADLINE_MS,
   PROBE_REJECT_STATUS_CODES,
   MAX_CANDIDATE_SWITCHES_PER_SESSION,
   MAX_CANDIDATE_SWITCH_BACKOFF_MS,
@@ -1821,6 +1847,7 @@ const StreamPilotPlayerCore = {
   isHttpStatusInvalid,
   isMseError,
   isHevcUnsupportedDescription,
+  isHlsCodecErrorDetail,
   shouldRecoverAfterLoadingComplete,
 };
 

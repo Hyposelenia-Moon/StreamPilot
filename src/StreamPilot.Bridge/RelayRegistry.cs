@@ -19,12 +19,25 @@ public sealed class RelayRegistry
     private readonly Lock _gate = new();
     private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
 
+    /// <summary>空闲淘汰阈值；默认 <see cref="BridgeConstants.RelayIdleMinutes"/> 分钟。</summary>
+    private readonly TimeSpan _idleTimeout;
+
+    /// <summary>子注册的试用期；默认 <see cref="BridgeConstants.ProvisionalRelaySeconds"/> 秒。</summary>
+    private readonly TimeSpan _provisionalTimeout;
+
     /// <summary>初始化注册表。</summary>
     /// <param name="logger">结构化日志。</param>
-    public RelayRegistry(IStructuredLogger logger)
+    /// <param name="idleTimeout">空闲淘汰阈值；为 <see langword="null"/> 时使用默认值。</param>
+    /// <param name="provisionalTimeout">子注册试用期；为 <see langword="null"/> 时使用默认值。</param>
+    public RelayRegistry(
+        IStructuredLogger logger,
+        TimeSpan? idleTimeout = null,
+        TimeSpan? provisionalTimeout = null)
     {
         ArgumentNullException.ThrowIfNull(logger);
         _logger = logger;
+        _idleTimeout = idleTimeout ?? TimeSpan.FromMinutes(BridgeConstants.RelayIdleMinutes);
+        _provisionalTimeout = provisionalTimeout ?? TimeSpan.FromSeconds(BridgeConstants.ProvisionalRelaySeconds);
     }
 
     /// <summary>当前注册数量。</summary>
@@ -41,8 +54,13 @@ public sealed class RelayRegistry
 
     /// <summary>注册一个中继目标。</summary>
     /// <param name="target">中继目标。</param>
+    /// <param name="provisional">
+    /// 是否为"试用期"注册（播放列表改写时批量登记的子地址）。试用期注册若在
+    /// <see cref="BridgeConstants.ProvisionalRelaySeconds"/> 秒内没有被真正请求过就会被淘汰；
+    /// 首个真实请求会把它转正。
+    /// </param>
     /// <returns>中继令牌（用于拼出本地地址）。</returns>
-    public string Register(RelayTarget target)
+    public string Register(RelayTarget target, bool provisional = false)
     {
         ArgumentNullException.ThrowIfNull(target);
         lock (_gate)
@@ -53,8 +71,9 @@ public sealed class RelayRegistry
                 EvictOldest();
             }
 
+            DateTimeOffset now = DateTimeOffset.UtcNow;
             string token = CreateToken();
-            _entries[token] = new Entry(target, DateTimeOffset.UtcNow);
+            _entries[token] = new Entry(target, now, provisional ? now + _provisionalTimeout : null);
             _logger.Debug(_moduleName, "已注册中继。", new Dictionary<string, object?>
             {
                 ["count"] = _entries.Count,
@@ -79,9 +98,37 @@ public sealed class RelayRegistry
                 return false;
             }
 
+            // 首个真实请求即"转正"：探测拉过但没人用的子地址靠试用期自然消失，
+            // 真正被播放器请求过的地址从此按普通空闲规则续命。
             entry.LastAccessAt = DateTimeOffset.UtcNow;
+            entry.ExpiresAt = null;
             target = entry.Target;
             return true;
+        }
+    }
+
+    /// <summary>
+    /// 续命指定令牌（不改变目标内容）。
+    /// </summary>
+    /// <param name="token">令牌。</param>
+    /// <remarks>
+    /// 直播 FLV 是长连接：建连时只请求一次 <c>/relay/{token}</c>，之后可能几小时没有任何新请求。
+    /// 如果只在"收到 HTTP 请求"时刷新活跃时间，10 分钟后条目会被淘汰，而画面仍在正常播放，
+    /// 直到第一次断流重连才突然 404。中继泵在转发期间周期性调用本方法，让"连接活着"等于"注册有效"。
+    /// </remarks>
+    public void Touch(string token)
+    {
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (_entries.TryGetValue(token, out Entry? entry))
+            {
+                entry.LastAccessAt = DateTimeOffset.UtcNow;
+            }
         }
     }
 
@@ -175,11 +222,13 @@ public sealed class RelayRegistry
 
     private void EvictExpired()
     {
-        DateTimeOffset threshold = DateTimeOffset.UtcNow.AddMinutes(-BridgeConstants.RelayIdleMinutes);
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DateTimeOffset threshold = now - _idleTimeout;
         List<string> expired = [];
         foreach (KeyValuePair<string, Entry> pair in _entries)
         {
-            if (pair.Value.LastAccessAt < threshold)
+            bool provisionalExpired = pair.Value.ExpiresAt is { } expiresAt && expiresAt <= now;
+            if (provisionalExpired || pair.Value.LastAccessAt < threshold)
             {
                 expired.Add(pair.Key);
             }
@@ -200,16 +249,29 @@ public sealed class RelayRegistry
         }
     }
 
+    /// <summary>
+    /// 淘汰一条注册：优先淘汰仍处于试用期、且从未被请求过的子注册。
+    /// </summary>
+    /// <remarks>
+    /// 达到上限说明注册压力已经很大（探测 + 播放列表刷新），此时最该回收的是"登记了但没人用"的
+    /// 子地址，而不是正在被播放的切片——后者会被播放器持续请求，活跃时间最新。
+    /// </remarks>
     private void EvictOldest()
     {
         string? oldestToken = null;
         DateTimeOffset oldest = DateTimeOffset.MaxValue;
+        bool oldestProvisional = false;
         foreach (KeyValuePair<string, Entry> pair in _entries)
         {
-            if (pair.Value.LastAccessAt < oldest)
+            bool provisional = pair.Value.ExpiresAt is not null;
+            bool better = provisional
+                ? !oldestProvisional || pair.Value.LastAccessAt < oldest
+                : !oldestProvisional && pair.Value.LastAccessAt < oldest;
+            if (better)
             {
                 oldest = pair.Value.LastAccessAt;
                 oldestToken = pair.Key;
+                oldestProvisional = provisional;
             }
         }
 
@@ -221,14 +283,18 @@ public sealed class RelayRegistry
 
     private sealed class Entry
     {
-        public Entry(RelayTarget target, DateTimeOffset now)
+        public Entry(RelayTarget target, DateTimeOffset now, DateTimeOffset? expiresAt)
         {
             Target = target;
             LastAccessAt = now;
+            ExpiresAt = expiresAt;
         }
 
         public RelayTarget Target { get; }
 
         public DateTimeOffset LastAccessAt { get; set; }
+
+        /// <summary>试用期截止时间；<see langword="null"/> 表示已转正（按普通空闲规则）。</summary>
+        public DateTimeOffset? ExpiresAt { get; set; }
     }
 }

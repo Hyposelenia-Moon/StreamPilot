@@ -101,6 +101,8 @@ public static class ResolveMessages
     public static string ForQuality(StreamQuality quality) => quality switch
     {
         StreamQuality.Dolby => "杜比原画",
+        StreamQuality.OriginalTrueColor => "原画真彩",
+        StreamQuality.Hdr => "HDR 原画",
         StreamQuality.Uhd4K => "4K",
         StreamQuality.Qhd2K => "2K",
         StreamQuality.Hd1080HighFps => "1080P 高帧率",

@@ -3,6 +3,7 @@ namespace StreamPilot.App.Services;
 using StreamPilot.Core.Configuration;
 using StreamPilot.Core.Logging;
 using StreamPilot.Core.Models;
+using StreamPilot.Core.Parsers;
 using StreamPilot.Core.Services;
 
 /// <summary>
@@ -75,7 +76,14 @@ public sealed class PlaybackCoordinator : IPlaybackCoordinator
         bool hasUnsupportedCodec = false;
         bool usedRelay = false;
 
-        foreach (StreamCandidate candidate in request.Room.Candidates)
+        // 中继不可用时 http 流没有可播路径：页面源是 https://appassets.local，
+        // 直连 http CDN 会被混合内容拦截，交给页面只会得到"所有线路都不可用"。
+        bool relayAvailable = request.AllowRelay && options.Bridge.AutoStart && _bridge.IsRunning;
+        int skippedForRelay = 0;
+
+        // 先按"画质 → 容器 → 编码"排序再截断：平台返回顺序是接口遍历顺序，
+        // 直接截前 N 条会让 HEVC/HDR 候选的下场取决于接口实现细节（见 CandidateOrdering）。
+        foreach (StreamCandidate candidate in CandidateOrdering.Prioritize(request.Room.Candidates))
         {
             if (playable.Count >= MaxCandidatesPerRoom)
             {
@@ -98,7 +106,8 @@ public sealed class PlaybackCoordinator : IPlaybackCoordinator
             }
 
             string url = candidate.Url;
-            if (request.AllowRelay && options.Bridge.AutoStart && _bridge.IsRunning)
+            bool relayed = false;
+            if (relayAvailable)
             {
                 try
                 {
@@ -111,6 +120,7 @@ public sealed class PlaybackCoordinator : IPlaybackCoordinator
                         Kind = IsPlaylist(candidate.Format) ? RelayKind.HlsPlaylist : RelayKind.Stream,
                     });
                     usedRelay = true;
+                    relayed = true;
                     lock (_relayGate)
                     {
                         _activeRelayUrls.Add(url);
@@ -121,6 +131,14 @@ public sealed class PlaybackCoordinator : IPlaybackCoordinator
                     _logger.LogError(LogLevel.Warn, _moduleName, "注册中继失败，回退直连。", exception);
                     url = candidate.Url;
                 }
+            }
+
+            if (!relayed && IsPlainHttp(candidate.Url))
+            {
+                // http 流必须有中继才能进 https 页面；没有中继就别把它算作"可用候选"，
+                // 否则页面会为一条注定被混合内容拦下的地址探测、重试，最后只能报错。
+                skippedForRelay++;
+                continue;
             }
 
             playable.Add(new WebPlayerCandidate
@@ -148,7 +166,10 @@ public sealed class PlaybackCoordinator : IPlaybackCoordinator
         string? hint = null;
         if (playable.Count == 0)
         {
-            hint = DescribeNoPlayableCandidates(request.Room.Candidates, hasUnsupportedCodec);
+            hint = skippedForRelay > 0 && !relayAvailable
+                ? "桥接服务未启动：内置播放器无法加载 http 流（页面是 https 源），"
+                  + "mpv 外挂播放同样依赖桥接。请重启程序，或用 https 线路播放。"
+                : DescribeNoPlayableCandidates(request.Room.Candidates, hasUnsupportedCodec);
         }
         else if (usedRelay)
         {
@@ -176,7 +197,12 @@ public sealed class PlaybackCoordinator : IPlaybackCoordinator
             ["mode"] = plan.Mode,
             ["extremeTargetMs"] = plan.ExtremeTargetMs,
             ["candidates"] = playable.Count,
+            ["selected"] = string.Join(
+                ",",
+                playable.Select(static candidate =>
+                    candidate.Format + "/" + candidate.Codec + "/" + candidate.Label)),
             ["relay"] = usedRelay,
+            ["relaySkipped"] = skippedForRelay,
             ["unsupportedCodec"] = hasUnsupportedCodec,
         });
 
@@ -286,6 +312,12 @@ public sealed class PlaybackCoordinator : IPlaybackCoordinator
 
         return "当前线路均无法在内置播放器播放（格式或编码不受支持），请点击「mpv 播放」。";
     }
+
+    /// <summary>判断地址是否为明文 http（进 https 页面必须经中继，否则会被混合内容拦截）。</summary>
+    /// <param name="url">候选地址。</param>
+    /// <returns>明文 http 返回 <see langword="true"/>。</returns>
+    private static bool IsPlainHttp(string url) =>
+        url.StartsWith("http://", StringComparison.OrdinalIgnoreCase);
 
     private static string FormatName(StreamFormat format) => format switch
     {

@@ -35,7 +35,7 @@ public sealed class RoomResolver : IRoomResolver
     }
 
     /// <inheritdoc />
-    public async Task<ResolveOutcome> ResolveAsync(RoomQuery query, CancellationToken cancellationToken)
+    public async Task<ResolveOutcome> ResolveAsync(RoomQuery query, CancellationToken cancellationToken, bool bypassCache = false)
     {
         ArgumentNullException.ThrowIfNull(query);
 
@@ -46,7 +46,10 @@ public sealed class RoomResolver : IRoomResolver
 
         IPlatformParser parser = _factory.GetParser(query.Platform);
         string cacheKey = query.RoomId ?? query.RoomUrl ?? string.Empty;
-        if (cacheKey.Length > 0 && _cache.TryGet(query.Platform, cacheKey, DateTimeOffset.UtcNow, out ResolvedRoom? cached) && cached is not null)
+        if (!bypassCache
+            && cacheKey.Length > 0
+            && _cache.TryGet(query.Platform, cacheKey, DateTimeOffset.UtcNow, out ResolvedRoom? cached)
+            && cached is not null)
         {
             _logger.Debug(_moduleName, "命中解析缓存。", new Dictionary<string, object?>
             {

@@ -253,7 +253,9 @@ internal sealed class BigoParser : PlatformParserBase
             StreamFormat.HlsTs,
             VideoCodec.Avc,
             StreamQuality.Unknown,
-            expiresAt: null,
+            // Bigo 只给一条 hls_src，没有备选线路；至少把地址自带的时效读出来，
+            // 让"已过期"能在下发前被发现并触发重新解析，而不是先交给页面探测失败。
+            expiresAt: UrlExpiry.TryRead(hlsSrc),
             referer: RoomUrlReferer,
             cdnHost: TryGetHost(hlsSrc));
     }

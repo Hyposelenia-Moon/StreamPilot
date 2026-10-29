@@ -388,6 +388,30 @@ test('错误归类：HTTP 状态错误、MSE 错误、HEVC 不受支持', () => 
   assert.equal(core.isHevcUnsupportedDescription('该编码不受支持 hev1'), true);
   assert.equal(core.isHevcUnsupportedDescription('avc1 decoder error'), false);
   assert.equal(core.isHevcUnsupportedDescription(''), false);
+
+  // hls.js 的媒体错误：只有明确的编解码器缺失才算"不可播"，其余先尝试重建媒体源。
+  assert.equal(core.isHlsCodecErrorDetail('bufferAddCodecError'), true);
+  assert.equal(core.isHlsCodecErrorDetail('manifestIncompatibleCodecsError'), true);
+  assert.equal(core.isHlsCodecErrorDetail('bufferIncompatibleCodecsError'), true);
+  assert.equal(core.isHlsCodecErrorDetail('bufferAppendError'), false);
+  assert.equal(core.isHlsCodecErrorDetail('bufferStalledError'), false);
+  assert.equal(core.isHlsCodecErrorDetail(''), false);
+});
+
+test('HEVC 解码不可用时先换到 H.264 线路，而不是直接停播', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+  assert.equal(html.includes('hasFallback'), true, '必须检查是否还有非 HEVC 候选');
+  assert.equal(html.includes('HEVC 解码不可用，正在切换线路'), true, '有 H.264 备用线路时必须先切换');
+});
+
+test('探测启动期限短于单条探测超时，且页面真的按期限中断探测', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+  assert.ok(core.PROBE_START_DEADLINE_MS > 0, '启动期限必须为正数');
+  assert.ok(
+    core.PROBE_START_DEADLINE_MS < core.PROBE_TIMEOUT_MS,
+    '启动期限必须短于单条探测超时，否则起播会被最慢的那条探测拖住');
+  assert.equal(html.includes('PROBE_START_DEADLINE_MS'), true, '页面必须使用启动期限');
+  assert.equal(html.includes('probe-deadline'), true, '未完成的探测必须按"结果不确定"标记');
 });
 
 test('getStartupTimeoutMs 按模式返回 6000/8000', () => {

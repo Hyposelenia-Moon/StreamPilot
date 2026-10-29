@@ -276,7 +276,13 @@ public partial class App : WpfApplication
         }
         catch (Core.Errors.BridgeException exception)
         {
-            _logger.LogError(LogLevel.Warn, "App", "桥接服务启动失败，mpv 外挂播放将不可用。", exception);
+            // 桥接同时承担"内置播放器的中继"与"mpv 外挂播放"两件事：
+            // 它没起来时页面只能直连 https 流，大量平台只给 http 流，最终表现为"所有线路都不可用"。
+            _logger.LogError(
+                LogLevel.Warn,
+                "App",
+                "桥接服务启动失败：内置播放器无法加载 http 流，mpv 外挂播放也不可用。",
+                exception);
         }
     }
 }

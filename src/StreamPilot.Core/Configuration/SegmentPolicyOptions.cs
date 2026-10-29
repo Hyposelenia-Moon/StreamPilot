@@ -107,6 +107,22 @@ public static class BridgeConstants
     /// <summary>中继注册的有效期（分钟），超时未访问即释放。</summary>
     public const int RelayIdleMinutes = 10;
 
-    /// <summary>同时存在的中继注册上限。</summary>
-    public const int MaxRelayRegistrations = 64;
+    /// <summary>
+    /// 播放列表改写产生的子注册的"试用期"（秒）：从未被真正请求过的子地址在该时限后淘汰。
+    /// </summary>
+    /// <remarks>
+    /// 播放页探测 HLS 候选时会拉一次播放列表（拿到响应头就 abort），改写过程会为每个切片登记子注册，
+    /// 但探测不会再请求它们。若按普通空闲阈值（10 分钟）淘汰，一次起播就能堆几十条死注册；
+    /// 首个真实请求会把注册"转正"，之后按普通规则续命。
+    /// </remarks>
+    public const int ProvisionalRelaySeconds = 90;
+
+    /// <summary>
+    /// 同时存在的中继注册上限。
+    /// </summary>
+    /// <remarks>
+    /// HLS 每次刷新播放列表都会重新登记切片（保留最近两代），8 条候选 × 两条列表 × 每列表若干切片
+    /// 已经接近 100 条；旧上限 64 会在起播后不久触发淘汰，把仍在播放的注册挤掉（表现为播放中 404）。
+    /// </remarks>
+    public const int MaxRelayRegistrations = 256;
 }

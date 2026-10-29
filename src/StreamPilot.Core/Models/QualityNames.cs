@@ -9,6 +9,9 @@ public static class QualityNames
     /// <summary>B站 4K 画质值。</summary>
     public const int BilibiliQuality4K = 20000;
 
+    /// <summary>B站「原画真彩」画质值（10bit 高码率原画，实测部分房间的最高 AVC 档）。</summary>
+    public const int BilibiliQualityTrueColor = 25000;
+
     /// <summary>B站 2K 画质值。</summary>
     public const int BilibiliQuality2K = 15000;
 
@@ -17,6 +20,12 @@ public static class QualityNames
 
     /// <summary>B站 1080P 画质值。</summary>
     public const int BilibiliQuality1080 = 400;
+
+    /// <summary>B站直播 HDR 画质值（HEVC Main10 + BT.2020/PQ）。</summary>
+    public const int BilibiliQualityHdr = 125;
+
+    /// <summary>B站直播杜比画质值。</summary>
+    public const int BilibiliQualityDolby = 126;
 
     /// <summary>B站 720P 画质值。</summary>
     public const int BilibiliQuality720 = 250;
@@ -43,6 +52,9 @@ public static class QualityNames
     {
         BilibiliMaxQualityNumber => StreamQuality.Dolby,
         BilibiliQuality4K => StreamQuality.Uhd4K,
+        BilibiliQualityTrueColor => StreamQuality.OriginalTrueColor,
+        BilibiliQualityHdr => StreamQuality.Hdr,
+        BilibiliQualityDolby => StreamQuality.Dolby,
         BilibiliQuality2K => StreamQuality.Qhd2K,
         BilibiliQuality1080HighFps => StreamQuality.Hd1080HighFps,
         BilibiliQuality1080 => StreamQuality.Hd1080,

@@ -19,8 +19,11 @@
 
 | 模式 | 说明 | 首帧超时 | 极限追帧目标 |
 |------|------|----------|--------------|
-| `extreme` | 极限追帧，低延迟优先 | 6000 ms | 150 / 200 / 250 ms（默认 250） |
-| `stable` | 稳定缓冲，抗抖动优先 | 8000 ms | — |
+| `stable` | 稳定缓冲，抗抖动优先（**默认**） | 8000 ms | — |
+| `extreme` | 极限追帧，低延迟优先（设置里勾选「极限追帧」后启用） | 6000 ms | 150 / 200 / 250 ms（默认 250） |
+
+模式来自 `StreamPilotOptions.Playback.Mode`，由设置窗口的「极限追帧」勾选项写入；`PlayAsync` 不再硬编码 extreme。
+旧配置（`schemaVersion = 1`）里的 `mode=Extreme` 是当年没有入口时的旧默认值，加载时会迁移为 `stable`（`JsonOptionsStore.Migrate`）。
 
 档位归一化：仅 `150`/`200`/`250` 视为有效毫秒值，其他值一律回落为 **250 ms**
 （`normalizeExtremeTargetSeconds`，由单测覆盖）。
@@ -84,10 +87,22 @@
 ## 4. 候选选择与队列
 
 1. 规范化候选：丢弃空 URL，按 `sourceIndex:url` 去重，补默认 `format=flv`、`codec=avc`。
-2. 过滤：HLS 家族需 `hls.js` 可用，其余需 `mpegts.js` 可用；`codec=hevc` 需系统支持 HEVC MSE。
-3. **候选多于一条时并行探测**（与参考播放页逐条一致，`PROBE_TIMEOUT_MS = 1200`）：
+2. **宿主先排序再截断**（`CandidateOrdering.Prioritize`，只保留 `MaxCandidatesPerRoom = 8` 条）：
+   平台返回顺序是"协议 → 容器 → 编码 → CDN"的遍历顺序，既不代表画质，也不保证同档位先给兼容性最好的编码。
+   排序键依次为「画质降序 → FLV/HLS-TS/HLS-fMP4/RTMP → AVC/HEVC → 平台顺序」：
+   - 画质权重里 **HDR 高于 4K SDR**（B站直播的 HDR 就是"原画"，qn=125），
+     否则 HDR 房间的 HEVC 候选会被同房间的 SDR 副本挤掉，永远播不到 HDR；
+   - 同画质同容器内 AVC 优先：WebView2 未装 HEVC 扩展时 HEVC 只能交给 mpv；
+     但 HEVC 只要画质更高（HDR/杜比）依然排最前，**排序不等于过滤**。
+3. 过滤：HLS 家族需 `hls.js` 可用，其余需 `mpegts.js` 可用；`codec=hevc` 需系统支持 HEVC MSE。
+4. **候选多于一条时并行探测**（`PROBE_TIMEOUT_MS = 3000`，单条探测的硬超时）：
    `GET` + `cache:'no-store'` + `credentials:'omit'`，**拿到响应头立刻 `abort()`、绝不读响应体**
    （读 body 等于把整条直播流拉下来，探测就变成一次真实下载），超时即 abort 并按"结果不确定"处理。
+   - **启动只等 `PROBE_START_DEADLINE_MS = 600`**：探测只用于排序，不该决定首帧何时出现。
+     到点后中止仍在飞的探测（它们会占着浏览器的同源连接名额），未完成的候选按 `inconclusive`
+     排在已知可用之后。此前 `Promise.all` 会等满最慢一条的 3 秒，实测 B站 8 条候选时每次起播
+     固定多等 3.0 秒（日志 `正在并行检查…` → 首帧前 3 s）；
+   - 到点被中止的探测仍会向宿主补报 `probe-result`（`errorName='probe-deadline'`），便于排查慢线路。
    - 只有一条候选时**不探测**：探测只用于比较与筛除，单候选零收益却会多占一条上游连接
      （参考播放页自己也补了这条：`docs/parsers/douyu.md`）；
    - 结果分类：`good`（2xx）/ `rejected`（4xx/5xx，直接丢弃）/ `inconclusive`（超时、CORS、其他）；
@@ -96,7 +111,11 @@
      因此第一条永远与"不探测"时相同，探测只可能把后面的死线路提前移出队列；
    - 页面上报 `checking`、每条候选的 `probe-result` / `probe-rejected`，最后上报一次 `candidate-queue`；
    - 连不上时由 `switchToNextCandidate` 按同一顺序切下一条（每条候选最多重连 2 次）。
-4. 队列为空 → 请求宿主重新解析（`refresh-needed`，每个会话只请求一次）。
+5. 队列为空 → 请求宿主重新解析（`refresh-needed`，每个会话只请求一次）。以下两条路径都会走它：
+   - 全部候选被探测判为 `rejected`（404/410，地址已失效）；
+   - `buildPlaybackPlan` 过滤后**零候选**（典型是平台签名已过期，宿主侧候选全被有效期校验剔除）。
+   宿主的 `HandleRefreshNeeded` 受 `MaxAutomaticReResolves = 2` 约束，且重新解析会**绕过解析缓存**
+   （见 §13.1），不会再把同一批失效地址原样发回来。
 
 宿主侧对这条请求加了**上限**：`ShellViewModel.MaxAutomaticReResolves = 2`。
 原因是"重新解析 → 重新下发 play"会开新会话、新会话的"只请求一次"计数被重置，
@@ -233,10 +252,15 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
 快照与恢复保留的必要状态、页面静态断言"不得再出现裸的引擎 configure 调用"）**、播放页静态结构（顶部提示已彻底移除、
 播放控制三键顺序为 开始 → 暂停/继续 → 停止、追帧相关按钮只剩合并后的 `#chaseBtn` 一个）。
 
+新增覆盖（2026-10）：**探测启动期限**（`PROBE_START_DEADLINE_MS` 必须短于 `PROBE_TIMEOUT_MS`，页面必须使用并把超时标成
+`probe-deadline`）、**hls.js 媒体错误分类**（`isHlsCodecErrorDetail` 只认编解码器缺失，其余先尝试恢复）。
+
 `dotnet run --project tests/StreamPilot.Tests` 里的 `RelaySafetyTests` 覆盖中继侧：
 目的地址白名单（协议 / 回环 / 私网 / 链路本地 / 未指定 / `localhost` 与整数形式回环字面量）、
 重定向**逐跳**校验（被拒目标不收到任何请求，公网跳转链正常跟随）、等响应头超时与播放列表正文超时（判定 + `Warn` 日志 + 504 语义）、
 以及"长连接不被这两条超时误杀"（替身在超时窗口之后继续产出数据，断言仍能读完）。
+`BridgeTests` 另覆盖中继注册表的空闲淘汰与 `Touch` 续命（长连接不会在第 10 分钟被清掉）；
+`OptionsStoreTests` 覆盖 v1 → v2 的播放模式迁移。
 
 ## 8. 画质档位切换
 
@@ -438,7 +462,29 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
   （旧注释/旧文档把它写成"否则 HttpClient 会在 30 秒后连直播流一起取消"——这个理由不成立，已订正。）
 - 连接池的 `PooledConnectionLifetime = InfiniteTimeSpan`：**连接池不再定时回收正在使用中的流连接**
   （曾设为 10 分钟：回收会把正在读的流一起换掉，表现为固定时长的"看着看着断一下"）；
-- 中继注册表的活跃时间在每次请求时刷新（`RelayRegistry.TryResolve`），长时间播放的地址不会被闲置淘汰。
+- **中继注册的保活与单飞**：
+  - 活跃时间不能只看"收到新的 HTTP 请求"——FLV 建连后几小时都没有第二次请求。中继泵在转发期间
+    每 `RelayTouchIntervalSeconds = 30` 秒调用一次 `RelayRegistry.Touch`，连接活着等于注册有效；
+    否则 10 分钟空闲淘汰会把还在播放的条目清掉，第一次断流重连直接 404（`unknown-relay`）。
+  - **同一令牌同一时刻只保留一条上游连接**：新连接受理时先 `Cancel` 旧连接的租约
+    （`TakeRelayLease`）。斗鱼等平台对同一签名地址只允许 1 条并发，旧连接若还挂在上游读数据，
+    新连接会被上游在 0.2~0.4 秒内切断（`docs/parsers/douyu.md`）。
+
+### 12.3 播放列表识别与子地址生命周期
+
+- **按内容识别播放列表**：子地址不一定带 `.m3u8` 后缀（部分平台给 `.../playlist/abc123?token=...`）。
+  中继对"200 + 非 Range + 非空正文"的响应先读 32 字节嗅探，以 `#EXTM3U`（允许 BOM/前导空白）开头
+  就整篇读完并逐行改写；否则把已读字节原样转发后继续泵。只看后缀会把变体列表当二进制流，
+  里面的相对切片地址不被改写，hls.js 拿到 CDN 原始 http 地址后被混合内容拦截。
+- **子注册带"试用期"**（`BridgeConstants.ProvisionalRelaySeconds = 90`）：播放页探测 HLS 候选会拉一次
+  播放列表（拿到响应头就 `abort()`），改写过程登记的切片子地址不会再被请求。
+  这些注册若按普通空闲阈值（10 分钟）淘汰，一次起播就能堆几十条死注册；
+  首个真实请求会把注册转正，之后按普通规则续命。
+- **注册上限 256 条**（`MaxRelayRegistrations`）：HLS 每条候选保留两条列表 × 若干切片，
+  8 条候选已经接近 100 条；旧上限 64 会在起播后不久触发淘汰，把仍在播放的注册挤掉（播放中 404）。
+  满额时优先淘汰"仍是试用期且从未被请求过"的子注册。
+- **切片代数按"时间 + 数量"双约束保留**：单代至少存活 `PlaylistGenerationGraceSeconds = 60` 秒，
+  且每个列表最多保留 8 代。只按代数（旧实现保留 2 代）会让慢链路上下载中的切片在约 4 秒后变成 404。
 
 ### 12.2 攻击面收敛（SP-02）
 
@@ -466,3 +512,21 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
 
 > 边界说明：桥接**只监听 `127.0.0.1`**（`LoopbackOnlyGuard`），不是公网监听，
 > 上述问题不是文件读取 / RCE，而是"本机任意页面可借中继访问内网与回环服务"。
+
+## 13. 解析缓存与地址时效
+
+- 解析结果按 `platform:roomId` 缓存 **60 秒**（`StreamCache.DefaultTtlSeconds`），目的是避免同一房间
+  在"解析 → 播放 → 换档"之间重复请求平台接口。
+- 候选有效期来自解析器：B站读签名参数 `expires`；抖音/Bigo 等把时效写在地址里的平台由
+  `UrlExpiry.TryRead` 读取（`expire`/`expires`/`expires_at` 等，秒或毫秒），
+  读不到按"平台未声明"处理（不做更保守的拒绝）。这样"已过期"能在下发前被过滤并触发重新解析，
+  而不是先交给页面探测失败。
+- 但流地址普遍带时效签名（B站 `expires`、斗鱼 `wsAuth/token`、虎牙 `wsSecret/wsTime`、抖音 `expire`），
+  缓存命中意味着**拿到的是同一批旧地址**。因此以下路径显式 `bypassCache`：
+  - 播放页 `refresh-needed`（候选全失效）；
+  - 换画质（档位与地址绑定，必须重新签发）；
+  - 用户手动重播（页面「开始播放」按钮 → 重新解析一次再下发）；
+  - `PlaybackPlan.Candidates` 为空（宿主侧有效期校验把所有候选都剔除了）时的一次强制补救。
+- 缓存键**不含画质键**：换档统一走 `bypassCache` + 覆盖写入，避免"同一房间多档位互相顶掉"。
+- `IRoomResolver.InvalidateCache()` 保留给"平台整体失效"这类场景（例如切换账号/Cookie 后），
+  日常路径不依赖它清空整个缓存。

@@ -833,6 +833,70 @@ public sealed class PlatformParserTests
         new(new HttpTextClient(new HttpClientFactory(new NetworkOptions(), NullStructuredLogger.Instance), NullStructuredLogger.Instance),
             NullStructuredLogger.Instance);
 
+    /// <summary>Bigo：只有一条 hls_src，但地址自带的时效必须被读出来。</summary>
+    /// <remarks>
+    /// 读不到有效期时，过期地址仍会被当作可用候选下发，页面先探测、重试、切线路，
+    /// 最后才轮到重新解析——用户的体感就是"点了播放没反应"。
+    /// </remarks>
+    [TestMethod("Bigo：读取 hls_src 里的过期时间")]
+    public void BigoReadsExpiryFromStreamUrl()
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            """
+            { "hls_src": "https://cdn.example/live/index.m3u8?expire=1893456000&sig=abc",
+              "roomTopic": "标题", "nick_name": "主播", "needLogin": false }
+            """);
+
+        StreamCandidateBuilder builder = new(PlatformId.Bigo);
+        CreateBigoParser().CollectCandidates(builder, document.RootElement, out _, out _);
+
+        Assert.Equal(1, builder.Count);
+        Assert.Equal(
+            DateTimeOffset.FromUnixTimeSeconds(1893456000),
+            builder.Build()[0].ExpiresAt,
+            "签名地址里的 expire 必须写入候选有效期");
+    }
+
+    /// <summary>抖音：选中档位可用时补上"不高于选中档"的备用线路，并读出时效。</summary>
+    /// <remarks>
+    /// 抖音每个档位只给 1 条 FLV + 1 条 HLS，没有 CDN 备选；选中档位的签名一旦失效，
+    /// 过去整场就没有任何可试的地址。备用档位只允许同档或更低档，避免把用户选择的档位顶掉。
+    /// </remarks>
+    [TestMethod("抖音：补低档备用线路并读取过期时间")]
+    public void DouyinAddsLowerQualityBackups()
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            """
+            { "stream_url": {
+                "flv_pull_url": {
+                  "HD1": "https://cdn.example/hd.flv?expire=1893456000",
+                  "SD1": "https://cdn.example/sd.flv?expire=1893456000" },
+                "hls_pull_url_map": {
+                  "HD1": "https://cdn.example/hd.m3u8?expire=1893456000",
+                  "SD1": "https://cdn.example/sd.m3u8?expire=1893456000" } } }
+            """);
+
+        StreamCandidateBuilder builder = new(PlatformId.Douyin);
+        bool added = CreateDouyinParser().CollectCandidates(
+            builder,
+            document.RootElement,
+            "room-state",
+            "HD1",
+            out _,
+            out _);
+
+        Assert.True(added, "选中档位有地址时必须成功");
+        Assert.Equal(4, builder.Count, "HD1 与更低的 SD1 各 FLV+HLS 两条");
+
+        IReadOnlyList<StreamCandidate> candidates = builder.Build();
+        Assert.Equal(StreamQuality.Hd720, candidates[0].Quality, "选中档位必须排在最前");
+        Assert.Equal(StreamQuality.Sd480, candidates[2].Quality, "备用档位排在选中档位之后");
+        foreach (StreamCandidate candidate in candidates)
+        {
+            Assert.NotNull(candidate.ExpiresAt, "地址带 expire 时候选必须带有效期");
+        }
+    }
+
     /// <summary>创建一个不发起网络请求的 B站解析器（HTTP 客户端只在测试里被构造，不会被调用）。</summary>
     /// <returns>B站解析器实例。</returns>
     private static BilibiliParser CreateBilibiliParser() =>

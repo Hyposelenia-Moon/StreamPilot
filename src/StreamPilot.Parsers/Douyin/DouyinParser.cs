@@ -29,6 +29,9 @@ using StreamPilot.Core.Utilities;
 /// </remarks>
 internal sealed class DouyinParser : PlatformParserBase
 {
+    /// <summary>选中档位之外最多再加几个备用档位（控制探测数量与画质选择的一致性）。</summary>
+    private const int MaxBackupQualities = 2;
+
     /// <summary>房间页地址前缀（不含斜杠，便于拼接房间号）。</summary>
     private const string RoomPageBase = "https://live.douyin.com";
 
@@ -1377,11 +1380,69 @@ internal sealed class DouyinParser : PlatformParserBase
         JsonElement streamUrl,
         string selectedQualityKey)
     {
+        int before = builder.Count;
         StreamQuality quality = MapDouyinQuality(selectedQualityKey);
+        bool added = AddQualityCandidates(builder, streamUrl, selectedQualityKey, quality);
+        if (!added)
+        {
+            Logger.Warn(ModuleName, "抖音选中档位没有可用地址，尝试用备用档位兜底。", new Dictionary<string, object?>
+            {
+                ["operation"] = StreamUrlOperation,
+                ["qualityKey"] = selectedQualityKey,
+            });
+        }
+
+        /*
+          只加选中档位会让"该签名地址失效"变成整场失败：抖音每个档位只给 1 条 FLV + 1 条 HLS，
+          没有 CDN 备选。这里补上**不高于选中档**的其它档位作为备用线路
+          （档位更高的不加入，避免把用户显式选择的档位顶掉）；
+          选中档位完全没地址时同样靠这条路径兜底，而不是直接报"没有可用地址"。
+        */
+        int backups = 0;
+        int selectedRank = CandidateOrdering.RankQuality(quality);
+        foreach (string key in EnumerateQualityKeys(streamUrl))
+        {
+            if (backups >= MaxBackupQualities)
+            {
+                break;
+            }
+
+            if (string.Equals(key, selectedQualityKey, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            StreamQuality backupQuality = MapDouyinQuality(key);
+            if (CandidateOrdering.RankQuality(backupQuality) > selectedRank)
+            {
+                continue;
+            }
+
+            if (AddQualityCandidates(builder, streamUrl, key, backupQuality))
+            {
+                backups++;
+            }
+        }
+
+        return builder.Count > before;
+    }
+
+    /// <summary>加入某个档位的地址（FLV 优先，其次 HLS），并尽力解析地址里的过期时间。</summary>
+    /// <param name="builder">候选构造器。</param>
+    /// <param name="streamUrl">抖音 room.stream_url 对象。</param>
+    /// <param name="qualityKey">档位键。</param>
+    /// <param name="quality">该档位对应的内部画质。</param>
+    /// <returns>加入至少一个候选返回 <see langword="true"/>。</returns>
+    private bool AddQualityCandidates(
+        StreamCandidateBuilder builder,
+        JsonElement streamUrl,
+        string qualityKey,
+        StreamQuality quality)
+    {
         bool added = false;
 
-        string? flvUrl = ReadMappedQualityUrl(streamUrl, FlvPullUrlField, selectedQualityKey)
-            ?? ReadDirectQualityUrl(streamUrl, selectedQualityKey);
+        string? flvUrl = ReadMappedQualityUrl(streamUrl, FlvPullUrlField, qualityKey)
+            ?? ReadDirectQualityUrl(streamUrl, qualityKey);
         if (!string.IsNullOrWhiteSpace(flvUrl))
         {
             added |= builder.TryAdd(
@@ -1389,12 +1450,12 @@ internal sealed class DouyinParser : PlatformParserBase
                 StreamFormat.FlvHttp,
                 VideoCodec.Avc,
                 quality,
-                expiresAt: null,
+                expiresAt: UrlExpiry.TryRead(flvUrl),
                 referer: RoomUrlReferer,
                 cdnHost: TryGetHost(flvUrl));
         }
 
-        string? hlsUrl = ReadMappedQualityUrl(streamUrl, HlsPullUrlMapField, selectedQualityKey);
+        string? hlsUrl = ReadMappedQualityUrl(streamUrl, HlsPullUrlMapField, qualityKey);
         if (!string.IsNullOrWhiteSpace(hlsUrl))
         {
             added |= builder.TryAdd(
@@ -1402,21 +1463,55 @@ internal sealed class DouyinParser : PlatformParserBase
                 StreamFormat.HlsTs,
                 VideoCodec.Avc,
                 quality,
-                expiresAt: null,
+                expiresAt: UrlExpiry.TryRead(hlsUrl),
                 referer: RoomUrlReferer,
                 cdnHost: TryGetHost(hlsUrl));
         }
 
-        if (!added)
+        return added;
+    }
+
+    /// <summary>枚举 <c>room.stream_url</c> 里出现过地址的档位键（按画质从高到低）。</summary>
+    /// <param name="streamUrl">抖音 room.stream_url 对象。</param>
+    /// <returns>档位键列表。</returns>
+    private static IReadOnlyList<string> EnumerateQualityKeys(JsonElement streamUrl)
+    {
+        HashSet<string> keys = new(StringComparer.Ordinal);
+        CollectQualityKeys(GetPropertyOrUndefined(streamUrl, FlvPullUrlField), keys);
+        CollectQualityKeys(GetPropertyOrUndefined(streamUrl, HlsPullUrlMapField), keys);
+        foreach (JsonProperty property in streamUrl.EnumerateObject())
         {
-            Logger.Warn(ModuleName, "抖音选中档位没有可用地址。", new Dictionary<string, object?>
+            if (property.Value.ValueKind == JsonValueKind.String && IsKnownQualityKey(property.Name))
             {
-                ["operation"] = StreamUrlOperation,
-                ["qualityKey"] = selectedQualityKey,
-            });
+                keys.Add(property.Name);
+            }
         }
 
-        return added;
+        return
+        [
+            .. keys
+                .OrderByDescending(static key => RankQualityKey(key))
+                .ThenBy(static key => key, StringComparer.Ordinal),
+        ];
+    }
+
+    /// <summary>从"档位键 → 地址"映射里收集有地址的档位键。</summary>
+    /// <param name="map">映射对象。</param>
+    /// <param name="keys">收集目标。</param>
+    private static void CollectQualityKeys(JsonElement map, HashSet<string> keys)
+    {
+        if (map.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        foreach (JsonProperty property in map.EnumerateObject())
+        {
+            if (property.Value.ValueKind == JsonValueKind.String && IsKnownQualityKey(property.Name))
+            {
+                keys.Add(property.Name);
+            }
+        }
     }
 
     /// <summary>把抖音的拉流档位键映射为内部画质档位。</summary>

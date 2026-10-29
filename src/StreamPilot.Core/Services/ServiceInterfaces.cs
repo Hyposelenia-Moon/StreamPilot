@@ -12,8 +12,12 @@ public interface IRoomResolver
     /// </summary>
     /// <param name="query">房间查询条件（房间号或直播间链接）。</param>
     /// <param name="cancellationToken">取消令牌。</param>
+    /// <param name="bypassCache">
+    /// 是否跳过解析缓存强制向平台重新请求。流地址普遍带时效签名，<c>refresh-needed</c>、
+    /// 用户手动重播与换档必须绕过缓存，否则会原样拿到同一批已经失效的地址。
+    /// </param>
     /// <returns>解析结果；失败时返回带失败分类的结果对象，不抛异常。</returns>
-    Task<ResolveOutcome> ResolveAsync(RoomQuery query, CancellationToken cancellationToken);
+    Task<ResolveOutcome> ResolveAsync(RoomQuery query, CancellationToken cancellationToken, bool bypassCache = false);
 
     /// <summary>
     /// 清空解析缓存，强制下一次解析重新请求平台。

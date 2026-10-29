@@ -26,6 +26,12 @@ public enum StreamQuality
     /// <summary>4K。</summary>
     Uhd4K = 6,
 
-    /// <summary>杜比（B站最高档，对应 qn=30000）。</summary>
-    Dolby = 7,
+    /// <summary>原画真彩（B站直播 qn=25000，10bit 高码率原画档）。</summary>
+    OriginalTrueColor = 7,
+
+    /// <summary>HDR 原画（B站直播 qn=125，通常是 HEVC Main10 + BT.2020/PQ）。</summary>
+    Hdr = 8,
+
+    /// <summary>杜比（B站最高档，对应 qn=30000 / 126）。</summary>
+    Dolby = 9,
 }

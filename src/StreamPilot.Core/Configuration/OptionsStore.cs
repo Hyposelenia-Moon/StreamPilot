@@ -3,6 +3,7 @@ namespace StreamPilot.Core.Configuration;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using StreamPilot.Core.Logging;
+using StreamPilot.Core.Models;
 
 /// <summary>
 /// 配置存取契约。
@@ -77,7 +78,7 @@ public sealed class JsonOptionsStore : IOptionsStore
         {
             string json = File.ReadAllText(FilePath);
             StreamPilotOptions? parsed = JsonSerializer.Deserialize<StreamPilotOptions>(json, SerializerOptions);
-            _current = parsed ?? new StreamPilotOptions();
+            _current = Migrate(parsed ?? new StreamPilotOptions());
             _logger.Info(_moduleName, "配置已加载。", new Dictionary<string, object?>
             {
                 ["path"] = FilePath,
@@ -94,6 +95,34 @@ public sealed class JsonOptionsStore : IOptionsStore
         }
 
         return _current;
+    }
+
+    /// <summary>
+    /// 把旧版本配置迁移到当前格式。
+    /// </summary>
+    /// <param name="options">反序列化得到的配置。</param>
+    /// <returns>迁移后的配置。</returns>
+    /// <remarks>
+    /// <para>
+    /// v1 → v2：播放模式默认值由「极限追帧」改为「稳定缓冲」。
+    /// v1 时代没有任何界面能修改该字段（`PlayAsync` 直接硬编码 Extreme），
+    /// 所以配置文件里的 <c>mode=Extreme</c> 只可能是旧默认值，不是用户选择；
+    /// 统一迁移到稳定缓冲，避免升级后仍然一开播就跳帧。想低延迟可在设置里重新勾选「极限追帧」。
+    /// </para>
+    /// </remarks>
+    private static StreamPilotOptions Migrate(StreamPilotOptions options)
+    {
+        const int currentVersion = 2;
+        if (options.SchemaVersion >= currentVersion)
+        {
+            return options;
+        }
+
+        return options with
+        {
+            SchemaVersion = currentVersion,
+            Playback = options.Playback with { Mode = PlaybackMode.Stable },
+        };
     }
 
     /// <inheritdoc />

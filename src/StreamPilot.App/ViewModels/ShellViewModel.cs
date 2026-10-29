@@ -553,7 +553,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>桥接服务状态文本。</summary>
     public string BridgeStatus => _bridge.IsRunning
         ? "桥接：" + _bridge.BaseAddress
-        : "桥接：未启动";
+        : "桥接：未启动（内置播放器无法加载 http 流，mpv 外挂播放不可用）";
 
     /// <summary>刷新桥接状态文本（桥接在窗口显示之后才启动，需要主动通知一次）。</summary>
     public void RefreshBridgeStatus() => OnPropertyChanged(nameof(BridgeStatus));
@@ -686,9 +686,11 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                     break;
 
                 case PlayerRequestPlayType:
-                    AppendLog("播放页请求开始播放。");
+                    // 页面的「开始播放」多出现在上一次播放失败之后：必须重新解析拿新地址，
+                    // 否则只会把同一批（可能已失效的）候选再下发一次。
+                    AppendLog("播放页请求开始播放，重新解析后下发。");
                     _automaticReResolveCount = 0;
-                    _ = PlayWithErrorHandlingAsync();
+                    _ = ReResolveAsync();
                     break;
 
                 case PlayerTogglePauseType:
@@ -728,8 +730,12 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// 解析成功后是否按「解析成功后自动播放」开关自动开始播放。
     /// 自动重解析与主动换档传 <see langword="false"/>：它们各自只做一次播放决定，避免一轮产生两份播放计划。
     /// </param>
+    /// <param name="bypassCache">
+    /// 是否跳过解析缓存。流地址带时效签名，自动重解析、换档与"候选全过期"的补救必须强制刷新，
+    /// 否则 60 秒缓存会把同一批失效地址原样返回（表现为"重新解析仍然播不了"）。
+    /// </param>
     /// <returns>解析成功并拿到房间信息返回 <see langword="true"/>。</returns>
-    private async Task<bool> ResolveCoreAsync(bool playAfterResolve)
+    private async Task<bool> ResolveCoreAsync(bool playAfterResolve, bool bypassCache = false)
     {
         if (string.IsNullOrWhiteSpace(_roomInput))
         {
@@ -778,7 +784,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             AppendLog("开始解析：" + _roomInput);
             ClearRoomInfo();
 
-            ResolveOutcome outcome = await _resolver.ResolveAsync(query, CancellationToken.None).ConfigureAwait(true);
+            ResolveOutcome outcome = await _resolver
+                .ResolveAsync(query, CancellationToken.None, bypassCache)
+                .ConfigureAwait(true);
             if (!outcome.Success || outcome.Room is null)
             {
                 _currentRoom = null;
@@ -941,15 +949,23 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         IsBusy = true;
         try
         {
-            PlaybackRequest request = new()
+            PlaybackPlan plan = await PreparePlanAsync().ConfigureAwait(true);
+            if (plan.Candidates.Count == 0)
             {
-                Room = _currentRoom,
-                Mode = PlaybackMode.Extreme,
-                ExtremeTargetMs = _extremeTargetMs,
-                AllowRelay = true,
-            };
+                /*
+                  候选全被过滤（典型：B站的 expires 已到期、平台签名失效）时，直接下发只会让页面报
+                  "没有可用的候选线路"，用户点重试也会命中 60 秒解析缓存。这里强制重解析一次再试。
+                */
+                AppendLog("当前候选均不可用，正在强制重新解析…");
+                if (await ResolveCoreAsync(playAfterResolve: false, bypassCache: true).ConfigureAwait(true))
+                {
+                    plan = await PreparePlanAsync().ConfigureAwait(true);
+                }
 
-            PlaybackPlan plan = await _playback.PrepareAsync(request, CancellationToken.None).ConfigureAwait(true);
+                // 内层解析会在 finally 里复位忙碌状态，回到本方法后要恢复。
+                IsBusy = true;
+            }
+
             _activeSessionId = plan.SessionId;
 
             // 新会话一定是从播放状态开始，按钮回到「暂停播放」。
@@ -991,6 +1007,23 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             IsBusy = false;
             RaiseCommandStates();
         }
+    }
+
+    /// <summary>
+    /// 按当前房间与设置构造一次播放计划（必要时注册中继）。
+    /// </summary>
+    /// <returns>播放计划。</returns>
+    private Task<PlaybackPlan> PreparePlanAsync()
+    {
+        PlaybackRequest request = new()
+        {
+            Room = _currentRoom!,
+            Mode = _options.Playback.Mode,
+            ExtremeTargetMs = _extremeTargetMs,
+            AllowRelay = true,
+        };
+
+        return _playback.PrepareAsync(request, CancellationToken.None);
     }
 
     /// <summary>
@@ -1168,7 +1201,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     {
         try
         {
-            if (await ResolveCoreAsync(playAfterResolve: false).ConfigureAwait(true))
+            if (await ResolveCoreAsync(playAfterResolve: false, bypassCache: true).ConfigureAwait(true))
             {
                 await PlayAsync(automatic: false).ConfigureAwait(true);
             }
@@ -1332,7 +1365,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         AppendLog("切换画质：" + (qualityKey ?? QualityOption.BestFlag));
         _automaticReResolveCount = 0;
 
-        if (await ResolveCoreAsync(playAfterResolve: false).ConfigureAwait(true))
+        if (await ResolveCoreAsync(playAfterResolve: false, bypassCache: true).ConfigureAwait(true))
         {
             // 用户主动换档，与「解析成功后自动播放」无关：一次计划、一次 play 消息。
             await PlayAsync(automatic: false).ConfigureAwait(true);

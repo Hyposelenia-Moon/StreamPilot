@@ -39,6 +39,9 @@
     <Compile Include="..\..\src\StreamPilot.App\Services\PresetStore.cs">
       <Link>App\Services\PresetStore.cs</Link>
     </Compile>
+    <Compile Include="..\..\src\StreamPilot.App\Services\PlaybackCoordinator.cs">
+      <Link>App\Services\PlaybackCoordinator.cs</Link>
+    </Compile>
     <Compile Include="..\..\src\StreamPilot.App\Services\RoomInputNormalizer.cs">
       <Link>App\Services\RoomInputNormalizer.cs</Link>
     </Compile>

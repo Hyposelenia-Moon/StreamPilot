@@ -87,6 +87,9 @@
                   </StackPanel>
                 </StackPanel>
 
+                <CheckBox Content="极限追帧（低延迟；弱网会跳帧）" IsChecked="{Binding ExtremePlayback}"
+                          Style="{StaticResource SettingFieldCheck}"
+                          ToolTip="关闭时使用稳定缓冲（默认，建议）；开启后延迟压到 250ms 以内，缓冲超过阈值会硬跳到直播边缘" />
                 <CheckBox Content="解析成功后自动开始播放" IsChecked="{Binding AutoPlayOnResolve}"
                           Style="{StaticResource SettingFieldCheck}" />
                 <CheckBox Content="解析成功后自动调用 mpv 播放" IsChecked="{Binding AutoLaunchMpv}"

@@ -155,6 +155,9 @@ reflow 响应里的房间数据对象按 `data.data`、`data` 两种包装兼容
 
 - FLV：`room.stream_url.flv_pull_url`，画质优先 `FULL_HD1` → `HD1` → `SD1` → `SD2`；
 - HLS：`room.stream_url.hls_pull_url_map`，同样的画质顺序 → `StreamFormat.HlsTs`；
+- 候选以选中档位为主，**再补最多 2 个不高于选中档的备用档位**：抖音每个档位只给 1 条 FLV + 1 条 HLS，
+  没有 CDN 备选，选中档位的签名失效时过去整场没有任何可试地址；更高的档位不加入，避免顶掉用户的选择；
+- 地址自带的时效（`?expire=` / `?expires=`）由 `UrlExpiry.TryRead` 写入 `ExpiresAt`；
 - `CdnHost` 取 URL 主机名，`HttpReferer = https://live.douyin.com/`；
 - 分类：`partition_road_map.sub_partition.partition.title`，否则 `partition.title`。
 
@@ -219,7 +222,7 @@ reflow 响应里的房间数据对象按 `data.data`、`data` 两种包装兼容
 - 抖音是六个平台里**唯一在接口里直接给出码率**的（`v_bit_rate`），填入 `BitrateKbps`
   （若字段单位是 bps 则换算为 kbps）；
 - `PreferredQualityKey` 命中时取该档；否则按"最高档在前"取第一个可用档，
-  并且**只把选中档位的地址放进候选列表**（避免播放页选中的档位被其它档位顶掉）。
+  候选列表以选中档位为主，另加最多 2 个**不高于选中档**的备用档位（避免播放页选中的档位被更高档顶掉）。
 
 ## 未确认 / 已知风险
 

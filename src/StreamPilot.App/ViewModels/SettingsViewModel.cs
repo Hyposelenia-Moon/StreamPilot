@@ -33,6 +33,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private PlatformOption _selectedDefaultPlatform = PlatformOption.All[0];
     private int _volume = PlaybackOptions.DefaultVolume;
     private bool _autoPlayOnResolve = true;
+    private bool _extremePlayback;
     private bool _autoLaunchMpv;
     private string _bilibiliCookie = string.Empty;
     private string _douyinCookie = string.Empty;
@@ -162,6 +163,19 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         get => _volume;
         set => SetField(ref _volume, value);
+    }
+
+    /// <summary>
+    /// 是否使用「极限追帧」模式（默认关闭 = 稳定缓冲）。
+    /// </summary>
+    /// <remarks>
+    /// 极限档把延迟压到 250 ms 以内，代价是缓冲一超过阈值就硬跳、弱网下持续跳帧；
+    /// 它适合网络稳定且必须盯直播边缘的场景。默认走稳定缓冲，避免"一开播就卡"的第一印象。
+    /// </remarks>
+    public bool ExtremePlayback
+    {
+        get => _extremePlayback;
+        set => SetField(ref _extremePlayback, value);
     }
 
     /// <summary>解析成功后自动播放。</summary>
@@ -336,6 +350,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         SelectedDefaultPlatform = PlatformOption.Find(options.DefaultPlatform) ?? PlatformOption.All[0];
         Volume = Clamp(options.Playback.Volume, 0, 100, PlaybackOptions.DefaultVolume);
         AutoPlayOnResolve = options.Playback.AutoPlayOnResolve;
+        ExtremePlayback = options.Playback.Mode == PlaybackMode.Extreme;
         AutoLaunchMpv = options.Playback.AutoLaunchMpv;
         BilibiliCookie = options.Platforms.BilibiliCookie;
         DouyinCookie = options.Platforms.DouyinCookie;
@@ -410,6 +425,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             {
                 MpvPath = resolvedMpv,
                 ExtremeTargetMs = NormalizeTarget(ExtremeTargetMs),
+                Mode = ExtremePlayback ? PlaybackMode.Extreme : PlaybackMode.Stable,
                 Volume = Clamp(Volume, 0, 100, PlaybackOptions.DefaultVolume),
                 AutoPlayOnResolve = AutoPlayOnResolve,
                 AutoLaunchMpv = AutoLaunchMpv,

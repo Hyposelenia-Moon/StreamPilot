@@ -66,6 +66,15 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// <summary>播放列表改写时的预留容量（避免边拼接边扩容）。</summary>
     private const int PlaylistRewriteHeadroomBytes = 4096;
 
+    /// <summary>内容嗅探读取的字节数：足以判断 <c>#EXTM3U</c> 头（含 BOM 与前导空白）。</summary>
+    private const int PlaylistSniffBytes = 32;
+
+    /// <summary>嗅探认定为播放列表后允许的最大正文（防止把超大响应当播放列表缓存）。</summary>
+    private const int MaxSniffedPlaylistBytes = 8 * 1024 * 1024;
+
+    /// <summary>读播放列表正文时每次读取的块大小。</summary>
+    private const int PlaylistBodyChunkBytes = 16 * 1024;
+
     /// <summary>建立上游连接的超时（秒）。</summary>
     private const int UpstreamConnectTimeoutSeconds = 10;
 
@@ -123,11 +132,39 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// <summary>中继上游连续无数据的断流判定窗口。</summary>
     private readonly TimeSpan _idleTimeout;
 
-    /// <summary>播放列表地址 → 该列表上一次改写登记的子节点本地地址。</summary>
-    /// <summary>每个播放列表保留的最近改写代数：播放器可能仍在用上一版列表里的切片地址。</summary>
-    private const int MaxRetainedPlaylistGenerations = 2;
+    /// <summary>每个播放列表**至少**保留的改写代数：播放器可能仍在用上一版列表里的切片地址。</summary>
+    private const int MinRetainedPlaylistGenerations = 2;
 
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<List<string>>> _playlistChildren = new(StringComparer.Ordinal);
+    /// <summary>每个播放列表**最多**保留的改写代数（刷新很密时的硬上限，防止注册表无限增长）。</summary>
+    private const int MaxRetainedPlaylistGenerations = 8;
+
+    /// <summary>旧一代子地址的最短保留时间（秒）。</summary>
+    /// <remarks>
+    /// 只按"代数"保留会误伤慢链路：一个 6 MB 的切片在 10 Mbps 上要 5 秒，
+    /// 而直播播放列表每 2~4 秒就刷新一次，两代很快过去，正在下载的地址变成 404，
+    /// hls.js 只能重试 → 卡顿。这里改成"至少保留 60 秒，且不超过 8 代"：
+    /// 只要下载还在进行，对应地址就还在。
+    /// </remarks>
+    private const int PlaylistGenerationGraceSeconds = 60;
+
+    /// <summary>长连接转发期间给中继注册续命的间隔（秒）。</summary>
+    /// <remarks>
+    /// 注册表按"空闲 10 分钟"淘汰，而 FLV 只在建连时请求一次 <c>/relay/{token}</c>；
+    /// 不续命的话，播到第 11 分钟时条目已被清掉，第一次断流重连就变成 404。
+    /// </remarks>
+    private const int RelayTouchIntervalSeconds = 30;
+
+    /// <summary>每个中继令牌当前的一条上游连接（同一令牌只允许一条）。</summary>
+    /// <remarks>
+    /// 斗鱼等平台对同一签名地址只允许 1 条并发连接，第 2 条会在 0.2~0.4 秒内被上游切断。
+    /// 页面重连/换播放器时旧连接可能还挂在上游读数据，这里在受理新连接时主动取消旧连接。
+    /// </remarks>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, CancellationTokenSource> _relayLeases =
+        new(StringComparer.Ordinal);
+
+    /// <summary>播放列表地址 → 按"新 → 旧"排列的改写代数。</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<PlaylistGeneration>> _playlistChildren =
+        new(StringComparer.Ordinal);
 
     private readonly CancellationTokenSource _shutdown = new();
     private readonly SemaphoreSlim _outputLock = new(1, 1);
@@ -673,7 +710,63 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
             return;
         }
 
-        await StreamRelayAsync(context, target).ConfigureAwait(false);
+        // 同一令牌单飞：新连接先取消旧连接，避免旧上游连接继续占着"唯一并发名额"。
+        using CancellationTokenSource lease = new();
+        CancellationToken leaseToken = TakeRelayLease(token, lease);
+        try
+        {
+            await StreamRelayAsync(context, target, token, leaseToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            ReleaseRelayLease(token, lease);
+        }
+    }
+
+    /// <summary>
+    /// 取得某令牌的上游连接租约，并取消上一条连接。
+    /// </summary>
+    /// <param name="token">中继令牌。</param>
+    /// <param name="lease">本次连接的取消源。</param>
+    /// <returns>本次连接的取消令牌（仅覆盖本连接，不影响服务本身）。</returns>
+    private CancellationToken TakeRelayLease(string token, CancellationTokenSource lease)
+    {
+        while (true)
+        {
+            if (_relayLeases.TryGetValue(token, out CancellationTokenSource? previous))
+            {
+                try
+                {
+                    previous.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                    // 上一条连接刚好收尾并释放了取消源，属正常竞态。
+                }
+
+                if (_relayLeases.TryUpdate(token, lease, previous))
+                {
+                    return lease.Token;
+                }
+
+                continue;
+            }
+
+            if (_relayLeases.TryAdd(token, lease))
+            {
+                return lease.Token;
+            }
+        }
+    }
+
+    /// <summary>释放某令牌的租约（只移除自己那一条，避免误删后来者）。</summary>
+    /// <param name="token">中继令牌。</param>
+    /// <param name="lease">本次连接的取消源。</param>
+    private void ReleaseRelayLease(string token, CancellationTokenSource lease)
+    {
+        // 原子地"只删自己那一条"：先查后删会让"查完之后新连接刚好接管"的竞态
+        // 把新租约误删（此后第三条连接就不会取消它了）。
+        _relayLeases.TryRemove(new KeyValuePair<string, CancellationTokenSource>(token, lease));
     }
 
     /// <summary>
@@ -1039,7 +1132,11 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         return new RelayUpstreamStream(sent.Response!, body);
     }
 
-    private async Task StreamRelayAsync(HttpListenerContext context, RelayTarget target)
+    private async Task StreamRelayAsync(
+        HttpListenerContext context,
+        RelayTarget target,
+        string token,
+        CancellationToken leaseToken)
     {
         // 中继响应必须带 CORS 头：页面源是 https://appassets.local，而中继在 http://127.0.0.1，
         // 少了 Access-Control-Allow-Origin 时浏览器会直接以 "Failed to fetch" 拒绝，线路全部显示不可用。
@@ -1081,6 +1178,45 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
             return;
         }
 
+        await using Stream upstream = await response.Content.ReadAsStreamAsync(_shutdown.Token).ConfigureAwait(false);
+
+        /*
+          子播放列表不一定带 .m3u8 后缀：部分平台给的是 .../playlist/abc123?token=... 这种形式。
+          只按后缀判定会把变体列表当二进制流转发，里面的相对切片地址不会被改写，
+          hls.js 随后拿到 CDN 原始 http 地址，被混合内容拦截整条 HLS 失败。
+          因此这里对"200 + 非 Range + 非空正文"的响应嗅探开头：
+          以 #EXTM3U 开头就按播放列表读完并改写，否则把已读字节原样转发后继续泵。
+        */
+        byte[] prefix = new byte[PlaylistSniffBytes];
+        int prefixLength = 0;
+        bool canSniff = response.StatusCode == HttpStatusCode.OK
+            && string.IsNullOrWhiteSpace(context.Request.Headers[HeaderNameRange])
+            && response.Content.Headers.ContentLength != 0;
+        if (canSniff)
+        {
+            using CancellationTokenSource prefixTimeout =
+                CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token, leaseToken);
+            prefixTimeout.CancelAfter(_idleTimeout);
+            try
+            {
+                prefixLength = await ReadPrefixAsync(upstream, prefix, prefixTimeout.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!leaseToken.IsCancellationRequested)
+            {
+                await FailUpstreamTimeoutAsync(context, "response-body").ConfigureAwait(false);
+                return;
+            }
+
+            if (LooksLikePlaylist(prefix.AsSpan(0, prefixLength)))
+            {
+                string playlist = await ReadSniffedPlaylistAsync(upstream, prefix.AsMemory(0, prefixLength), leaseToken)
+                    .ConfigureAwait(false);
+                string baseUrl = response.RequestMessage?.RequestUri?.ToString() ?? target.UpstreamUrl;
+                await WritePlaylistAsync(context, RewritePlaylist(playlist, target, baseUrl)).ConfigureAwait(false);
+                return;
+            }
+        }
+
         context.Response.StatusCode = (int)response.StatusCode;
         string? contentType = response.Content.Headers.ContentType?.ToString() ?? target.ContentType;
         if (!string.IsNullOrWhiteSpace(contentType))
@@ -1097,8 +1233,95 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         CopyOptionalHeader(response, context, "Content-Range");
         CopyOptionalHeader(response, context, "Content-Encoding");
 
-        await using Stream upstream = await response.Content.ReadAsStreamAsync(_shutdown.Token).ConfigureAwait(false);
-        await PumpWithIdleTimeoutAsync(upstream, context, target).ConfigureAwait(false);
+        await PumpWithIdleTimeoutAsync(
+            upstream,
+            context,
+            target,
+            token,
+            leaseToken,
+            prefix.AsMemory(0, prefixLength)).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 判断响应开头是否为 HLS 播放列表（<c>#EXTM3U</c>，允许 UTF-8 BOM 与前导空白）。
+    /// </summary>
+    /// <param name="prefix">响应开头若干字节。</param>
+    /// <returns>是播放列表返回 <see langword="true"/>。</returns>
+    /// <remarks>
+    /// 只看内容不看后缀：平台给的变体列表地址经常没有扩展名，
+    /// 而播放列表规范要求首行必须是 <c>#EXTM3U</c>，这是唯一可靠的判据。
+    /// </remarks>
+    internal static bool LooksLikePlaylist(ReadOnlySpan<byte> prefix)
+    {
+        ReadOnlySpan<byte> body = prefix;
+        if (body.StartsWith((ReadOnlySpan<byte>)[0xEF, 0xBB, 0xBF]))
+        {
+            body = body[3..];
+        }
+
+        while (body.Length > 0 && (body[0] == (byte)'\r' || body[0] == (byte)'\n' || body[0] == (byte)' ' || body[0] == (byte)'\t'))
+        {
+            body = body[1..];
+        }
+
+        return body.StartsWith("#EXTM3U"u8);
+    }
+
+    /// <summary>把上游开头读到指定长度（或读到 EOF 为止）。</summary>
+    /// <param name="upstream">上游数据流。</param>
+    /// <param name="buffer">目标缓冲区。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>实际读到的字节数。</returns>
+    private static async Task<int> ReadPrefixAsync(Stream upstream, byte[] buffer, CancellationToken cancellationToken)
+    {
+        int total = 0;
+        while (total < buffer.Length)
+        {
+            int read = await upstream.ReadAsync(buffer.AsMemory(total), cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+            {
+                break;
+            }
+
+            total += read;
+        }
+
+        return total;
+    }
+
+    /// <summary>读完嗅探认定为播放列表的正文。</summary>
+    /// <param name="upstream">上游数据流（已读过前缀）。</param>
+    /// <param name="prefix">已读出的前缀字节。</param>
+    /// <param name="leaseToken">本连接的租约令牌。</param>
+    /// <returns>播放列表文本。</returns>
+    /// <exception cref="BridgeException">正文超过上限时抛出（按 502 处理）。</exception>
+    private async Task<string> ReadSniffedPlaylistAsync(
+        Stream upstream,
+        ReadOnlyMemory<byte> prefix,
+        CancellationToken leaseToken)
+    {
+        using CancellationTokenSource timeout =
+            CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token, leaseToken);
+        timeout.CancelAfter(_playlistDownloadTimeout);
+
+        using MemoryStream buffer = new(MaxSniffedPlaylistBytes);
+        await buffer.WriteAsync(prefix, timeout.Token).ConfigureAwait(false);
+        byte[] chunk = new byte[PlaylistBodyChunkBytes];
+        while (true)
+        {
+            int read = await upstream.ReadAsync(chunk, timeout.Token).ConfigureAwait(false);
+            if (read == 0)
+            {
+                return Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
+            }
+
+            if (buffer.Length + read > MaxSniffedPlaylistBytes)
+            {
+                throw new BridgeException("relay-playlist", "播放列表正文超过上限，已拒绝继续缓冲。");
+            }
+
+            buffer.Write(chunk, 0, read);
+        }
     }
 
     /// <summary>
@@ -1143,7 +1366,15 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
             return;
         }
 
-        byte[] payload = Encoding.UTF8.GetBytes(fetched.Playlist);
+        await WritePlaylistAsync(context, fetched.Playlist).ConfigureAwait(false);
+    }
+
+    /// <summary>把（改写后的）播放列表文本写回客户端。</summary>
+    /// <param name="context">当前请求。</param>
+    /// <param name="playlist">播放列表文本。</param>
+    private async Task WritePlaylistAsync(HttpListenerContext context, string playlist)
+    {
+        byte[] payload = Encoding.UTF8.GetBytes(playlist);
 
         context.Response.StatusCode = (int)HttpStatusCode.OK;
         context.Response.ContentType = HlsPlaylistContentType;
@@ -1179,6 +1410,14 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         /// <summary>已知路由的 CORS 预检：204 + CORS 头（仅此处携带私有网络头）。</summary>
         Preflight = 4,
     }
+
+    /// <summary>
+    /// 一次播放列表改写登记出的子地址（同一次改写算一代）。
+    /// </summary>
+    /// <param name="CreatedAt">该代的登记时间（UTC），用于按时间保留旧代。</param>
+    /// <param name="Children">该代登记的本地子地址。</param>
+    /// <remarks>类型是 internal 的原因同 <see cref="RelaySendResult"/>：离线用例要直接验证裁剪规则。</remarks>
+    internal sealed record PlaylistGeneration(DateTimeOffset CreatedAt, List<string> Children);
 
     /// <summary>
     /// 一次中继上游请求的结果：成功时带请求与响应，超时时两者均为 <see langword="null"/>。
@@ -1372,12 +1611,17 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     private string RegisterChild(string childUrl, RelayTarget target, List<string> children)
     {
         RelayKind kind = IsPlaylistUrl(childUrl) ? RelayKind.HlsPlaylist : RelayKind.Stream;
-        string localUrl = _registry.Register(new RelayTarget
-        {
-            UpstreamUrl = childUrl,
-            Referer = target.Referer,
-            Kind = kind,
-        });
+        // 子地址是改写播放列表时批量登记出来的：探测请求（拿到响应头就 abort）也会走这条路，
+        // 而探测不会再请求这些子地址。按"试用期"登记，没人真正请求过就在
+        // BridgeConstants.ProvisionalRelaySeconds 秒后自动消失，首个真实请求会把它转正。
+        string localUrl = _registry.Register(
+            new RelayTarget
+            {
+                UpstreamUrl = childUrl,
+                Referer = target.Referer,
+                Kind = kind,
+            },
+            provisional: true);
         children.Add(localUrl);
         return localUrl;
     }
@@ -1394,26 +1638,17 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// </remarks>
     private void AppendPlaylistGeneration(string playlistUrl, List<string> children)
     {
-        List<string>? expired = null;
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        List<string> expired = [];
         _playlistChildren.AddOrUpdate(
             playlistUrl,
-            _ => [children],
+            _ => [new PlaylistGeneration(now, children)],
             (_, generations) =>
             {
-                List<List<string>> updated = [children, .. generations];
-                if (updated.Count > MaxRetainedPlaylistGenerations)
-                {
-                    expired = updated[^1];
-                    updated.RemoveAt(updated.Count - 1);
-                }
-
+                List<PlaylistGeneration> updated = [new PlaylistGeneration(now, children), .. generations];
+                expired = TrimGenerations(updated, now);
                 return updated;
             });
-
-        if (expired is null)
-        {
-            return;
-        }
 
         foreach (string url in expired)
         {
@@ -1426,19 +1661,52 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// 从"新 → 旧"排列的代数里裁掉可以回收的旧代，并返回这些代里的子地址。
+    /// </summary>
+    /// <param name="generations">代数列表（会被就地修改）。</param>
+    /// <param name="now">当前时间。</param>
+    /// <returns>被裁掉的子地址。</returns>
+    /// <remarks>
+    /// 两条约束同时生效：至少保留 <see cref="MinRetainedPlaylistGenerations"/> 代（防止刚刷新就把
+    /// 上一版列表里的切片地址释放掉），单代至少存活
+    /// <see cref="PlaylistGenerationGraceSeconds"/> 秒（照顾慢链路的长下载），
+    /// 总量不超过 <see cref="MaxRetainedPlaylistGenerations"/> 代（防止刷新过密时无限增长）。
+    /// </remarks>
+    internal static List<string> TrimGenerations(List<PlaylistGeneration> generations, DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(generations);
+        List<string> expired = [];
+        while (generations.Count > MinRetainedPlaylistGenerations)
+        {
+            PlaylistGeneration oldest = generations[^1];
+            bool aged = now - oldest.CreatedAt >= TimeSpan.FromSeconds(PlaylistGenerationGraceSeconds);
+            bool overcrowded = generations.Count > MaxRetainedPlaylistGenerations;
+            if (!aged && !overcrowded)
+            {
+                break;
+            }
+
+            expired.AddRange(oldest.Children);
+            generations.RemoveAt(generations.Count - 1);
+        }
+
+        return expired;
+    }
+
     /// <summary>释放某个播放列表登记的所有子节点（含子播放列表自己的子节点）。</summary>
     /// <param name="playlistUrl">播放列表上游地址（分组键）。</param>
     /// <param name="visited">本次释放已经处理过的令牌（防止重复释放与环）。</param>
     private void ReleasePlaylistChildren(string playlistUrl, HashSet<string> visited)
     {
-        if (!_playlistChildren.TryRemove(playlistUrl, out List<List<string>>? previous))
+        if (!_playlistChildren.TryRemove(playlistUrl, out List<PlaylistGeneration>? previous))
         {
             return;
         }
 
-        foreach (List<string> generation in previous)
+        foreach (PlaylistGeneration generation in previous)
         {
-            foreach (string child in generation)
+            foreach (string child in generation.Children)
             {
                 string? childToken = RelayRegistry.ExtractToken(child);
                 if (childToken is not null)
@@ -1454,7 +1722,8 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// <returns>是播放列表返回 <see langword="true"/>。</returns>
     private static bool IsPlaylistUrl(string url) =>
         Uri.TryCreate(url, UriKind.Absolute, out Uri? uri)
-        && uri.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase);
+        && (uri.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase)
+            || uri.AbsolutePath.EndsWith(".m3u", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>把播放列表里的相对地址解析为绝对地址。</summary>
     /// <param name="playlistUrl">播放列表地址（作为基地址）。</param>
@@ -1473,14 +1742,31 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
     /// <param name="upstream">上游数据流。</param>
     /// <param name="context">当前请求。</param>
     /// <param name="target">中继目标。</param>
-    private async Task PumpWithIdleTimeoutAsync(Stream upstream, HttpListenerContext context, RelayTarget target)
+    /// <param name="token">中继令牌（转发期间用于续命）。</param>
+    /// <param name="leaseToken">本连接的租约令牌（被同令牌的新连接接管时取消）。</param>
+    /// <param name="prefix">嗅探时已经读出的字节（需先转发给客户端），可为空。</param>
+    private async Task PumpWithIdleTimeoutAsync(
+        Stream upstream,
+        HttpListenerContext context,
+        RelayTarget target,
+        string token,
+        CancellationToken leaseToken,
+        ReadOnlyMemory<byte> prefix = default)
     {
         byte[] buffer = new byte[RelayBufferBytes];
+        using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token, leaseToken);
+        long nextTouchAt = Environment.TickCount64 + (RelayTouchIntervalSeconds * 1000L);
+        _registry.Touch(token);
         try
         {
+            if (!prefix.IsEmpty)
+            {
+                await context.Response.OutputStream.WriteAsync(prefix, linked.Token).ConfigureAwait(false);
+            }
+
             while (true)
             {
-                using CancellationTokenSource idle = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
+                using CancellationTokenSource idle = CancellationTokenSource.CreateLinkedTokenSource(linked.Token);
                 idle.CancelAfter(TimeSpan.FromSeconds(IdleTimeoutSeconds));
                 int read = await upstream.ReadAsync(buffer, idle.Token).ConfigureAwait(false);
                 if (read == 0)
@@ -1488,17 +1774,34 @@ public sealed class BridgeHost : IPlaybackBridge, IAsyncDisposable
                     break;
                 }
 
-                await context.Response.OutputStream.WriteAsync(buffer.AsMemory(0, read), _shutdown.Token).ConfigureAwait(false);
+                await context.Response.OutputStream.WriteAsync(buffer.AsMemory(0, read), linked.Token).ConfigureAwait(false);
+
+                if (Environment.TickCount64 >= nextTouchAt)
+                {
+                    // 连接还活着就等于注册还有效：否则 10 分钟后断流重连会 404（见 RelayTouchIntervalSeconds）。
+                    _registry.Touch(token);
+                    nextTouchAt = Environment.TickCount64 + (RelayTouchIntervalSeconds * 1000L);
+                }
             }
 
             await context.Response.OutputStream.FlushAsync(_shutdown.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!_shutdown.IsCancellationRequested)
         {
-            _logger.Warn(_moduleName, "中继上游长时间无数据，已断开。", new Dictionary<string, object?>
+            if (leaseToken.IsCancellationRequested)
             {
-                ["host"] = TryGetHost(target.UpstreamUrl),
-            });
+                _logger.Debug(_moduleName, "同一中继的新连接已接管，旧连接关闭。", new Dictionary<string, object?>
+                {
+                    ["host"] = TryGetHost(target.UpstreamUrl),
+                });
+            }
+            else
+            {
+                _logger.Warn(_moduleName, "中继上游长时间无数据，已断开。", new Dictionary<string, object?>
+                {
+                    ["host"] = TryGetHost(target.UpstreamUrl),
+                });
+            }
         }
         catch (HttpListenerException exception)
         {

@@ -57,7 +57,7 @@ public sealed record PlaybackOptions
     public const int DefaultVolume = 30;
 
     /// <summary>默认播放模式。</summary>
-    public PlaybackMode Mode { get; init; } = PlaybackMode.Extreme;
+    public PlaybackMode Mode { get; init; } = PlaybackMode.Stable;
 
     /// <summary>默认极限追帧目标延迟（毫秒），仅允许 150/200/250。</summary>
     public int ExtremeTargetMs { get; init; } = PlaybackRequest.DefaultExtremeTargetMs;
