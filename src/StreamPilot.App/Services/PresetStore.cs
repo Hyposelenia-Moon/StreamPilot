@@ -142,6 +142,74 @@ public sealed class PresetStore
         return Save();
     }
 
+    /// <summary>
+    /// 原位更新一条预设（名称 / 链接 / 平台都可以改）。
+    /// </summary>
+    /// <param name="existing">被编辑的预设（按平台 + 名称定位）。</param>
+    /// <param name="updated">新的预设。</param>
+    /// <returns>更新成功返回 <see langword="true"/>。</returns>
+    /// <remarks>
+    /// 与 <see cref="Add"/> 的区别：Add 会"覆盖同平台同名"，而编辑恰恰可能把名称改成另一条的名称——
+    /// 那种情况必须拒绝，不能悄悄吞掉别的预设。更新保持原来的下标，列表不会因编辑而跳序。
+    /// </remarks>
+    public bool Update(RoomPreset existing, RoomPreset updated)
+    {
+        ArgumentNullException.ThrowIfNull(existing);
+        ArgumentNullException.ThrowIfNull(updated);
+        string name = NormalizeName(updated.Name);
+        string roomInput = updated.RoomInput.Trim();
+        if (name.Length == 0 || roomInput.Length == 0)
+        {
+            return false;
+        }
+
+        RoomPreset normalized = new(name, updated.Platform, roomInput);
+        RoomPreset identity = existing with { Name = NormalizeName(existing.Name) };
+        bool changed;
+        lock (_gate)
+        {
+            int index = _presets.FindIndex(item => item.HasSameIdentity(identity));
+            if (index < 0)
+            {
+                return false;
+            }
+
+            if (_presets.Where((item, position) => position != index).Any(item => item.HasSameIdentity(normalized)))
+            {
+                return false;
+            }
+
+            changed = !_presets[index].Equals(normalized);
+            _presets[index] = normalized;
+        }
+
+        return !changed || Save();
+    }
+
+    /// <summary>判断是否已存在与候选预设同身份（平台 + 名称）的**其它**预设。</summary>
+    /// <param name="candidate">待保存的预设。</param>
+    /// <param name="exclude">要排除的预设（通常是正在被编辑的那一条），可为 <see langword="null"/>。</param>
+    /// <returns>存在冲突返回 <see langword="true"/>。</returns>
+    /// <remarks>编辑时先查冲突，才能给出"换个名称"这种可操作的提示，而不是笼统的"保存失败"。</remarks>
+    public bool HasConflict(RoomPreset candidate, RoomPreset? exclude = null)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        string name = NormalizeName(candidate.Name);
+        if (name.Length == 0)
+        {
+            return false;
+        }
+
+        RoomPreset identity = candidate with { Name = name };
+        RoomPreset? excluded = exclude is null ? null : exclude with { Name = NormalizeName(exclude.Name) };
+        lock (_gate)
+        {
+            return _presets.Any(item =>
+                item.HasSameIdentity(identity)
+                && (excluded is null || !item.HasSameIdentity(excluded)));
+        }
+    }
+
     /// <summary>删除指定预设：按完整身份（平台 + 名称）匹配。</summary>
     /// <param name="preset">目标预设；只有平台与名称参与匹配，房间号不参与。</param>
     /// <returns>确实删掉了一条返回 <see langword="true"/>。</returns>

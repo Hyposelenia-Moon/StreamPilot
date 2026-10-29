@@ -46,6 +46,12 @@ public static class PresetDialog
     /// <summary>确定按钮在校验期间的文案。</summary>
     private const string ConfirmingText = "解析中…";
 
+    /// <summary>新增场景的窗口标题。</summary>
+    public const string AddTitle = "新增预设";
+
+    /// <summary>编辑场景的窗口标题。</summary>
+    public const string EditTitle = "编辑预设";
+
     /// <summary>确定按钮的常规文案。</summary>
     private const string ConfirmText = "确定";
 
@@ -88,11 +94,20 @@ public static class PresetDialog
     /// 校验并保存回调：入参为（主播名称，直播链接，平台），返回 <see langword="null"/> 表示已保存并关闭对话框，
     /// 返回提示文本表示校验失败（对话框保持打开）。
     /// </param>
-    public static void Show(Window? owner, PlatformId initialPlatform, Func<string, string, PlatformId, Task<string?>> validator)
+    /// <param name="title">窗口标题（新增 / 编辑）。</param>
+    /// <param name="initialName">主播名称的初值（编辑时是原值）。</param>
+    /// <param name="initialLink">直播链接的初值（编辑时是原值）。</param>
+    public static void Show(
+        Window? owner,
+        PlatformId initialPlatform,
+        Func<string, string, PlatformId, Task<string?>> validator,
+        string title = AddTitle,
+        string initialName = "",
+        string initialLink = "")
     {
         ArgumentNullException.ThrowIfNull(validator);
 
-        Window dialog = DialogWindow.Create(owner, "新增预设", PresetDialogWidth);
+        Window dialog = DialogWindow.Create(owner, title, PresetDialogWidth);
 
         Grid root = DialogLayout.CreateRoot(DialogLayout.Padding);
         for (int index = 0; index <= ButtonRow; index++)
@@ -103,6 +118,11 @@ public static class PresetDialog
         WpfTextBox nameBox = AddField(root, AnchorNameRow, AnchorNameLabel, AnchorNameAutomationId);
         WpfTextBox linkBox = AddField(root, LinkRow, LinkLabel, LinkAutomationId);
         PlatformPicker picker = AddPlatformField(root, PlatformRow, initialPlatform);
+
+        // 初值必须在订阅 TextChanged 之前写入：编辑时链接是原值，不该再触发一次"自动识别平台"
+        // 而把用户当初手动选择的平台改掉。
+        nameBox.Text = initialName;
+        linkBox.Text = initialLink;
 
         TextBlock failure = DialogLayout.CreateFailureText();
         Grid.SetRow(failure, FailureRow);

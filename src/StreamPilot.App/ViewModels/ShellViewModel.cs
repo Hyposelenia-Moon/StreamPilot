@@ -298,6 +298,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         OpenSettingsCommand = new RelayCommand(_ => OpenSettings());
         ApplyPresetCommand = new AsyncRelayCommand(parameter => ApplyPresetAsync(parameter as PresetItemViewModel), HandleCommandErrorAsync);
         DeletePresetCommand = new AsyncRelayCommand(parameter => DeletePresetAsync(parameter as PresetItemViewModel), HandleCommandErrorAsync, parameter => parameter is PresetItemViewModel);
+        EditPresetCommand = new AsyncRelayCommand(parameter => EditPresetAsync(parameter as PresetItemViewModel), HandleCommandErrorAsync, parameter => parameter is PresetItemViewModel);
 
         // 保存预设刻意**始终可点**：按钮灰着没有任何解释，用户会以为"预设加不了"。
         // 点进去再校验并给出明确提示，比禁用按钮更容易理解。
@@ -386,6 +387,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>删除指定预设（参数为 <see cref="PresetItemViewModel"/>）。</summary>
     public ICommand DeletePresetCommand { get; }
+
+    /// <summary>编辑指定预设（参数为 <see cref="PresetItemViewModel"/>）：名称、链接与平台都可以改。</summary>
+    public ICommand EditPresetCommand { get; }
 
     /// <summary>手动重新检测全部预设的开播状态。</summary>
     public ICommand RefreshPresetStatusCommand { get; }
@@ -739,9 +743,12 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     {
         if (string.IsNullOrWhiteSpace(_roomInput))
         {
-            StatusMessage = "请先输入房间号或直播间链接。";
+            StatusMessage = "请先输入直播间链接。";
             return false;
         }
+
+        // 房间号统一转成直播间链接：界面上只保留一种输入形态，预设与日志也不再多态。
+        RoomInput = NormalizeRoomInput(RoomInput);
 
         IsBusy = true;
         try
@@ -776,7 +783,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             RoomQuery? query = resolvedInput.Length == 0 ? null : BuildQueryFor(effective, resolvedInput);
             if (query is null)
             {
-                StatusMessage = "请先输入房间号或直播间链接。";
+                StatusMessage = "请先输入直播间链接。";
                 return false;
             }
 
@@ -801,6 +808,8 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             }
 
             _currentRoom = outcome.Room;
+            // 短号/跳转链接会被归一化成真实房间号：输入框随之固定为标准直播间链接。
+            RoomInput = RoomInputNormalizer.BuildRoomUrl(outcome.Room.Platform, outcome.Room.RoomId);
             ShowCurrentRoomInfo();
             StatusMessage = $"解析成功：{outcome.Room.Anchor} / {outcome.Room.Title}"
                 + $"（状态：{LiveStatus}，共 {outcome.Room.Candidates.Count} 条线路）";
@@ -1570,6 +1579,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(HasPresets));
         UpdatePresetSummary();
         (DeletePresetCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (EditPresetCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (SavePresetCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
     }
 
@@ -1813,38 +1823,14 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <returns>失败原因；成功返回 <see langword="null"/>。</returns>
     private async Task<string?> AddPresetFromDialogAsync(string anchorName, string link, PlatformId platform)
     {
-        string name = anchorName.Trim();
-        string input = link.Trim();
-        if (name.Length == 0)
+        (RoomPreset? built, bool offline, string? error) = await BuildPresetAsync(anchorName, link, platform).ConfigureAwait(true);
+        if (error is not null || built is null)
         {
-            return "请填写主播名称。";
+            return error;
         }
 
-        if (input.Length == 0)
-        {
-            return "请填写直播链接（可粘贴直播间网址或房间号）。";
-        }
-
-        if (name.Length > PresetStore.MaxNameLength)
-        {
-            return $"主播名称最长 {PresetStore.MaxNameLength} 字，请缩短。";
-        }
-
-        ResolvedRoom? room = await ResolvePresetLinkAsync(input, platform).ConfigureAwait(true);
-        bool offline = room is null && IsPresetSavableWithoutLiveStream(_presetResolveFailureKind);
-        if (room is null && !offline)
-        {
-            return PresetResolveFailureMessage();
-        }
-
-        /*
-          未开播 / 轮播时解析不会返回房间对象，但链接本身是有效的（平台已经认出这个房间）：
-          预设是"以后一键打开"的书签，没必要等主播开播才能收藏。
-          平台取解析实际使用的值（对话框选"自动"时由链接识别得到），输入沿用用户填写的内容。
-        */
-        PlatformId presetPlatform = room?.Platform ?? _presetResolvePlatform;
-        string presetInput = room is null ? RoomInputNormalizer.Normalize(input) : BuildPresetRoomInput(room);
-        RoomPreset preset = new(name, presetPlatform, presetInput);
+        RoomPreset preset = built;
+        string name = preset.Name;
         if (!_presetStore.Add(preset))
         {
             return $"保存预设失败：请检查名称（最长 {PresetStore.MaxNameLength} 字）与链接。";
@@ -1855,11 +1841,129 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         // 重建列表并把新预设设为选中项，用户在列表里能立刻看到它。
         RefreshPresetItems(preset);
         StatusMessage = offline
-            ? $"已新增预设「{name}」（{ResolvePlatformName(presetPlatform)}），该房间当前未开播/轮播，开播后点它即可观看（当前共 {PresetItems.Count} 个）。"
-            : $"已新增预设「{name}」（{ResolvePlatformName(presetPlatform)}），正在后台检测它是否开播（当前共 {PresetItems.Count} 个）。";
+            ? $"已新增预设「{name}」（{ResolvePlatformName(preset.Platform)}），该房间当前未开播/轮播，开播后点它即可观看（当前共 {PresetItems.Count} 个）。"
+            : $"已新增预设「{name}」（{ResolvePlatformName(preset.Platform)}），正在后台检测它是否开播（当前共 {PresetItems.Count} 个）。";
         AppendLog(offline
             ? "已新增预设（当前未开播/轮播，仍已保存）：" + name + " → " + preset.RoomInput
             : "已新增预设：" + name + " → " + preset.RoomInput);
+        _ = RefreshPresetStatusAsync();
+        return null;
+    }
+
+    /// <summary>
+    /// 校验对话框输入并解析出"可保存的预设草稿"（新增与编辑共用）。
+    /// </summary>
+    /// <param name="anchorName">主播名称（作为预设名）。</param>
+    /// <param name="link">直播链接或房间号。</param>
+    /// <param name="platform">用户在对话框里选定的平台。</param>
+    /// <returns>预设草稿、是否"房间有效但当前不可播"，以及失败原因。</returns>
+    /// <remarks>
+    /// 只有"房间存在、当前不可播"（未开播 / 轮播）仍允许保存：预设是"以后一键打开"的书签。
+    /// 未开播/轮播时拿不到房间对象，平台取解析实际使用的值，输入沿用用户填写内容（规范化后）。
+    /// </remarks>
+    private async Task<(RoomPreset? Preset, bool Offline, string? Error)> BuildPresetAsync(
+        string anchorName,
+        string link,
+        PlatformId platform)
+    {
+        string name = anchorName.Trim();
+        string input = link.Trim();
+        if (name.Length == 0)
+        {
+            return (null, false, "请填写主播名称。");
+        }
+
+        if (input.Length == 0)
+        {
+            return (null, false, "请填写直播链接（可粘贴直播间网址，或直接输入房间号自动转换）。");
+        }
+
+        if (name.Length > PresetStore.MaxNameLength)
+        {
+            return (null, false, $"主播名称最长 {PresetStore.MaxNameLength} 字，请缩短。");
+        }
+
+        ResolvedRoom? room = await ResolvePresetLinkAsync(input, platform).ConfigureAwait(true);
+        bool offline = room is null && IsPresetSavableWithoutLiveStream(_presetResolveFailureKind);
+        if (room is null && !offline)
+        {
+            return (null, false, PresetResolveFailureMessage());
+        }
+
+        PlatformId presetPlatform = room?.Platform ?? _presetResolvePlatform;
+        string presetInput = room is null ? RoomInputNormalizer.Normalize(input) : BuildPresetRoomInput(room);
+        return (new RoomPreset(name, presetPlatform, presetInput), offline, null);
+    }
+
+    /// <summary>
+    /// 编辑预设：弹出同一个三字段对话框（预填当前值），校验通过后原位更新。
+    /// </summary>
+    /// <param name="item">被编辑的预设项。</param>
+    /// <returns>异步任务。</returns>
+    private async Task EditPresetAsync(PresetItemViewModel? item)
+    {
+        if (item is null)
+        {
+            return;
+        }
+
+        PresetDialog.Show(
+            System.Windows.Application.Current?.MainWindow,
+            item.Platform,
+            (name, link, platform) => EditPresetFromDialogAsync(item, name, link, platform),
+            PresetDialog.EditTitle,
+            item.Preset.Name,
+            item.RoomInput);
+        await Task.CompletedTask.ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// 「编辑预设」对话框的校验回调：解析通过后原位更新（名称 / 链接 / 平台都可改）。
+    /// </summary>
+    /// <param name="item">被编辑的预设项。</param>
+    /// <param name="anchorName">新的主播名称。</param>
+    /// <param name="link">新的直播链接或房间号。</param>
+    /// <param name="platform">新选定的平台。</param>
+    /// <returns>失败原因；成功返回 <see langword="null"/>。</returns>
+    private async Task<string?> EditPresetFromDialogAsync(
+        PresetItemViewModel item,
+        string anchorName,
+        string link,
+        PlatformId platform)
+    {
+        // 三个字段都没改：视为"看一眼再关闭"，不重复解析、不写盘。
+        if (string.Equals(anchorName.Trim(), item.Preset.Name, StringComparison.Ordinal)
+            && string.Equals(link.Trim(), item.RoomInput.Trim(), StringComparison.Ordinal)
+            && platform == item.Platform)
+        {
+            return null;
+        }
+
+        (RoomPreset? built, bool offline, string? error) = await BuildPresetAsync(anchorName, link, platform).ConfigureAwait(true);
+        if (error is not null || built is null)
+        {
+            return error;
+        }
+
+        RoomPreset updated = built;
+        if (_presetStore.HasConflict(updated, item.Preset))
+        {
+            return "已存在同平台的同名预设，请换一个名称。";
+        }
+
+        if (!_presetStore.Update(item.Preset, updated))
+        {
+            return "保存预设失败：该预设可能已被删除，或名称/链接不合法。";
+        }
+
+        ResetPresetResolveState();
+        RefreshPresetItems(updated);
+        StatusMessage = offline
+            ? $"已更新预设「{updated.Name}」（{ResolvePlatformName(updated.Platform)}），该房间当前未开播/轮播，开播后点它即可观看。"
+            : $"已更新预设「{updated.Name}」（{ResolvePlatformName(updated.Platform)}），正在后台检测它是否开播。";
+        AppendLog(offline
+            ? "已更新预设（当前未开播/轮播）：" + updated.Name + " → " + updated.RoomInput
+            : "已更新预设：" + updated.Name + " → " + updated.RoomInput);
         _ = RefreshPresetStatusAsync();
         return null;
     }
@@ -1972,7 +2076,31 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>构造预设里保存的房间输入：用平台返回的最终房间号（短号跳转后也稳定）。</summary>
     /// <param name="room">解析出的房间。</param>
     /// <returns>房间号。</returns>
-    private static string BuildPresetRoomInput(ResolvedRoom room) => room.RoomId;
+    private static string BuildPresetRoomInput(ResolvedRoom room) =>
+        RoomInputNormalizer.BuildRoomUrl(room.Platform, room.RoomId);
+
+    /// <summary>
+    /// 把输入框里的纯数字房间号转换成对应平台的直播间链接。
+    /// </summary>
+    /// <param name="input">用户输入。</param>
+    /// <returns>转换后的输入；已经是链接、平台未知、或不是纯数字时原样返回。</returns>
+    /// <remarks>
+    /// 只做"纯数字 → 链接"这一种变换：分享文案与缺 scheme 的链接交给
+    /// <see cref="RoomInputNormalizer.Normalize"/>，字母房间号按原样交给解析器。
+    /// </remarks>
+    private string NormalizeRoomInput(string input)
+    {
+        string trimmed = input.Trim();
+        PlatformId platform = SelectedPlatform;
+        if (platform == PlatformId.Unknown
+            || !RoomInputNormalizer.IsPlainRoomId(trimmed)
+            || RoomInputNormalizer.LooksLikeUrl(trimmed))
+        {
+            return trimmed;
+        }
+
+        return RoomInputNormalizer.BuildRoomUrl(platform, trimmed);
+    }
 
     /// <summary>拼装"新增预设"解析失败的提示文本（说明为什么没有保存）。</summary>
     /// <returns>面向用户的提示文本。</returns>

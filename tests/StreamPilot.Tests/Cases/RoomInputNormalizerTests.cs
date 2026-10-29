@@ -1,4 +1,5 @@
 using StreamPilot.App.Services;
+using StreamPilot.Core.Models;
 using StreamPilot.Tests.Framework;
 
 namespace StreamPilot.Tests.Cases;
@@ -85,6 +86,38 @@ public sealed class RoomInputNormalizerTests
         Assert.Equal(string.Empty, RoomInputNormalizer.Normalize(null));
         Assert.Equal(string.Empty, RoomInputNormalizer.Normalize("   "));
         Assert.Equal(string.Empty, RoomInputNormalizer.Normalize("\t\r\n"));
+    }
+
+    /// <summary>纯数字房间号按平台拼成直播间链接，字母房间号与空输入不转换。</summary>
+    /// <remarks>
+    /// 界面上只保留"直播间链接"一种输入形态：用户输入 814 时转成
+    /// <c>https://live.bilibili.com/814</c>，解析器、预设与日志都不再多态。
+    /// 但"字母房间号"不能猜前缀（虎牙/YY 都有字母号），必须原样返回。
+    /// </remarks>
+    [TestMethod("输入规范化：房间号转直播间链接")]
+    public void BuildsRoomUrlFromRoomId()
+    {
+        Assert.Equal("https://live.bilibili.com/814", RoomInputNormalizer.BuildRoomUrl(PlatformId.Bilibili, "814"));
+        Assert.Equal("https://www.douyu.com/9999", RoomInputNormalizer.BuildRoomUrl(PlatformId.Douyu, "9999"));
+        Assert.Equal("https://www.huya.com/660000", RoomInputNormalizer.BuildRoomUrl(PlatformId.Huya, "660000"));
+        Assert.Equal("https://live.douyin.com/123456", RoomInputNormalizer.BuildRoomUrl(PlatformId.Douyin, "123456"));
+        Assert.Equal("https://www.yy.com/168", RoomInputNormalizer.BuildRoomUrl(PlatformId.Yy, "168"));
+        Assert.Equal("https://www.bigo.tv/abc123", RoomInputNormalizer.BuildRoomUrl(PlatformId.Bigo, "abc123"));
+        Assert.Equal("814", RoomInputNormalizer.BuildRoomUrl(PlatformId.Unknown, "814"), "平台未知时不能猜前缀");
+        Assert.Equal(string.Empty, RoomInputNormalizer.BuildRoomUrl(PlatformId.Bilibili, " "));
+    }
+
+    /// <summary>只有纯数字才算"房间号"，用于决定是否自动转换。</summary>
+    [TestMethod("输入规范化：纯数字房间号判定")]
+    public void DetectsPlainRoomId()
+    {
+        Assert.True(RoomInputNormalizer.IsPlainRoomId("814"));
+        Assert.True(RoomInputNormalizer.IsPlainRoomId(" 745964462470 "));
+        Assert.False(RoomInputNormalizer.IsPlainRoomId("abc123"), "字母房间号不能自动转换");
+        Assert.False(RoomInputNormalizer.IsPlainRoomId("814a"));
+        Assert.False(RoomInputNormalizer.IsPlainRoomId("https://live.bilibili.com/814"));
+        Assert.False(RoomInputNormalizer.IsPlainRoomId(string.Empty));
+        Assert.False(RoomInputNormalizer.IsPlainRoomId(null));
     }
 
     /// <summary>链接判定：有 scheme 或含路径分隔符时按链接处理，房间号不算链接。</summary>

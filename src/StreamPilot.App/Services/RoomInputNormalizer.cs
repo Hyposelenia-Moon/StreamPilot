@@ -1,5 +1,7 @@
 namespace StreamPilot.App.Services;
 
+using StreamPilot.Core.Models;
+
 /// <summary>
 /// 把用户输入的"分享文案 / 缺 scheme 的链接 / 带标点的链接"整理成解析器能直接接受的房间输入。
 /// </summary>
@@ -35,6 +37,60 @@ public static class RoomInputNormalizer
         "bigo.sg",
         "bigo.tv",
     ];
+
+    /// <summary>各平台直播间链接前缀（与解析器的 <c>RoomUrlPrefix</c> 保持一致）。</summary>
+    private static readonly Dictionary<PlatformId, string> RoomUrlPrefixes = new()
+    {
+        [PlatformId.Bilibili] = "https://live.bilibili.com/",
+        [PlatformId.Douyu] = "https://www.douyu.com/",
+        [PlatformId.Huya] = "https://www.huya.com/",
+        [PlatformId.Douyin] = "https://live.douyin.com/",
+        [PlatformId.Yy] = "https://www.yy.com/",
+        [PlatformId.Bigo] = "https://www.bigo.tv/",
+    };
+
+    /// <summary>判断输入是否为"纯房间号"（只有数字）。</summary>
+    /// <param name="input">用户输入。</param>
+    /// <returns>全部为数字且非空返回 <see langword="true"/>。</returns>
+    /// <remarks>
+    /// 只把纯数字当作房间号：虎牙/YY 的房间号也可能是字母组合，贸然转换会拼出打不开的链接；
+    /// 字母房间号按原样交给解析器（它们本来就接受"房间号"这种输入）。
+    /// </remarks>
+    public static bool IsPlainRoomId(string? input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return false;
+        }
+
+        string trimmed = input.Trim();
+        foreach (char character in trimmed)
+        {
+            if (!char.IsAsciiDigit(character))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// 把房间号拼成对应平台的直播间链接。
+    /// </summary>
+    /// <param name="platform">平台；未知时原样返回房间号。</param>
+    /// <param name="roomId">房间号。</param>
+    /// <returns>直播间链接；平台未知或房间号为空时返回空字符串。</returns>
+    public static string BuildRoomUrl(PlatformId platform, string? roomId)
+    {
+        if (string.IsNullOrWhiteSpace(roomId))
+        {
+            return string.Empty;
+        }
+
+        string id = roomId.Trim();
+        return RoomUrlPrefixes.TryGetValue(platform, out string? prefix) ? prefix + id : id;
+    }
 
     /// <summary>链接末尾常见的标点与包裹字符：从右往左一并去掉。</summary>
     private static readonly char[] TrailingNoise =

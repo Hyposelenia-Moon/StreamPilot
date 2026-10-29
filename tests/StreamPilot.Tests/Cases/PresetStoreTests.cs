@@ -216,6 +216,68 @@ public sealed class PresetStoreTests
         Assert.False(logger.HasLevel(LogLevel.Warn), "文件不存在属正常情况，不应记 Warn");
     }
 
+    /// <summary>编辑预设：原位更新（名称 / 链接 / 平台都可改），下标不变并落盘。</summary>
+    [TestMethod("预设存储：编辑预设原位更新")]
+    public void UpdatesPresetInPlace()
+    {
+        using TempDirectory directory = new();
+        PresetStore store = CreateStore(directory, new RecordingLogger());
+        Assert.True(store.Add(new RoomPreset("甲", PlatformId.Huya, "111")));
+        Assert.True(store.Add(new RoomPreset("乙", PlatformId.Huya, "222")));
+        Assert.True(store.Add(new RoomPreset("丙", PlatformId.Huya, "333")));
+
+        RoomPreset existing = store.Items[1];
+        RoomPreset updated = new("乙（改名）", PlatformId.Douyin, "https://live.douyin.com/444");
+        Assert.True(store.Update(existing, updated), "编辑应成功");
+
+        Assert.Equal(3, store.Items.Count, "编辑不能改变数量");
+        Assert.Equal("乙（改名）", store.Items[1].Name, "位置必须保持不变（不跳序）");
+        Assert.Equal(PlatformId.Douyin, store.Items[1].Platform, "平台可以改");
+        Assert.Equal("https://live.douyin.com/444", store.Items[1].RoomInput, "链接可以改");
+
+        PresetStore reloaded = CreateStore(directory, new RecordingLogger());
+        reloaded.Load();
+        Assert.Equal("乙（改名）", reloaded.Items[1].Name, "更新必须落盘");
+        Assert.Equal(PlatformId.Douyin, reloaded.Items[1].Platform);
+    }
+
+    /// <summary>编辑时把名称改成另一条同平台预设的名称必须被拒绝，不能吞掉对方。</summary>
+    [TestMethod("预设存储：编辑改名撞同平台同名被拒绝")]
+    public void RejectsRenameOntoAnotherPreset()
+    {
+        using TempDirectory directory = new();
+        PresetStore store = CreateStore(directory, new RecordingLogger());
+        Assert.True(store.Add(new RoomPreset("甲", PlatformId.Huya, "111")));
+        Assert.True(store.Add(new RoomPreset("乙", PlatformId.Huya, "222")));
+
+        RoomPreset second = store.Items[1];
+        RoomPreset conflicting = new("甲", PlatformId.Huya, "222");
+        Assert.True(store.HasConflict(conflicting, second), "同平台同名必须判定为冲突");
+        Assert.False(store.Update(second, conflicting), "冲突时必须拒绝更新");
+
+        Assert.Equal(2, store.Items.Count, "被撞的那条不能被吞掉");
+        Assert.Equal("甲", store.Items[0].Name);
+        Assert.Equal("乙", store.Items[1].Name, "拒绝后原值不变");
+        Assert.Equal("222", store.Items[1].RoomInput);
+    }
+
+    /// <summary>编辑一条已经不存在的预设时返回失败，而不是凭空插入。</summary>
+    [TestMethod("预设存储：编辑已删除的预设返回失败")]
+    public void FailsUpdatingMissingPreset()
+    {
+        using TempDirectory directory = new();
+        PresetStore store = CreateStore(directory, new RecordingLogger());
+        Assert.True(store.Add(new RoomPreset("甲", PlatformId.Huya, "111")));
+        Assert.True(store.Remove(store.Items[0]));
+
+        bool updated = store.Update(
+            new RoomPreset("甲", PlatformId.Huya, "111"),
+            new RoomPreset("甲2", PlatformId.Huya, "222"));
+
+        Assert.False(updated, "目标不存在时不能新增一条");
+        Assert.Equal(0, store.Items.Count);
+    }
+
     /// <summary>创建一个指向临时目录的预设存储。</summary>
     /// <param name="directory">临时目录。</param>
     /// <param name="logger">日志替身。</param>

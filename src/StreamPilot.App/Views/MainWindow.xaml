@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="StreamPilot"
-        Height="840" Width="1480"
+        Height="900" Width="1480"
         MinHeight="600" MinWidth="1320"
         Background="{StaticResource WindowBackgroundBrush}"
         Icon="pack://application:,,,/Assets/streampilot.ico"
@@ -44,7 +44,7 @@
         </Border>
 
         <!-- 单页控制面板：预设 → 直播源 → 录制（播放状态与遥测只在画面下方的状态行显示，左栏不再重复） -->
-        <ScrollViewer Grid.Row="1" x:Name="ControlTabs" VerticalScrollBarVisibility="Auto" Padding="14,12,14,18">
+        <ScrollViewer Grid.Row="1" x:Name="ControlTabs" VerticalScrollBarVisibility="Hidden" Padding="14,12,14,18">
           <StackPanel>
             <!-- ===== 预设 ===== -->
             <Border Style="{StaticResource CardPanel}">
@@ -144,13 +144,21 @@
                             <TextBlock Text="{Binding DisplayText}" TextTrimming="CharacterEllipsis" />
                           </Button>
 
-                          <Button Grid.Column="2"
-                                  Content="删除"
-                                  Command="{Binding DataContext.DeletePresetCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                  CommandParameter="{Binding}"
-                                  ToolTip="删除这个预设"
-                                  Padding="10,5"
-                                  Margin="6,0,0,0" />
+                          <StackPanel Grid.Column="2" Orientation="Horizontal">
+                            <Button Content="编辑"
+                                    Command="{Binding DataContext.EditPresetCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                    CommandParameter="{Binding}"
+                                    AutomationProperties.AutomationId="EditPresetButton"
+                                    ToolTip="修改主播名称、直播链接或平台"
+                                    Padding="10,5"
+                                    Margin="6,0,0,0" />
+                            <Button Content="删除"
+                                    Command="{Binding DataContext.DeletePresetCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                    CommandParameter="{Binding}"
+                                    ToolTip="删除这个预设"
+                                    Padding="10,5"
+                                    Margin="6,0,0,0" />
+                          </StackPanel>
                         </Grid>
                       </DataTemplate>
                     </ListBox.ItemTemplate>
@@ -167,12 +175,12 @@
                 <!-- 平台不可选：解析时按输入链接的域名自动识别，识别不出时用设置里的默认平台 -->
                 <TextBlock Text="{Binding PlatformStatusText}" FontWeight="SemiBold" TextWrapping="Wrap" />
 
-                <TextBlock Text="房间号 / 直播间链接" Style="{StaticResource MutedText}" Margin="0,10,0,4" />
+                <TextBlock Text="直播间链接" Style="{StaticResource MutedText}" Margin="0,10,0,4" />
                 <TextBox Text="{Binding RoomInput, UpdateSourceTrigger=PropertyChanged}" />
 
                 <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                   <Button Content="解析房间" Command="{Binding ResolveCommand}" Style="{StaticResource PrimaryButton}"
-                          ToolTip="支持房间号或直播间链接；粘贴链接时按域名自动识别平台" />
+                          ToolTip="粘贴直播间链接；直接输入纯数字房间号会自动转换成对应平台的直播间链接（按域名/当前平台识别）" />
                   <Button Content="mpv 播放" Command="{Binding MpvCommand}" Margin="0" />
                 </StackPanel>
               </StackPanel>
