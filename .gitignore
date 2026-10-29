@@ -51,3 +51,6 @@ recordings/
 # --- 取证与临时目录：内含带签名的平台原始响应，禁止入库（曾误提交，见 commit f2c90b3）---
 .dsh-evidence/
 .scratch*/
+
+# --- WorkBuddy 项目数据（工具自身的工作记忆/日志，不入库）---
+.workbuddy/

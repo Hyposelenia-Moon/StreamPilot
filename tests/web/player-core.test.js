@@ -398,6 +398,16 @@ test('错误归类：HTTP 状态错误、MSE 错误、HEVC 不受支持', () => 
   assert.equal(core.isHlsCodecErrorDetail(''), false);
 });
 
+test('播放页提供「线路」下拉：只显示主线路与备用线路，不暴露地址', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+  assert.equal(html.includes('id="lineSelect"'), true, '必须有线路下拉');
+  assert.equal(html.includes('主线路'), true, '第一条候选标成主线路');
+  assert.equal(html.includes('备用线路 '), true, '其余候选标成备用线路');
+  assert.equal(html.includes('applyManualLine'), true, '切换线路必须走独立函数（不重新解析、不改画质）');
+  assert.equal(html.includes('自动（主线路优先）'), false, '下拉里不应再有自动项');
+  assert.equal(html.includes("' · ' + item.host"), false, '线路选项不得拼接 host/地址');
+});
+
 test('HEVC 解码不可用时先换到 H.264 线路，而不是直接停播', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
   assert.equal(html.includes('hasFallback'), true, '必须检查是否还有非 HEVC 候选');
@@ -522,7 +532,7 @@ test('clampVolumePercent 夹取音量并处理非法输入', () => {
   assert.equal(core.clampVolumePercent('30'), 30, '滑块给的是字符串');
   assert.equal(core.clampVolumePercent(130), 100);
   assert.equal(core.clampVolumePercent(-10), 0);
-  assert.equal(core.clampVolumePercent(30.6), 31, '滚轮累加产生的浮点噪声要收敛');
+  assert.equal(core.clampVolumePercent(30.6), 31, '滑块拖动累加产生的浮点噪声要收敛');
   assert.equal(core.clampVolumePercent(undefined), 0);
   assert.equal(core.clampVolumePercent('abc'), 0);
   assert.equal(core.clampVolumePercent(Number.NaN), 0);
