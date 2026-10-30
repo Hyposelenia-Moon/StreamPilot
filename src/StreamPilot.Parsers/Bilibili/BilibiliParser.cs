@@ -63,6 +63,14 @@ internal sealed class BilibiliParser : PlatformParserBase
     private const string PlayInfoQuerySuffix =
         "&platform=web&ptype=8&dolby=5&panorama=1&hdr_type=0,1&eotf=0,1,2&room_id=";
 
+    /// <summary>只要 HDR 流时的查询尾段（用户在菜单里选了带「HDR」的那一条）。</summary>
+    private const string PlayInfoQuerySuffixHdr =
+        "&platform=web&ptype=8&dolby=5&panorama=1&hdr_type=1&eotf=1,2&room_id=";
+
+    /// <summary>只要 SDR 流时的查询尾段（用户选的是不带「HDR」的那一条）。</summary>
+    private const string PlayInfoQuerySuffixSdr =
+        "&platform=web&ptype=8&dolby=5&panorama=1&hdr_type=0&eotf=0&room_id=";
+
     /// <summary>播放候选需要携带的 Referer（B站 CDN 校验来源）。</summary>
     private const string PlaybackReferer = "https://live.bilibili.com/";
 
@@ -158,6 +166,15 @@ internal sealed class BilibiliParser : PlatformParserBase
 
     /// <summary><c>qn=80</c> 对应的「流畅」档位数值。</summary>
     private const int LowQualityNumber = 80;
+
+    /// <summary>空声明表：给"没有官方菜单行"的兜底档位取基础名称时使用。</summary>
+    private static readonly Dictionary<int, QualityDeclaration> EmptyDeclarations = [];
+
+    /// <summary>档位键里的 HDR 后缀：同一 qn 的 HDR 与非 HDR 是官方菜单里的两条独立选项。</summary>
+    private const string HdrQualityKeySuffix = "hdr";
+
+    /// <summary>档位键里的 SDR 后缀。</summary>
+    private const string SdrQualityKeySuffix = "sdr";
 
     /// <summary>playurl_info 字段名。</summary>
     private const string PlayUrlInfoField = "playurl_info";
@@ -289,12 +306,14 @@ internal sealed class BilibiliParser : PlatformParserBase
             }
         }
 
+        (int? requestedQuality, bool? requestedHdr) = ParseQualityKey(query.PreferredQualityKey);
         (IReadOnlyList<StreamCandidate> candidates, int liveStatus, IReadOnlyList<QualityOption> qualities, string? selectedQualityKey) =
             await FetchPlayInfoAsync(
                 roomInfo.RoomId,
                 query.Cookie,
                 cancellationToken,
-                ParseQualityNumber(query.PreferredQualityKey)).ConfigureAwait(false);
+                requestedQuality,
+                requestedHdr).ConfigureAwait(false);
 
         /*
           直播状态以接口声明为准，两个来源按可信度排序：
@@ -697,6 +716,10 @@ internal sealed class BilibiliParser : PlatformParserBase
     /// <param name="cookie">B站 Cookie，可为 <see langword="null"/>（匿名解析）。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <param name="requestedQuality">调用方指定的 qn，可为 <see langword="null"/>（最高档）。</param>
+    /// <param name="requestedHdr">
+    /// 调用方指定的 HDR 意图：<see langword="true"/> 只要 HDR、<see langword="false"/> 只要 SDR、
+    /// <see langword="null"/> 两者都要（老键与最高档走这条）。
+    /// </param>
     /// <returns>候选流与平台声明的直播状态（未声明时为 <see cref="LiveStatusUnknown"/>）。</returns>
     /// <remarks>
     /// 本方法**不**依据 live_status 抛"未开播"：直播状态只用来决定文案，
@@ -707,11 +730,12 @@ internal sealed class BilibiliParser : PlatformParserBase
         string numericRoomId,
         string? cookie,
         CancellationToken cancellationToken,
-        int? requestedQuality = null)
+        int? requestedQuality = null,
+        bool? requestedHdr = null)
     {
         HttpRequestSpec spec = new()
         {
-            Url = BuildPlayInfoUrl(numericRoomId, requestedQuality),
+            Url = BuildPlayInfoUrl(numericRoomId, requestedQuality, requestedHdr),
             Platform = PlatformId.Bilibili,
             Operation = OperationGetPlayInfo,
             Headers = BuildApiHeaders(cookie),
@@ -754,7 +778,7 @@ internal sealed class BilibiliParser : PlatformParserBase
             if (HasPlayUrlInfo(data))
             {
                 CollectCandidates(data, builder);
-                (qualities, selectedKey) = BuildQualityOptions(data, requestedQuality);
+                (qualities, selectedKey) = BuildQualityOptions(data, requestedQuality, requestedHdr);
             }
             else
             {
@@ -763,6 +787,7 @@ internal sealed class BilibiliParser : PlatformParserBase
                     ["roomId"] = numericRoomId,
                     ["liveStatus"] = observedLiveStatus,
                     ["requestedQuality"] = requestedQuality,
+                    ["requestedHdr"] = requestedHdr,
                 });
             }
 
@@ -997,49 +1022,122 @@ internal sealed class BilibiliParser : PlatformParserBase
     /// </summary>
     /// <param name="numericRoomId">数字房间号。</param>
     /// <param name="qualityNumber">qn 数值；为 <see langword="null"/> 时使用最高档。</param>
+    /// <param name="hdr">
+    /// HDR 意图：<see langword="true"/> 只要 HDR（<c>hdr_type=1&amp;eotf=1,2</c>）、
+    /// <see langword="false"/> 只要 SDR（<c>hdr_type=0&amp;eotf=0</c>）、
+    /// <see langword="null"/> 两者都要（默认，等同旧行为）。
+    /// </param>
     /// <returns>完整请求地址。</returns>
-    private static string BuildPlayInfoUrl(string numericRoomId, int? qualityNumber)
+    private static string BuildPlayInfoUrl(string numericRoomId, int? qualityNumber, bool? hdr)
     {
         int qn = qualityNumber ?? QualityNames.BilibiliMaxQualityNumber;
         return string.Concat(
             PlayInfoUrlPrefix,
             PlayInfoQueryPrefix,
             qn.ToString(CultureInfo.InvariantCulture),
-            PlayInfoQuerySuffix,
+            hdr switch
+            {
+                true => PlayInfoQuerySuffixHdr,
+                false => PlayInfoQuerySuffixSdr,
+                _ => PlayInfoQuerySuffix,
+            },
             numericRoomId);
     }
 
     /// <summary>
-    /// 把调用方给的档位键解析为 qn 数值；不是合法整数时返回 <see langword="null"/>（按最高档处理）。
+    /// 解析档位键：<c>15000#sdr</c> / <c>15000#hdr</c> / 老键 <c>15000</c>（未指定 HDR）。
     /// </summary>
-    /// <param name="qualityKey">档位键（B站为 qn 数值字符串）。</param>
-    /// <returns>qn 数值，或 <see langword="null"/>。</returns>
-    private static int? ParseQualityNumber(string? qualityKey) =>
-        int.TryParse(qualityKey, NumberStyles.Integer, CultureInfo.InvariantCulture, out int qn) ? qn : null;
+    /// <param name="qualityKey">档位键。</param>
+    /// <returns>qn 与 HDR 意图；解析失败时两项都为 <see langword="null"/>。</returns>
+    /// <remarks>
+    /// 官方菜单里同一 qn 的 HDR 与非 HDR 是两条独立选项（拉流时用 <c>eotf</c>/<c>hdr_type</c> 区分），
+    /// 所以键里必须带上这个意图；老版本存下来的纯数字键按"未指定"处理，行为与以前一致。
+    /// </remarks>
+    private static (int? Quality, bool? Hdr) ParseQualityKey(string? qualityKey)
+    {
+        if (string.IsNullOrWhiteSpace(qualityKey))
+        {
+            return (null, null);
+        }
+
+        string key = qualityKey.Trim();
+        int hash = key.IndexOf('#', StringComparison.Ordinal);
+        if (hash < 0)
+        {
+            return int.TryParse(key, NumberStyles.Integer, CultureInfo.InvariantCulture, out int plain)
+                ? (plain, null)
+                : (null, null);
+        }
+
+        string suffix = key[(hash + 1)..];
+        bool? hdr = suffix.Equals(HdrQualityKeySuffix, StringComparison.OrdinalIgnoreCase) ? true
+            : suffix.Equals(SdrQualityKeySuffix, StringComparison.OrdinalIgnoreCase) ? false
+            : null;
+        return int.TryParse(key[..hash], NumberStyles.Integer, CultureInfo.InvariantCulture, out int qn)
+            ? (qn, hdr)
+            : (null, null);
+    }
+
+    /// <summary>把 qn 与 HDR 意图拼成档位键。</summary>
+    /// <param name="qn">画质数值。</param>
+    /// <param name="hdr">是否 HDR 档。</param>
+    /// <returns>档位键。</returns>
+    private static string BuildQualityKey(int qn, bool hdr) =>
+        qn.ToString(CultureInfo.InvariantCulture) + (hdr ? "#" + HdrQualityKeySuffix : "#" + SdrQualityKeySuffix);
+
+    /// <summary>取档位键里的 qn 部分。</summary>
+    /// <param name="qualityKey">档位键。</param>
+    /// <returns>qn；解析失败时返回 <see langword="null"/>。</returns>
+    private static int? ReadQualityKeyNumber(string? qualityKey) => ParseQualityKey(qualityKey).Quality;
 
     /// <summary>
-    /// 从播放信息响应中枚举可选画质档位（含官方名称、HDR 与高帧率标记）。
+    /// 从播放信息响应中枚举可选画质档位。
     /// </summary>
     /// <param name="playData">getRoomPlayInfo 响应的 data 节点。</param>
     /// <param name="requestedQuality">本次请求的 qn，可为 <see langword="null"/>。</param>
+    /// <param name="requestedHdr">
+    /// 本次请求的 HDR 意图（<see langword="true"/> 只要 HDR、<see langword="false"/> 只要 SDR、
+    /// <see langword="null"/> 未指定），用于决定哪一条被标为"当前选中"。
+    /// </param>
     /// <returns>档位列表（按从高到低）与实际生效的档位键。</returns>
     /// <remarks>
-    /// 官方把名称放在 <c>g_qn_desc</c>（<c>qn</c> + <c>desc</c> + <c>hdr_desc</c> +
-    /// <c>media_base_desc.detail_desc.desc/tag</c>），可用档位放在 <c>codec[].accept_qn</c>。
-    /// 两者都缺失时依次回退到调用方请求的 qn、响应里第一个 <c>current_qn</c>；
-    /// 名称改用内置命名（见 <see cref="BuildQualityLabel"/>），保证下拉里至少有一条当前档位，
-    /// 不会出现"接口没声明名称就整个画质控件空掉"的情况。
+    /// <para>
+    /// 档位**按官方菜单逐条生成**：<c>g_qn_desc</c> 里带 <c>media_base_desc.detail_desc.desc</c>
+    /// 的每一条声明就是菜单里的一行，名称直接取该字段。
+    /// 这样「2K 极清」「480P 高清」「2K 原画」「4K 原画」都由平台决定，
+    /// 不再由我们按 qn 硬编码，也就不会出现"界面写 1080P、实际是 4K"这类张冠李戴。
+    /// </para>
+    /// <para>
+    /// 同一 qn 的 HDR 与非 HDR 各占一行（官方就是这么排的），用 <c>#hdr</c>/<c>#sdr</c> 区分。
+    /// 没有 <c>detail_desc</c> 的声明（例如蓝光的 HDR 变体、eotf=2 的重复项）不进菜单——
+    /// 实测官方也不显示它们。
+    /// </para>
+    /// <para>
+    /// 菜单缺失时逐级兜底：可用 qn（<c>accept_qn</c>）→ 声明里的 qn → 请求的 qn → <c>current_qn</c>，
+    /// 名称退回内置命名（见 <see cref="BuildQualityLabel"/>），保证下拉里至少有一条。
+    /// </para>
     /// </remarks>
     internal (IReadOnlyList<QualityOption> Qualities, string? SelectedKey) BuildQualityOptions(
         JsonElement playData,
-        int? requestedQuality)
+        int? requestedQuality,
+        bool? requestedHdr = null)
     {
         Dictionary<int, QualityDeclaration> declarations = ReadQualityDeclarations(playData);
+        List<QualityMenuEntry> menu = ReadQualityMenuEntries(playData);
         List<int> available = ReadAcceptedQualities(playData);
         int acceptedCount = available.Count;
+
         if (available.Count == 0)
         {
-            available.AddRange(declarations.Keys);
+            foreach (QualityMenuEntry entry in menu)
+            {
+                if (!available.Contains(entry.Qn))
+                {
+                    available.Add(entry.Qn);
+                }
+            }
+
+            available.AddRange(declarations.Keys.Where(qn => !available.Contains(qn)));
         }
 
         if (available.Count == 0 && requestedQuality is { } requested)
@@ -1055,13 +1153,37 @@ internal sealed class BilibiliParser : PlatformParserBase
 
         available.Sort(static (left, right) => right.CompareTo(left));
         bool has4K = available.Contains(QualityNames.BilibiliQuality4K);
+
         List<QualityOption> options = [];
-        foreach (int qn in available)
+        foreach (QualityMenuEntry entry in OrderMenu(menu))
         {
+            if (!available.Contains(entry.Qn))
+            {
+                continue;
+            }
+
             options.Add(new QualityOption
             {
-                Key = qn.ToString(CultureInfo.InvariantCulture),
-                Label = BuildQualityLabel(qn, declarations, has4K),
+                Key = BuildQualityKey(entry.Qn, entry.Hdr),
+                Label = Decorate(entry.Name, entry.Hdr, entry.HighFrameRate),
+                IsBest = options.Count == 0,
+            });
+        }
+
+        // 接口没给 detail_desc（老房间/精简响应）的可用档位用内置命名补齐，保证每一档都能选。
+        foreach (int qn in available)
+        {
+            if (options.Any(option => ReadQualityKeyNumber(option.Key) == qn))
+            {
+                continue;
+            }
+
+            // 这一档没有官方菜单行（没有 detail_desc），只能给"基础名称"：
+            // 不猜 HDR/高帧率，避免像「1080P 蓝光（HDR）」这样官方并不存在的写法。
+            options.Add(new QualityOption
+            {
+                Key = BuildQualityKey(qn, hdr: false),
+                Label = BuildQualityLabel(qn, EmptyDeclarations),
                 IsBest = options.Count == 0,
             });
         }
@@ -1070,18 +1192,87 @@ internal sealed class BilibiliParser : PlatformParserBase
             ? want
             : available.Count > 0 ? available[0] : requestedQuality;
 
-        Logger.Debug(ModuleName, "B站档位已按接口声明命名（高帧率/HDR 均取自 g_qn_desc，不按档位语义推断）。", new Dictionary<string, object?>
+        string? selectedKey = null;
+        if (effective is { } effectiveQn)
+        {
+            QualityOption? match = requestedHdr is { } wantHdr
+                ? options.FirstOrDefault(option => ReadQualityKeyNumber(option.Key) == effectiveQn
+                    && option.Key.EndsWith(wantHdr ? "#" + HdrQualityKeySuffix : "#" + SdrQualityKeySuffix, StringComparison.Ordinal))
+                : null;
+
+            // 未指定 HDR 意图时优先选带 HDR 的那条：候选排序本就优先 HEVC/HDR，
+            // 官方菜单也把 HDR 那条排在同档第一位。
+            match ??= options.FirstOrDefault(option => ReadQualityKeyNumber(option.Key) == effectiveQn
+                    && option.Key.EndsWith("#" + HdrQualityKeySuffix, StringComparison.Ordinal))
+                ?? options.FirstOrDefault(option => ReadQualityKeyNumber(option.Key) == effectiveQn);
+            selectedKey = match?.Key;
+        }
+
+        Logger.Debug(ModuleName, "B站档位已按官方菜单生成（名称取 detail_desc，HDR 与非 HDR 各占一条）。", new Dictionary<string, object?>
         {
             ["declaredQualities"] = DescribeDeclarations(available, declarations),
+            ["menuEntries"] = string.Join(" / ", options.Select(static option => option.Label)),
             ["declarationCount"] = declarations.Count,
             ["acceptedCount"] = acceptedCount,
             ["streamingQuality"] = observedQuality,
             ["has4K"] = has4K,
             ["requestedQuality"] = requestedQuality,
+            ["requestedHdr"] = requestedHdr,
             ["effectiveQuality"] = effective,
+            ["selectedKey"] = selectedKey,
         });
 
-        return (options, effective?.ToString(CultureInfo.InvariantCulture));
+        return (options, selectedKey);
+    }
+
+    /// <summary>按官方顺序排列菜单：qn 从高到低，同一 qn 的 HDR 在前。</summary>
+    /// <param name="menu">菜单条目。</param>
+    /// <returns>排好序的条目。</returns>
+    private static IEnumerable<QualityMenuEntry> OrderMenu(List<QualityMenuEntry> menu) =>
+        menu.OrderByDescending(static entry => entry.Qn).ThenByDescending(static entry => entry.Hdr);
+
+    /// <summary>
+    /// 读取官方画质菜单：<c>g_qn_desc</c> 里每条带 <c>detail_desc.desc</c> 的声明就是一行。
+    /// </summary>
+    /// <param name="playData">播放信息 data 节点。</param>
+    /// <returns>菜单条目（未排序、已按 qn+HDR 去重）。</returns>
+    private static List<QualityMenuEntry> ReadQualityMenuEntries(JsonElement playData)
+    {
+        List<QualityMenuEntry> entries = [];
+        if (!TryReadProperty(playData, PlayUrlInfoField, out JsonElement info)
+            || !TryReadProperty(info, PlayUrlField, out JsonElement playUrl)
+            || !TryReadProperty(playUrl, QualityDescriptionsField, out JsonElement descriptions)
+            || descriptions.ValueKind != JsonValueKind.Array)
+        {
+            return entries;
+        }
+
+        HashSet<string> seen = new(StringComparer.Ordinal);
+        foreach (JsonElement item in descriptions.EnumerateArray())
+        {
+            if (!TryReadInt32(item, QualityNumberField, out int qn))
+            {
+                continue;
+            }
+
+            string name = ReadNestedString(item, MediaBaseDescField, DetailDescField, QualityDescField) ?? string.Empty;
+            if (name.Length == 0)
+            {
+                // 没有 detail_desc 的声明（蓝光的 HDR 变体、eotf=2 的重复项）实测不进官方菜单。
+                continue;
+            }
+
+            QualityDeclaration declaration = ReadQualityDeclaration(item);
+            string dedupeKey = qn.ToString(CultureInfo.InvariantCulture) + (declaration.Hdr ? "|hdr" : "|sdr");
+            if (!seen.Add(dedupeKey))
+            {
+                continue;
+            }
+
+            entries.Add(new QualityMenuEntry(qn, name, declaration.Hdr, declaration.HighFrameRate));
+        }
+
+        return entries;
     }
 
     /// <summary>
@@ -1176,11 +1367,31 @@ internal sealed class BilibiliParser : PlatformParserBase
                 continue;
             }
 
-            declarations[qn] = ReadQualityDeclaration(item);
+            QualityDeclaration parsed = ReadQualityDeclaration(item);
+            declarations[qn] = declarations.TryGetValue(qn, out QualityDeclaration? existing)
+                ? MergeDeclaration(existing, parsed)
+                : parsed;
         }
 
         return declarations;
     }
+
+    /// <summary>合并同一 qn 的多条声明（SDR 与各条 HDR 变体各占一行）。</summary>
+    /// <param name="existing">已记录的声明。</param>
+    /// <param name="incoming">新读到的声明。</param>
+    /// <returns>合并后的声明。</returns>
+    /// <remarks>
+    /// 平台对同一 qn 会给出多条：SDR 一条、HDR（eotf=1/2）各一条，且只有 SDR 那条带
+    /// <c>media_base_desc</c>（官方名 + 「高帧率」tag）。
+    /// 旧实现是"后一条覆盖前一条"，HDR 变体的空名字把「1080P 原画 / 高帧率」整个冲掉，
+    /// 于是下拉显示成「原画（HDR）」、高帧率丢失（实测房间 24160384 即如此）。
+    /// 合并规则：名称取第一条非空，HDR 与高帧率取或。
+    /// </remarks>
+    private static QualityDeclaration MergeDeclaration(QualityDeclaration existing, QualityDeclaration incoming) =>
+        new(
+            existing.Name.Length > 0 ? existing.Name : incoming.Name,
+            existing.Hdr || incoming.Hdr,
+            existing.HighFrameRate || incoming.HighFrameRate);
 
     /// <summary>读取单个 qn 的官方声明并推导 HDR / 高帧率标记。</summary>
     /// <param name="item">g_qn_desc 数组中的一项。</param>
@@ -1322,16 +1533,14 @@ internal sealed class BilibiliParser : PlatformParserBase
     /// <summary>生成档位显示名，命名与官方直播间一致（用户可对照）。</summary>
     /// <param name="qn">档位数值。</param>
     /// <param name="declarations">官方档位声明表（qn → 名称、HDR、高帧率）。</param>
-    /// <param name="has4K">本房间是否提供 4K 档位（决定 1080P 档叫"原画"还是"高码率"）。</param>
     /// <returns>显示名。</returns>
     /// <remarks>
-    /// 命名规则（口径与官方直播间一致，保持不变）：
-    /// 有 4K 时依次为 4K 原画 → 1080P 高码率 → 1080P 蓝光 → 720P 超清；
-    /// 无 4K 时依次为 1080P 原画 → 1080P 蓝光 → 720P 超清。
+    /// 命名规则与官方直播间一致：杜比原画 → 4K 原画 → 2K 原画 → 1080P 原画 → 1080P 蓝光 → 720P 超清。
     /// "高帧率"与"HDR"后缀都只来自接口声明（见 <see cref="ReadQualityDeclaration"/>），
     /// 拿不到声明时不加任何后缀，绝不按档位语义硬判。
+    /// 同一 qn 有多条声明（SDR / HDR 变体）时先合并再取名，见 <see cref="MergeDeclaration"/>。
     /// </remarks>
-    private static string BuildQualityLabel(int qn, Dictionary<int, QualityDeclaration> declarations, bool has4K)
+    private static string BuildQualityLabel(int qn, Dictionary<int, QualityDeclaration> declarations)
     {
         declarations.TryGetValue(qn, out QualityDeclaration? declaration);
         bool hdr = declaration?.Hdr ?? false;
@@ -1342,9 +1551,7 @@ internal sealed class BilibiliParser : PlatformParserBase
             QualityNames.BilibiliMaxQualityNumber => Decorate("杜比原画", hdr, highFrameRate),
             QualityNames.BilibiliQuality4K => Decorate("4K 原画", hdr, highFrameRate),
             QualityNames.BilibiliQuality2K => Decorate("2K 原画", hdr, highFrameRate),
-            QualityNames.BilibiliQuality1080HighFps => has4K
-                ? Decorate("1080P 高码率", hdr, highFrameRate)
-                : Decorate("1080P 原画", hdr, highFrameRate),
+            QualityNames.BilibiliQuality1080HighFps => Decorate("1080P 原画", hdr, highFrameRate),
             QualityNames.BilibiliQuality1080 => Decorate("1080P 蓝光", hdr, highFrameRate),
             QualityNames.BilibiliQuality720 => Decorate("720P 超清", hdr, highFrameRate),
             QualityNames.BilibiliQuality480 => Decorate("高清", hdr, highFrameRate),
@@ -1367,6 +1574,13 @@ internal sealed class BilibiliParser : PlatformParserBase
     /// <param name="Hdr">平台是否声明该档位为 HDR。</param>
     /// <param name="HighFrameRate">平台是否声明该档位为高帧率。</param>
     private sealed record QualityDeclaration(string Name, bool Hdr, bool HighFrameRate);
+
+    /// <summary>官方画质菜单的一项（同一 qn 的 HDR 与非 HDR 是两个独立项）。</summary>
+    /// <param name="Qn">画质数值。</param>
+    /// <param name="Name">官方名称（<c>detail_desc.desc</c>，例如「2K 极清」「4K 原画」）。</param>
+    /// <param name="Hdr">是否 HDR 档。</param>
+    /// <param name="HighFrameRate">是否高帧率档。</param>
+    private sealed record QualityMenuEntry(int Qn, string Name, bool Hdr, bool HighFrameRate);
 
     /// <summary>按需要给档位名补上（HDR 高帧率）后缀。</summary>
     /// <param name="name">档位名（例如「1080P 原画」）。</param>

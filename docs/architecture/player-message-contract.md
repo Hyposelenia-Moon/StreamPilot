@@ -219,6 +219,32 @@
 `state` 取值：`disconnected` / `connecting` / `connected` / `failed`。
 弹幕是**附加能力**：任何状态下都不得影响视频播放，`failed` 时页面仅记录日志。
 
+### 1.12 `danmaku-config`
+
+```json
+{
+  "type": "danmaku-config",
+  "enabled": true,
+  "visible": true,
+  "state": "connected",
+  "filter": "chatonly",
+  "displayMode": "compact",
+  "blockedKeywords": ["广告"],
+  "mergeDuplicates": true,
+  "mergeWindowSeconds": 3,
+  "opacity": 0.9,
+  "fontSize": 24,
+  "speedSeconds": 8,
+  "maxOnScreen": 60
+}
+```
+
+**下发时机**只有两个：播放器就绪（`player-ready`）与设置保存。页面据此决定「弹幕」按钮状态、
+弹幕层可见性与渲染参数；**批量消息里不再重复携带这些字段**（`1.10` 里保留同名字段只为向后兼容）。
+
+`enabled=false` 表示用户没有启用弹幕（默认）——此时按钮仍可点，点一下等于"开启"：
+页面发 `danmaku-toggle{visible:true}`，宿主把总开关置为开启并持久化。
+
 ---
 
 ## 2. 页面 → 宿主

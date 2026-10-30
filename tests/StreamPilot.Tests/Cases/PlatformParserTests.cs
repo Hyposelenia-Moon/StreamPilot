@@ -399,7 +399,7 @@ public sealed class PlatformParserTests
         Assert.Equal(2, declared.Count);
         Assert.Equal("1080P 原画（高帧率）", declared[0].Label);
         Assert.Equal("1080P 蓝光", declared[1].Label);
-        Assert.Equal("10000", declaredKey);
+        Assert.Equal("10000#sdr", declaredKey);
 
         using JsonDocument normal = JsonDocument.Parse(
             """
@@ -416,6 +416,69 @@ public sealed class PlatformParserTests
 
         Assert.Equal(1, plain.Count);
         Assert.Equal("1080P 原画", plain[0].Label, "接口没有声明高帧率时不得加后缀");
+    }
+
+    /// <summary>
+    /// 官方菜单里同一 qn 的 HDR 与非 HDR 是两条独立选项，名称都取 <c>detail_desc.desc</c>。
+    /// </summary>
+    /// <remarks>
+    /// 数据来自实测房间 6（LPL 赛事）的 <c>g_qn_desc</c>：qn=15000 有两条带 detail 的声明
+    /// （一条 tag=[高帧率]、一条 tag=[HDR, 高帧率]），官方菜单因此并列两行。
+    /// 旧实现把同一 qn 合并成一条，菜单少一行、且总带（HDR）。
+    /// </remarks>
+    [TestMethod("B站：官方菜单按声明逐条生成（HDR 与非 HDR 各一条）")]
+    public void BilibiliBuildsMenuEntriesPerDeclaration()
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            """
+            { "playurl_info": { "playurl": {
+                "g_qn_desc": [
+                  { "qn": 15000, "desc": "2K", "eotf": 0,
+                    "media_base_desc": { "detail_desc": { "desc": "2K 极清", "tag": ["高帧率"] } } },
+                  { "qn": 15000, "desc": "2K/HDR", "eotf": 1, "hdr_type": 1,
+                    "media_base_desc": { "detail_desc": { "desc": "2K 极清", "tag": ["HDR", "高帧率"] } } },
+                  { "qn": 15000, "desc": "2K/HDR", "eotf": 2 },
+                  { "qn": 400, "desc": "蓝光", "eotf": 0,
+                    "media_base_desc": { "detail_desc": { "desc": "1080P 蓝光" } } } ],
+                "stream": [ { "format": [ { "codec": [ { "accept_qn": [15000, 400] } ] } ] } ] } } }
+            """);
+
+        (IReadOnlyList<QualityOption> qualities, string? selectedKey) =
+            CreateBilibiliParser().BuildQualityOptions(document.RootElement, requestedQuality: null);
+
+        Assert.Equal(3, qualities.Count, "2K 两条（HDR/非 HDR）+ 蓝光一条");
+        Assert.Equal("2K 极清（HDR 高帧率）", qualities[0].Label, "HDR 那条排在同档第一位，名称取接口 detail_desc");
+        Assert.Equal("15000#hdr", qualities[0].Key);
+        Assert.Equal("2K 极清（高帧率）", qualities[1].Label);
+        Assert.Equal("15000#sdr", qualities[1].Key);
+        Assert.Equal("1080P 蓝光", qualities[2].Label);
+        Assert.Equal("15000#hdr", selectedKey, "未指定 HDR 意图时默认选中 HDR 那条");
+    }
+
+    /// <summary>没有 <c>detail_desc</c> 的声明不进菜单（实测官方也不显示这些重复项）。</summary>
+    [TestMethod("B站：无 detail_desc 的声明不进菜单")]
+    public void BilibiliSkipsDeclarationsWithoutDetailName()
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            """
+            { "playurl_info": { "playurl": {
+                "g_qn_desc": [
+                  { "qn": 10000, "desc": "原画/HDR", "eotf": 1 },
+                  { "qn": 10000, "desc": "原画", "eotf": 0,
+                    "media_base_desc": { "detail_desc": { "desc": "1080P 原画", "tag": ["高帧率"] } } },
+                  { "qn": 10000, "desc": "原画/HDR", "eotf": 2 },
+                  { "qn": 400, "desc": "蓝光/HDR", "eotf": 1 } ],
+                "stream": [ { "format": [ { "codec": [ { "accept_qn": [10000, 400] } ] } ] } ] } } }
+            """);
+
+        (IReadOnlyList<QualityOption> qualities, string? selectedKey) =
+            CreateBilibiliParser().BuildQualityOptions(document.RootElement, requestedQuality: null);
+
+        Assert.Equal(2, qualities.Count, "只剩带 detail 的原画一条，加上蓝光的内置命名兜底一条");
+        Assert.Equal("1080P 原画（高帧率）", qualities[0].Label);
+        Assert.Equal("10000#sdr", qualities[0].Key);
+        Assert.Equal("1080P 蓝光", qualities[1].Label, "蓝光的 HDR 变体没有 detail，只保留一条");
+        Assert.Equal("10000#sdr", selectedKey);
     }
 
     /// <summary>B站：完全没有档位声明时同样不能凭空标注高帧率。</summary>
@@ -457,10 +520,10 @@ public sealed class PlatformParserTests
             CreateBilibiliParser().BuildQualityOptions(document.RootElement, requestedQuality: null);
 
         Assert.Equal(1, qualities.Count, "至少要有当前这一档");
-        Assert.Equal("10000", qualities[0].Key);
+        Assert.Equal("10000#sdr", qualities[0].Key);
         Assert.Equal("1080P 原画", qualities[0].Label, "名称回退到内置命名");
         Assert.True(qualities[0].IsBest);
-        Assert.Equal("10000", selectedKey);
+        Assert.Equal("10000#sdr", selectedKey);
     }
 
     /// <summary>
@@ -587,9 +650,9 @@ public sealed class PlatformParserTests
             CreateBilibiliParser().BuildQualityOptions(emptyArray.RootElement, requestedQuality: null);
 
         Assert.Equal(3, qualities.Count, "accept_qn 必须仍然被使用");
-        Assert.Equal("10000", qualities[0].Key);
+        Assert.Equal("10000#sdr", qualities[0].Key);
         Assert.Equal("1080P 原画", qualities[0].Label, "没有声明时不加高帧率后缀，且不能失败");
-        Assert.Equal("10000", selectedKey);
+        Assert.Equal("10000#sdr", selectedKey);
 
         // 字段改名：整条 g_qn_desc 从响应里消失，解析仍然必须成功。
         using JsonDocument renamed = JsonDocument.Parse("""
@@ -602,9 +665,9 @@ public sealed class PlatformParserTests
             CreateBilibiliParser().BuildQualityOptions(renamed.RootElement, requestedQuality: null);
 
         Assert.Equal(2, renamedQualities.Count);
-        Assert.Equal("10000", renamedQualities[0].Key);
+        Assert.Equal("10000#sdr", renamedQualities[0].Key);
         Assert.Equal("1080P 原画", renamedQualities[0].Label);
-        Assert.Equal("10000", renamedKey);
+        Assert.Equal("10000#sdr", renamedKey);
     }
 
     /// <summary>B站（回归 ②）：<c>accept_qn</c> 为空时，档位必须回退到 <c>g_qn_desc</c> 声明的档位。</summary>
@@ -625,10 +688,10 @@ public sealed class PlatformParserTests
             CreateBilibiliParser().BuildQualityOptions(document.RootElement, requestedQuality: null);
 
         Assert.Equal(2, qualities.Count);
-        Assert.Equal("10000", qualities[0].Key);
+        Assert.Equal("10000#sdr", qualities[0].Key);
         Assert.Equal("1080P 原画（高帧率）", qualities[0].Label);
-        Assert.Equal("400", qualities[1].Key);
-        Assert.Equal("10000", selectedKey);
+        Assert.Equal("400#sdr", qualities[1].Key);
+        Assert.Equal("10000#sdr", selectedKey);
     }
 
     /// <summary>B站（回归 ②'）：<c>g_qn_desc</c> 与 <c>accept_qn</c> 同时为空时，用真实响应里的 <c>current_qn</c> 兜底。</summary>
@@ -648,8 +711,8 @@ public sealed class PlatformParserTests
             CreateBilibiliParser().BuildQualityOptions(document.RootElement, requestedQuality: null);
 
         Assert.Equal(1, qualities.Count, "至少要有当前这一档");
-        Assert.Equal("250", qualities[0].Key);
-        Assert.Equal("250", selectedKey);
+        Assert.Equal("250#sdr", qualities[0].Key);
+        Assert.Equal("250#sdr", selectedKey);
     }
 
     /// <summary>
@@ -676,7 +739,7 @@ public sealed class PlatformParserTests
         // B站 playurl 的 url_info.host 自带协议前缀，解析器原样带出，故 CDN 标识含 https://。
         Assert.Equal("https://cn-jssz-cm-02-09.bilivideo.com", candidates[0].CdnHost);
         Assert.Equal(3, qualities.Count, "accept_qn=[10000,400,250] 决定可用档位");
-        Assert.Equal("10000", selectedKey);
+        Assert.Equal("10000#sdr", selectedKey);
 
         // 只要有候选，两个元数据通道都不可用也必须成功（这是房间 814 的真实组合）。
         Assert.Null(BilibiliParser.ShouldRejectForMissingCandidates(candidates.Count, liveStatus: 1), "有候选时永远不能判失败");
@@ -706,9 +769,9 @@ public sealed class PlatformParserTests
             CreateBilibiliParser().BuildQualityOptions(document.RootElement, requestedQuality: 400);
 
         Assert.Equal(1, qualities.Count);
-        Assert.Equal("400", qualities[0].Key);
+        Assert.Equal("400#sdr", qualities[0].Key);
         Assert.Equal("1080P 蓝光", qualities[0].Label);
-        Assert.Equal("400", selectedKey);
+        Assert.Equal("400#sdr", selectedKey);
     }
 
     /// <summary>B站：hdr_type 非 0 或 detail_desc.tag 含 HDR 时补 HDR 标记。</summary>
