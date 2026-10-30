@@ -174,6 +174,51 @@
 页面不看提示锁（居中 `#hint` 的锁定）就直接显示宿主消息：居中的提示与状态行说的是同一件事时
 读起来一致，且宿主消息更权威。
 
+### 1.10 `danmaku`
+
+```json
+{
+  "type": "danmaku",
+  "items": [
+    { "id": 123, "kind": "chat", "user": "甲", "text": "你好", "color": null,
+      "medal": "粉丝牌", "medalLevel": 21, "privileged": false }
+  ],
+  "displayMode": "compact",
+  "blockedKeywords": ["广告"],
+  "mergeDuplicates": true,
+  "mergeWindowSeconds": 3,
+  "opacity": 0.9,
+  "fontSize": 24,
+  "speedSeconds": 8,
+  "maxOnScreen": 60
+}
+```
+
+宿主侧按 **100 ms** 聚合后批量下发。`items` 已完成**类型过滤**（`DanmakuFilterMode`：只看弹幕 / 含礼物 / 全部）；
+页面负责**屏蔽词、重复合并、精简/完整显示**——这三项只影响"怎么显示"，改配置立即生效，无需重连弹幕。
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `items[].id` | ✅ | 会话内递增序号（去重与诊断） |
+| `items[].kind` | ✅ | `chat` / `gift` / `interact` / `system` |
+| `items[].user` | ➖ | 昵称；系统消息为空 |
+| `items[].text` | ✅ | 展示文本（礼物/互动已由宿主格式化为描述） |
+| `items[].color` | ➖ | `#RRGGBB`；`null` 表示不染色（精简版忽略） |
+| `items[].medal` / `medalLevel` | ➖ | 粉丝牌（仅完整版展示） |
+| `items[].privileged` | ➖ | 房管/舰长等特殊身份 |
+| `displayMode` | ➖ | `compact`（默认，只显示「昵称 + 文本」）/ `full`（含粉丝牌与颜色） |
+| `blockedKeywords` | ➖ | 屏蔽词：文本包含任一（不区分大小写）即不显示 |
+| `mergeDuplicates` / `mergeWindowSeconds` | ➖ | 重复合并：同用户同文本在窗口内合并并累加次数（如 `666 ×15`） |
+
+### 1.11 `danmaku-state`
+
+```json
+{ "type": "danmaku-state", "state": "connected", "receivedCount": 176 }
+```
+
+`state` 取值：`disconnected` / `connecting` / `connected` / `failed`。
+弹幕是**附加能力**：任何状态下都不得影响视频播放，`failed` 时页面仅记录日志。
+
 ---
 
 ## 2. 页面 → 宿主
@@ -212,6 +257,8 @@
 | `request-play` | 用户点了播放页底部的「开始播放」 | — ；宿主执行与「解析房间」相同的解析与下发流程 |
 | `toggle-pause` | 用户点了播放页底部的「暂停播放 / 继续播放」 | — ；宿主切换暂停状态并回下发 `pause` |
 | `request-stop` | 用户点了播放页底部的「停止播放」（销毁播放器、关闭画面） | — ；宿主调用 `IPlaybackCoordinator.StopActive()` 释放新旧两轮中继并把状态置为"未播放" |
+| `danmaku-toggle` | 用户点了播放页底部的「弹幕」按钮 | `visible`（布尔）；宿主可据此持久化 `DanmakuOptions.Visible` |
+| `danmaku-retry` | 用户在弹幕连接失败时点「重试」 | — ；宿主重新建立弹幕连接 |
 
 > `paused`（媒体元素自身状态）与 `pausedByUser`（页面记录的用户意图）必须分开看：
 > 真机实测"缓冲涨到 100 秒、`reconnects` 恒为 0"的坏状态里两者不一致
