@@ -21,6 +21,15 @@ public sealed record RecordingRequest
 
     /// <summary>最长录制时长（分钟）；为 <see langword="null"/> 时使用默认值。</summary>
     public int? MaxDurationMinutes { get; init; }
+
+    /// <summary>
+    /// 录制结束后是否把 FLV 无损转封装为 MP4 并删除 FLV。
+    /// </summary>
+    /// <remarks>
+    /// 默认开启：FLV 的音频头只能标到 44 kHz，表达不了 48 kHz（B站推的就是 48 kHz），
+    /// 转成 MP4 后采样率才会被如实记录。转封装是纯封装（不转码），失败时保留 FLV。
+    /// </remarks>
+    public bool ConvertToMp4 { get; init; } = true;
 }
 
 /// <summary>

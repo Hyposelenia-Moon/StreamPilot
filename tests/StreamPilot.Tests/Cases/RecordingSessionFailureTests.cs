@@ -242,6 +242,9 @@ public sealed class RecordingSessionFailureTests
         Room = BuildRoom(candidate),
         Candidate = candidate,
         OutputDirectory = outputRoot,
+        // 本文件断言的是 FLV 分片与句柄释放：关掉"转 MP4 并删 FLV"的收尾，
+        // 否则后台转换会在断言前把 .flv 变成 .mp4（转封装本身由 Mp4ConversionTests 覆盖）。
+        ConvertToMp4 = false,
     };
 
     /// <summary>构造测试房间信息。</summary>

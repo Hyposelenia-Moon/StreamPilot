@@ -5,6 +5,7 @@ using StreamPilot.Core.Logging;
 using StreamPilot.Core.Models;
 using StreamPilot.Core.Parsers;
 using StreamPilot.Core.Services;
+using StreamPilot.Recording.Mp4;
 using StreamPilot.Recording.Flv;
 using StreamPilot.Recording.Hls;
 using StreamPilot.Recording.Metadata;
@@ -485,6 +486,69 @@ public sealed class RecordingSession : IRecordingSession
             segmentIndex: Math.Max(0, result.Segments.Count - 1),
             reconnectCount: result.ReconnectCount,
             currentFileName: result.Segments.Count > 0 ? result.Segments[^1].FileName : string.Empty);
+
+        // 录制结束后的收尾：把 FLV 无损搬进 MP4，成功后删除 FLV。
+        // 不阻塞停止流程（大文件搬运要几秒到几十秒），失败时保留 FLV 保住数据。
+        if (_request.ConvertToMp4)
+        {
+            _ = Task.Run(() => ConvertSegmentsAsync(result.Segments), CancellationToken.None);
+        }
+    }
+
+    /// <summary>
+    /// 把本次录制的分片逐个转成 MP4，成功的删掉对应 FLV。
+    /// </summary>
+    /// <param name="segments">本次录制的分片。</param>
+    /// <returns>任务。</returns>
+    /// <remarks>
+    /// 之所以换容器：FLV 的音频头最多只能标到 44 kHz，表达不了 48 kHz（B站推的就是 48 kHz），
+    /// 转成 MP4 后 <c>mdhd</c> 会如实写入采样率，工具与编辑器看到的就是 48000 Hz。
+    /// 转换是纯封装（不转码、不重采样），失败时**不删** FLV。
+    /// </remarks>
+    private async Task ConvertSegmentsAsync(IReadOnlyList<RecordingSegment> segments)
+    {
+        foreach (RecordingSegment segment in segments)
+        {
+            string flvPath = Path.Combine(_outputDirectory, segment.FileName);
+            if (!File.Exists(flvPath))
+            {
+                continue;
+            }
+
+            string mp4Path = Path.ChangeExtension(flvPath, ".mp4");
+            Mp4ConversionResult result = await FlvToMp4Converter
+                .ConvertAsync(flvPath, mp4Path, _logger, CancellationToken.None)
+                .ConfigureAwait(false);
+
+            if (!result.Success)
+            {
+                _logger.Warn(_moduleName, "分片转为 MP4 失败，保留 FLV。", new Dictionary<string, object?>
+                {
+                    ["file"] = segment.FileName,
+                    ["detail"] = result.Error,
+                });
+                continue;
+            }
+
+            try
+            {
+                File.Delete(flvPath);
+                _logger.Info(_moduleName, "分片已转为 MP4 并删除 FLV。", new Dictionary<string, object?>
+                {
+                    ["file"] = Path.GetFileName(mp4Path),
+                    ["bytes"] = result.OutputBytes,
+                    ["audioSampleRate"] = result.AudioSampleRate,
+                });
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                _logger.Warn(_moduleName, "MP4 已生成，但删除 FLV 失败（可手动删除）。", new Dictionary<string, object?>
+                {
+                    ["file"] = segment.FileName,
+                    ["detail"] = exception.Message,
+                });
+            }
+        }
     }
 
     private void OnSegmentCompleted(RecordingSegment segment)
