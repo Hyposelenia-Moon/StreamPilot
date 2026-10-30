@@ -151,6 +151,50 @@ public sealed class CandidateOrderingTests
             "三条 1080P 与一条 HDR 必须全部进入保留列表（共 4 条高画质）");
     }
 
+    /// <summary>
+    /// mpv 播放 HEVC 必须优先 HLS(ts)：B站 HEVC 的 FLV 是 Enhanced FLV 封装，
+    /// mpv/ffmpeg 对其 demux 会读错 NAL 大小（Invalid NAL unit size），画面出不来。
+    /// </summary>
+    [TestMethod("mpv 候选排序：HEVC 优先 HLS 而非 Enhanced FLV")]
+    public void MpvPrefersHlsForHevc()
+    {
+        IReadOnlyList<StreamCandidate> ordered = CandidateOrdering.PrioritizeForMpv(
+        [
+            Candidate(0, StreamQuality.Hdr, VideoCodec.Hevc, StreamFormat.FlvHttp),
+            Candidate(1, StreamQuality.Hdr, VideoCodec.Hevc, StreamFormat.HlsTs),
+        ]);
+
+        Assert.Equal(StreamFormat.HlsTs, ordered[0].Format, "HEVC 必须优先 HLS(ts)，Enhanced FLV 会被 mpv 误判");
+        Assert.Equal(VideoCodec.Hevc, ordered[0].Codec);
+        Assert.Equal(StreamFormat.FlvHttp, ordered[1].Format, "Enhanced FLV 的 HEVC 仍保留作为后备");
+    }
+
+    /// <summary>mpv 播放 AVC 保持 FLV 优先：标准 FLV 延迟最低，不受 Enhanced FLV 问题影响。</summary>
+    [TestMethod("mpv 候选排序：AVC 保持 FLV 优先")]
+    public void MpvKeepsFlvForAvc()
+    {
+        IReadOnlyList<StreamCandidate> ordered = CandidateOrdering.PrioritizeForMpv(
+        [
+            Candidate(0, StreamQuality.Hd1080, VideoCodec.Avc, StreamFormat.HlsTs),
+            Candidate(1, StreamQuality.Hd1080, VideoCodec.Avc, StreamFormat.FlvHttp),
+        ]);
+
+        Assert.Equal(StreamFormat.FlvHttp, ordered[0].Format, "AVC 的 FLV 是标准 FLV，应保持优先");
+    }
+
+    /// <summary>mpv 播放仍按画质降序：即使高画质只有 Enhanced FLV，也排在低画质前面。</summary>
+    [TestMethod("mpv 候选排序：画质仍优先")]
+    public void MpvStillSortsByQuality()
+    {
+        IReadOnlyList<StreamCandidate> ordered = CandidateOrdering.PrioritizeForMpv(
+        [
+            Candidate(0, StreamQuality.Hd1080, VideoCodec.Avc, StreamFormat.FlvHttp),
+            Candidate(1, StreamQuality.Hdr, VideoCodec.Hevc, StreamFormat.FlvHttp),
+        ]);
+
+        Assert.Equal(StreamQuality.Hdr, ordered[0].Quality, "mpv 也要画质优先，HDR 排最前");
+    }
+
     /// <summary>构造测试候选。</summary>
     /// <param name="sourceIndex">源索引。</param>
     /// <param name="quality">画质。</param>

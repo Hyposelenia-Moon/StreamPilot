@@ -13,6 +13,7 @@ using StreamPilot.App.Views;
 using StreamPilot.Core.Configuration;
 using StreamPilot.Core.Logging;
 using StreamPilot.Core.Models;
+using StreamPilot.Core.Parsers;
 using StreamPilot.Core.Services;
 
 /// <summary>
@@ -1067,12 +1068,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             return false;
         }
 
-        StreamCandidate? candidate = null;
-        foreach (StreamCandidate item in _currentRoom.Candidates)
-        {
-            candidate = item;
-            break;
-        }
+        // mpv 播放选候选：不能简单取排序后的第一条——HEVC 的 FLV 是 Enhanced FLV 封装，
+        // mpv/ffmpeg 对其 demux 会读错 NAL 大小（Invalid NAL unit size），必须改用同画质的 HLS(ts)。
+        StreamCandidate? candidate = PickMpvCandidate(_currentRoom.Candidates);
 
         if (candidate is null)
         {
@@ -1098,6 +1096,20 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
         return started;
     }
+
+    /// <summary>
+    /// 为 mpv 外挂播放挑选候选。
+    /// </summary>
+    /// <param name="candidates">解析出的候选。</param>
+    /// <returns>最适合 mpv 的候选；无候选时返回 <see langword="null"/>。</returns>
+    /// <remarks>
+    /// 不能直接取排序后的第一条：B站 HEVC 的 FLV 是 Enhanced FLV 封装，
+    /// mpv 内置的 ffmpeg 对其 demux 会读错 NAL 大小（<c>Invalid NAL unit size</c>），
+    /// 表现就是"mpv 收不到数据/画面出不来"。同画质的 HLS(ts) 封装则完全正常，
+    /// 因此 HEVC 候选要优先选 HLS(ts)；AVC 的 FLV 是标准 FLV，保持 FLV 低延迟。
+    /// </remarks>
+    private static StreamCandidate? PickMpvCandidate(IEnumerable<StreamCandidate> candidates) =>
+        CandidateOrdering.PrioritizeForMpv(candidates).FirstOrDefault();
 
     /// <summary>
     /// 开始录制当前房间。

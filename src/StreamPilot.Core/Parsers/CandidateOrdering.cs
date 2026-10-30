@@ -93,4 +93,40 @@ public static class CandidateOrdering
         VideoCodec.Av1 => 2,
         _ => 3,
     };
+
+    /// <summary>
+    /// 为 mpv 外挂播放排序候选（与 <see cref="Prioritize"/> 的 Web 播放规则不同）。
+    /// </summary>
+    /// <param name="candidates">平台给出的候选。</param>
+    /// <returns>按 mpv 播放优先级排好序的新列表。</returns>
+    /// <remarks>
+    /// mpv 直连 CDN、用内置 ffmpeg demux，因此格式优先级与 Web 播放相反：
+    /// B站 HEVC 的 FLV 是 Enhanced FLV 封装，mpv/ffmpeg 对其 demux 会读错 NAL 大小
+    /// （<c>Invalid NAL unit size</c>），表现为"mpv 收不到数据/画面出不来"；
+    /// 同画质的 HLS(ts) 封装则完全正常，所以 HEVC 优先 HLS(ts)。
+    /// AVC 的 FLV 是标准 FLV，保持 FLV（延迟最低）。
+    /// </remarks>
+    public static IReadOnlyList<StreamCandidate> PrioritizeForMpv(IEnumerable<StreamCandidate> candidates)
+    {
+        ArgumentNullException.ThrowIfNull(candidates);
+
+        return
+        [
+            .. candidates
+                .OrderByDescending(static candidate => RankQuality(candidate.Quality))
+                .ThenBy(static candidate => RankMpvFormat(candidate))
+                .ThenBy(static candidate => candidate.SourceIndex),
+        ];
+    }
+
+    /// <summary>mpv 播放的格式权重（数值越小越优先）。</summary>
+    /// <param name="candidate">候选。</param>
+    /// <returns>权重。</returns>
+    public static int RankMpvFormat(StreamCandidate candidate) => (candidate.Codec, candidate.Format) switch
+    {
+        (VideoCodec.Hevc, StreamFormat.HlsTs) => 0,   // HEVC 走 HLS：mpv 能正确 demux（Enhanced FLV 有 bug）
+        (VideoCodec.Hevc, StreamFormat.FlvHttp) => 2, // Enhanced FLV 的 HEVC：mpv 会报 Invalid NAL unit size，最后才选
+        (_, StreamFormat.FlvHttp) => 1,               // AVC 的 FLV：标准 FLV，延迟最低
+        _ => 3,
+    };
 }
