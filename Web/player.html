@@ -28,20 +28,36 @@
       color-scheme: light;
     }
 
+    /* 设计令牌（design token）：颜色 / 圆角 / 间距 / 字号只在 :root 里写一次，
+       控件样式一律引用变量。改主题或调色只动这一段，不用满页面找硬编码色值。 */
     :root {
-      --bg: #f5f6f8;
-      --panel: #ffffff;
-      --border: #e2e5ea;
-      --border-strong: #c7cdd6;
-      --text: #1f2329;
-      --text-strong: #ffffff;
-      --muted: #6b7280;
-      --control: #ffffff;
-      --control-active: #e8f1ff;
-      --accent: #2f6feb;
-      --warn: #b45309;
-      --error: #c0392b;
-      --ok: #1f8a4c;
+      --sp-color-bg: #f5f6f8;
+      --sp-color-panel: #ffffff;
+      --sp-color-panel-alt: #fbfcfd;
+      --sp-color-border: #e2e5ea;
+      --sp-color-border-strong: #c7cdd6;
+      --sp-color-text: #1f2329;
+      --sp-color-text-muted: #5b6472;
+      --sp-color-text-faint: #6b7280;
+      --sp-color-control: #ffffff;
+      --sp-color-control-active: #e8f1ff;
+      --sp-color-accent: #2f6feb;
+      --sp-color-accent-strong: #1b4fd8;
+      --sp-color-accent-soft: #eaf1fe;
+      --sp-color-warn: #b45309;
+      --sp-color-error: #c0392b;
+      --sp-color-ok: #1f8a4c;
+      --sp-radius-sm: 6px;
+      --sp-radius-md: 8px;
+      --sp-radius-lg: 12px;
+      --sp-space-1: 4px;
+      --sp-space-2: 6px;
+      --sp-space-3: 8px;
+      --sp-space-4: 12px;
+      --sp-space-5: 16px;
+      --sp-font-body: 13px;
+      --sp-font-control: 14px;
+      --sp-control-height: 32px;
     }
 
     * {
@@ -66,6 +82,7 @@
       footer,
       #stage,
       #controls,
+      #statusBar,
       #statusLine,
       #hint,
       #volDisplay {
@@ -93,10 +110,12 @@
     button,
     input[type="range"] {
       font: inherit;
-      color: #1f2329;
-      background-color: #ffffff;
-      border: 1px solid #e2e5ea;
-      border-radius: 6px;
+      color: var(--sp-color-text);
+      background-color: var(--sp-color-control);
+      border: 1px solid var(--sp-color-border);
+      border-radius: var(--sp-radius-sm);
+      /* 内边距保持字面值：「追帧」按钮的 min-width 按 4px/8px 推导（见下方 #chaseBtn），
+         改成令牌会让那条几何约束失去可读的计算依据。 */
       padding: 4px 8px;
       -webkit-appearance: none;
       appearance: none;
@@ -108,13 +127,13 @@
       height: 20px;
       background: transparent;
       border: none;
-      accent-color: #2f6feb;
+      accent-color: var(--sp-color-accent);
     }
 
     input[type="range"]::-webkit-slider-runnable-track {
       height: 4px;
       border-radius: 2px;
-      background: #c7cdd6;
+      background: var(--sp-color-border-strong);
     }
 
     input[type="range"]::-webkit-slider-thumb {
@@ -124,8 +143,8 @@
       height: 14px;
       margin-top: -5px;
       border-radius: 50%;
-      background: #2f6feb;
-      border: 1px solid #f5f6f8;
+      background: var(--sp-color-accent);
+      border: 1px solid var(--sp-color-bg);
     }
 
     button {
@@ -134,7 +153,7 @@
     }
 
     button:hover:not(:disabled) {
-      border-color: #2f6feb;
+      border-color: var(--sp-color-accent);
     }
 
     button:disabled {
@@ -143,8 +162,8 @@
     }
 
     button.active {
-      border-color: #2f6feb;
-      background-color: #e8f1ff;
+      border-color: var(--sp-color-accent);
+      background-color: var(--sp-color-control-active);
     }
 
     .spacer {
@@ -155,9 +174,9 @@
       底部控制条的抗重叠约束（曾出现"点「追帧」后右下角堆叠"）：
       1. 按钮文案会在运行时从「追帧」变成「停止追帧」（见 player-core 的 chaseButtonLabel），
          所以 #chaseBtn 用 min-width 预留最长文案的宽度，文案切换不再引起重排；
-      2. #controls 允许换行（flex-wrap）+ 行间距（row-gap），控件宁可换行也不压缩重叠；
-      3. 靠右的「全屏」用 margin-left: auto 独占行尾，换行后也不会压到别的控件上；
-      4. 状态行是 footer 列布局里的独立一行（见 #statusLine 的省略号收敛），不参与 #controls 的行布局。
+      2. 每一层都允许换行（flex-wrap）+ 行间距（row-gap），控件宁可换行也不压缩重叠；
+      3. 靠右的「全屏」排在主控层行尾，换行后也不会压到别的控件上；
+      4. 状态行是 footer 列布局里的独立一行（见 #statusBar / #statusLine），不参与控件的行布局。
       画质、追帧档位与播放控制都放在画面下方的 footer：
       贴着画面的按钮比页头更容易点到，也避免页头在窄窗口里挤成一团。
     */
@@ -173,7 +192,7 @@
     #qualityBox .qualityLabel,
     #targetBox .qualityLabel,
     #lineBox .qualityLabel {
-      color: #5b6472;
+      color: var(--sp-color-text-faint);
       font-size: 15px;
     }
 
@@ -181,21 +200,21 @@
     #targetSelect,
     #lineSelect {
       cursor: pointer;
-      border-radius: 8px;
+      border-radius: var(--sp-radius-md);
       height: 34px;
       padding: 0 8px;
-      border: 1px solid #c7cdd6;
-      background: #ffffff;
-      color: #1f2329;
+      border: 1px solid var(--sp-color-border-strong);
+      background: var(--sp-color-control);
+      color: var(--sp-color-text);
       font-family: inherit;
-      font-size: 14px;
+      font-size: var(--sp-font-control);
       max-width: 210px;
     }
 
     #qualitySelect:hover,
     #targetSelect:hover,
     #lineSelect:hover {
-      border-color: #1b4fd8;
+      border-color: var(--sp-color-accent-strong);
     }
 
     /*
@@ -212,7 +231,7 @@
 
     #stopBtn {
       /* 停止会关闭画面，用危险色与"暂停"区分开 */
-      color: #c0392b;
+      color: var(--sp-color-error);
     }
 
     #fsBtn {
@@ -247,11 +266,11 @@
       z-index: 2;
       max-width: 82%;
       padding: 14px 18px;
-      border-radius: 12px;
+      border-radius: var(--sp-radius-lg);
       background: rgba(255, 255, 255, 0.97);
       border: 1px solid #e4e8ee;
       box-shadow: 0 10px 26px rgba(31, 35, 41, 0.07);
-      color: #1f2329;
+      color: var(--sp-color-text);
       text-align: center;
       white-space: pre-wrap;
       pointer-events: none;
@@ -323,19 +342,70 @@
       flex: 0 0 auto;
       display: flex;
       flex-direction: column;
-      border-top: 1px solid #e2e5ea;
-      background: #ffffff;
+      border-top: 1px solid var(--sp-color-border);
+      background: var(--sp-color-panel);
+      transition: opacity 160ms ease, transform 160ms ease;
     }
 
+    /* 播放中鼠标静止后整条控制条淡出（全屏时最需要），鼠标一动立刻恢复 */
+    footer.sp-controls-hidden {
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+    }
+
+    /*
+      控制条分两层（DOM 见 body 里的 #primaryRow / #paramRow）：
+      主控层放高频操作（播放 / 暂停 / 停止、音量、弹幕、画质、全屏），参数层放"调一次就不动"的
+      线路 / 追帧档位 / 追帧开关。主控层因此从 9 个控件降到 6 个，1024px 宽度下不换行。
+      紧凑模式（body.sp-compact，对应设置里的「紧凑控制条（旧版一行）」）把两层摊平成一行，
+      并保留原来"宁可换行也不压缩重叠"的行为。
+    */
     #controls {
       display: flex;
+      flex-direction: column;
+      gap: var(--sp-space-2);
+      padding: var(--sp-space-3) 10px var(--sp-space-2);
+      color: var(--sp-color-text);
+    }
+
+    .controlRow {
+      display: flex;
       align-items: center;
-      gap: 6px;
-      row-gap: 6px;
-      padding: 8px 10px;
+      gap: var(--sp-space-2);
       /* 窄窗口时换行（并保留行间距）而不是把控件压扁、压到彼此身上 */
       flex-wrap: wrap;
-      color: #1f2329;
+      row-gap: var(--sp-space-2);
+    }
+
+    /* 参数层收起：只留主控层 */
+    #paramRow.sp-collapsed {
+      display: none;
+    }
+
+    body.sp-compact #controls {
+      flex-direction: row;
+      flex-wrap: wrap;
+      row-gap: var(--sp-space-2);
+      padding: var(--sp-space-3) 10px;
+    }
+
+    /* display: contents 让两层的子元素直接成为 #controls 的 flex 项，等价旧版一行布局 */
+    body.sp-compact .controlRow {
+      display: contents;
+    }
+
+    /* 紧凑模式下参数就在同一行，不再需要收起开关 */
+    body.sp-compact #paramToggle {
+      display: none;
+    }
+
+    /* 音量组与播放键之间的细分隔线：同组控件靠得近，跨组的留出视觉间隔 */
+    .controlDivider {
+      width: 1px;
+      height: 20px;
+      background: var(--sp-color-border);
+      margin: 0 2px;
     }
 
     /*
@@ -348,16 +418,49 @@
     }
 
     .controlLabel {
-      color: #6b7280;
+      color: var(--sp-color-text-faint);
+    }
+
+    /* ===== 状态行 + 缓冲健康度 =====
+       状态行左侧 3px 竖条表示缓冲健康度：绿（缓冲 <1s，贴着直播）/ 黄（1–3s）/ 红（>3s 或画面停滞），
+       灰条表示当前没有在播（空闲 / 暂停），不假装"健康"。
+    */
+    #statusBar {
+      display: flex;
+      align-items: center;
+      gap: var(--sp-space-2);
+      padding: 0 10px var(--sp-space-2);
+      min-height: 18px;
+    }
+
+    #healthBar {
+      flex: 0 0 auto;
+      width: 3px;
+      height: 14px;
+      border-radius: 2px;
+      background: var(--sp-color-border-strong);
+      transition: background-color 200ms ease;
+    }
+
+    #healthBar[data-health="good"] {
+      background: var(--sp-color-ok);
+    }
+
+    #healthBar[data-health="warn"] {
+      background: var(--sp-color-warn);
+    }
+
+    #healthBar[data-health="bad"] {
+      background: var(--sp-color-error);
     }
 
     /*
-      状态行独立成行（footer 是列方向的 flex 容器），过长时用省略号收敛：
+      状态行与健康条同一行，过长时用省略号收敛：
       nowrap + hidden + ellipsis 保证它只在自己这一行里被裁掉，既不会顶掉上面的控件，也不会盖住任何控件。
     */
     #statusLine {
-      padding: 0 10px 6px;
-      color: #2f6feb;
+      flex: 1 1 auto;
+      color: var(--sp-color-accent);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -366,18 +469,50 @@
 
     /* 宿主状态按级别换色：警告 / 错误要与"一切正常"的蓝色区分开（与 #hint 用同一组颜色） */
     #statusLine[data-level="warn"] {
-      color: #b45309;
+      color: var(--sp-color-warn);
     }
 
     #statusLine[data-level="error"] {
-      color: #c0392b;
+      color: var(--sp-color-error);
+    }
+
+    /* ===== Toast：右下角浮层，3 秒自动消失 =====
+       宿主的错误 / 警告不再长期占着状态行（状态行 6/12/20s 的分级保留作兜底），
+       先弹一条看得见的提示，消失后状态行仍在。
+    */
+    #toast {
+      position: absolute;
+      right: 16px;
+      bottom: 16px;
+      z-index: 3;
+      max-width: min(420px, 72%);
+      padding: 8px 12px;
+      border-radius: var(--sp-radius-md);
+      background: rgba(31, 35, 41, 0.92);
+      color: #ffffff;
+      box-shadow: 0 8px 22px rgba(31, 35, 41, 0.24);
+      white-space: pre-wrap;
+      opacity: 0;
+      transform: translateY(6px);
+      transition: opacity 160ms ease, transform 160ms ease;
+      pointer-events: none;
+    }
+
+    #toast.sp-visible {
+      opacity: 1;
+      transform: none;
+    }
+
+    #toast[data-level="warn"] {
+      background: rgba(180, 83, 9, 0.95);
+    }
+
+    #toast[data-level="error"] {
+      background: rgba(192, 57, 43, 0.95);
     }
 
     /*
-      音量条固定 90px：它是控制条里最宽的单件（原 140px）。
-      缩短后控制条在 1120px 宽（画质档位名带 HDR / 高帧率 后缀、下拉被 max-width: 220px 收敛）起只占一行，
-      画质是普通档位名（最宽「1080P 高码率」）时 1024px 起即单行，「全屏」与其它按钮同行；
-      改回更宽会让「全屏」被挤到下一行、看起来像右下角多出一块。
+      音量条固定 60px：它是控制条里最宽的单件（原 140px）。
       音量读数另有 #volumeLabel 文字，缩短滑块不影响读数。
     */
     #volume {
@@ -385,7 +520,7 @@
     }
 
     #volumeLabel {
-      color: #6b7280;
+      color: var(--sp-color-text-faint);
       min-width: 36px;
       text-align: right;
     }
@@ -447,34 +582,51 @@
       <div id="danmakuLayer" class="sp-danmaku-layer sp-danmaku-hidden" aria-hidden="true"></div>
       <div id="hint" class="empty" data-level="info">等待直播源</div>
       <div id="volDisplay" class="hidden">音量：30%</div>
+      <div id="toast" role="alert" aria-live="polite"></div>
     </div>
 
-    <footer>
+    <footer id="controlsBar">
+      <!--
+        控制条分两层：
+        主控层（常驻）：播放 / 暂停 / 停止、音量、弹幕、画质、全屏；
+        参数层（可收起）：线路、追帧档位、追帧开关——都是"调一次就不再动"的参数。
+        分层后主控层在 1024px 宽度下不换行；设置里可切回「紧凑控制条（旧版一行）」。
+      -->
       <div id="controls">
-        <span class="controlLabel">音量</span>
-        <input id="volume" type="range" min="0" max="100" step="1" value="30" />
-        <span id="volumeLabel">30%</span>
-        <button type="button" id="danmakuBtn" title="显示弹幕（首次开启会连接弹幕服务器，可在设置里调整屏蔽词与样式）">弹幕</button>
-        <span class="spacer"></span>
-        <button type="button" id="chaseBtn" title="开启自动追帧并立刻追一次帧（跳到直播最新位置）">追帧</button>
-        <label id="targetBox" for="targetSelect">
-          <span class="qualityLabel">追帧档位</span>
-          <select id="targetSelect"></select>
-        </label>
-        <button type="button" id="playBtn" title="播放左侧已解析的直播间">播放</button>
-        <button type="button" id="pauseBtn">暂停</button>
-        <button type="button" id="stopBtn" title="结束播放会话并关闭画面（与「暂停」不同）">停止</button>
-        <label id="lineBox" for="lineSelect">
-          <span class="qualityLabel">线路</span>
-          <select id="lineSelect"></select>
-        </label>
-        <label id="qualityBox" for="qualitySelect">
-          <span class="qualityLabel">画质</span>
-          <select id="qualitySelect"></select>
-        </label>
-        <button type="button" id="fsBtn" title="全屏（双击画面同样可切换）">全屏</button>
+        <div id="primaryRow" class="controlRow">
+          <button type="button" id="playBtn" title="播放左侧已解析的直播间">播放</button>
+          <button type="button" id="pauseBtn">暂停</button>
+          <button type="button" id="stopBtn" title="结束播放会话并关闭画面（与「暂停」不同）">停止</button>
+          <span class="controlDivider" aria-hidden="true"></span>
+          <span class="controlLabel">音量</span>
+          <input id="volume" type="range" min="0" max="100" step="1" value="30" />
+          <span id="volumeLabel">30%</span>
+          <span class="spacer"></span>
+          <button type="button" id="danmakuBtn" title="显示弹幕（首次开启会连接弹幕服务器，可在设置里调整屏蔽词与样式）">弹幕</button>
+          <label id="qualityBox" for="qualitySelect">
+            <span class="qualityLabel">画质</span>
+            <select id="qualitySelect"></select>
+          </label>
+          <button type="button" id="paramToggle" aria-expanded="true" aria-controls="paramRow"
+                  title="收起 / 展开线路与追帧参数">参数</button>
+          <button type="button" id="fsBtn" title="全屏（双击画面同样可切换）">全屏</button>
+        </div>
+        <div id="paramRow" class="controlRow">
+          <label id="lineBox" for="lineSelect">
+            <span class="qualityLabel">线路</span>
+            <select id="lineSelect"></select>
+          </label>
+          <label id="targetBox" for="targetSelect">
+            <span class="qualityLabel">追帧档位</span>
+            <select id="targetSelect"></select>
+          </label>
+          <button type="button" id="chaseBtn" title="开启自动追帧并立刻追一次帧（跳到直播最新位置）">追帧</button>
+        </div>
       </div>
-      <div id="statusLine">未连接</div>
+      <div id="statusBar">
+        <span id="healthBar" data-health="idle" aria-hidden="true"></span>
+        <span id="statusLine" role="status">未连接</span>
+      </div>
     </footer>
   </div>
 
@@ -498,6 +650,15 @@
        * 额外的 seek 流程，而目标点附近的缓冲还没建立起来，反而多一次等待。
        */
       const REBUILD_POSITION_RESTORE_MIN_SECONDS = 0.5;
+
+      /** 控制条自动隐藏的静止判定（毫秒）：播放中鼠标静止这么久就淡出。 */
+      const CONTROLS_AUTO_HIDE_DELAY_MS = 3000;
+
+      /** toast 停留时长（毫秒）：宿主错误 / 警告提示自动消失，不长期占着画面。 */
+      const TOAST_DURATION_MS = 3000;
+
+      /** 判定"画面停滞"的静默时长（毫秒）：超过它，缓冲健康度一律判红。 */
+      const BUFFER_HEALTH_STALL_MS = 3000;
 
       /** 宿主消息通道：WebView2 的 chrome.webview。外部浏览器打开时为空。 */
       const hostChannel = (function createHostChannel() {
@@ -538,6 +699,12 @@
         danmakuBtn: document.getElementById('danmakuBtn'),
         danmakuLayer: document.getElementById('danmakuLayer'),
         stage: document.getElementById('stage'),
+        controlsBar: document.getElementById('controlsBar'),
+        primaryRow: document.getElementById('primaryRow'),
+        paramRow: document.getElementById('paramRow'),
+        paramToggle: document.getElementById('paramToggle'),
+        healthBar: document.getElementById('healthBar'),
+        toast: document.getElementById('toast'),
       };
 
       /** 页面状态。 */
@@ -577,6 +744,24 @@
         pausedAtSeconds: 0,
         // 刚恢复播放的时间戳：这段时间内的静止属于重建缓冲，不判卡顿。
         resumedAt: 0,
+      };
+
+      /**
+       * 控制条布局与自动隐藏状态（由宿主 player-config 下发，页面不自己猜）。
+       *
+       * compact 对应设置里的「紧凑控制条（旧版一行）」：为 true 时把主控层与参数层摊平成一行。
+       * autoHide 关闭后控制条常驻，不随鼠标静止淡出（对习惯旧界面的用户）。
+       */
+      const uiState = {
+        compact: false,
+        autoHide: true,
+        paramsCollapsed: false,
+        pointerInside: false,
+        focused: false,
+        /** 最近一次用户交互时间（毫秒）：静止计时以它为起点。 */
+        lastInteractionAt: 0,
+        hideTimer: null,
+        toastTimer: null,
       };
 
       const hevcMseSupported = Boolean(window.MediaSource)
@@ -742,6 +927,16 @@
       function applyPlaybackPhase(phase, run) {
         state.statusPhase = phase;
         setStatus(core.resolvePlaybackStatusText(run, state));
+
+        if (phase === core.PLAYBACK_PHASES.PLAYING) {
+          // 起播后开始静止计时：鼠标不动就淡出控制条。
+          scheduleControlHide();
+          return;
+        }
+
+        // 非播放态（暂停 / 重连 / 停止 / 空闲）控制条必须可见，色条也只能是"没有在播"。
+        setBufferHealth(core.BUFFER_HEALTH.IDLE, null);
+        showControls();
       }
 
       /**
@@ -781,6 +976,198 @@
           receivedAt: Date.now(),
         };
         renderStatusLine();
+
+        // 失败 / 警告额外弹一条 toast：状态行会被省略号截断，错误原因要靠浮层先被看见。
+        if (state.hostStatus.level !== 'info') {
+          showToast(message, state.hostStatus.level);
+        }
+      }
+
+      /**
+       * 刷新状态行左侧的缓冲健康度色条。
+       * @param {string} health {@link core.BUFFER_HEALTH} 之一。
+       * @param {number|null} bufferSeconds 本地缓冲剩余秒数（只用于悬停提示）。
+       */
+      function setBufferHealth(health, bufferSeconds) {
+        const bar = elements.healthBar;
+        if (!bar) {
+          return;
+        }
+
+        if (bar.dataset.health !== health) {
+          bar.dataset.health = health;
+        }
+
+        if (health === core.BUFFER_HEALTH.IDLE) {
+          bar.title = '缓冲健康度：当前没有在播';
+          return;
+        }
+
+        const seconds = Number(bufferSeconds);
+        bar.title = Number.isFinite(seconds)
+          ? '缓冲健康度：剩余 ' + seconds.toFixed(1) + ' 秒（绿 <1s / 黄 1–3s / 红 >3s 或停滞）'
+          : '缓冲健康度：暂无数据';
+      }
+
+      /**
+       * 弹一条右下角 toast，到点自动消失。
+       *
+       * 宿主的失败原因（解析失败、断流…）此前只能靠状态行长期显示，
+       * 状态行一长就被省略号截断；toast 让"出了什么事"先被看见，状态行仍保留作兜底。
+       * @param {string} message 提示文本。
+       * @param {string} level 级别（warn / error，其余按 info 处理）。
+       */
+      function showToast(message, level) {
+        const toast = elements.toast;
+        if (!toast || !message) {
+          return;
+        }
+
+        toast.textContent = message;
+        toast.dataset.level = level === 'error' || level === 'warn' ? level : 'info';
+        toast.classList.add('sp-visible');
+        if (uiState.toastTimer !== null) {
+          window.clearTimeout(uiState.toastTimer);
+        }
+
+        uiState.toastTimer = window.setTimeout(function hideToast() {
+          uiState.toastTimer = null;
+          toast.classList.remove('sp-visible');
+        }, TOAST_DURATION_MS);
+      }
+
+      /** 同步参数层的展开 / 收起（紧凑模式下两层同行，收起开关本身隐藏）。 */
+      function syncParameterRow() {
+        const collapsed = uiState.paramsCollapsed && !uiState.compact;
+        elements.paramRow.classList.toggle('sp-collapsed', collapsed);
+        if (!elements.paramToggle) {
+          return;
+        }
+
+        elements.paramToggle.setAttribute('aria-expanded', String(!collapsed));
+        elements.paramToggle.classList.toggle('active', !collapsed);
+        elements.paramToggle.title = collapsed ? '展开线路与追帧参数' : '收起线路与追帧参数';
+      }
+
+      /**
+       * 当前是否允许自动隐藏控制条。
+       *
+       * 只在"确实在播、用户没暂停、指针不在条上、焦点不在条内"时淡出：
+       * 暂停后画面本来就不动，控制条再消失会让人不知道还能点哪里。
+       * @returns {boolean} 允许隐藏返回 true。
+       */
+      function canAutoHideControls() {
+        return uiState.autoHide
+          && !uiState.compact
+          && !uiState.pointerInside
+          && !uiState.focused
+          && state.run !== null
+          && !state.pausedByUser
+          && state.statusPhase === core.PLAYBACK_PHASES.PLAYING;
+      }
+
+      /** 让控制条立刻可见，并记下这次交互时间。 */
+      function showControls() {
+        if (elements.controlsBar.classList.contains('sp-controls-hidden')) {
+          elements.controlsBar.classList.remove('sp-controls-hidden');
+        }
+
+        uiState.lastInteractionAt = Date.now();
+        scheduleControlHide();
+      }
+
+      /** 安排一次"静止到时后隐藏控制条"（同一时刻只保留一个计时器）。 */
+      function scheduleControlHide() {
+        if (!uiState.autoHide || uiState.compact) {
+          // 关掉自动隐藏后必须保证控制条可见，否则会停在"隐藏"状态再也点不到。
+          elements.controlsBar.classList.remove('sp-controls-hidden');
+          return;
+        }
+
+        if (uiState.hideTimer !== null) {
+          return;
+        }
+
+        uiState.lastInteractionAt = Date.now();
+        uiState.hideTimer = window.setTimeout(onControlHideTick, CONTROLS_AUTO_HIDE_DELAY_MS);
+      }
+
+      /** 静止计时到点：仍满足条件就淡出，否则什么都不做（状态变化会重新排期）。 */
+      function onControlHideTick() {
+        uiState.hideTimer = null;
+        const idleMs = Date.now() - uiState.lastInteractionAt;
+        if (idleMs < CONTROLS_AUTO_HIDE_DELAY_MS) {
+          uiState.hideTimer = window.setTimeout(onControlHideTick, CONTROLS_AUTO_HIDE_DELAY_MS - idleMs);
+          return;
+        }
+
+        if (!canAutoHideControls()) {
+          return;
+        }
+
+        elements.controlsBar.classList.add('sp-controls-hidden');
+      }
+
+      /**
+       * 绑定控制条的显隐行为：鼠标移动 / 按键 / 滚轮都算"用户还在操作"。
+       *
+       * 指针停在控制条上或焦点在条内时不自动隐藏——否则鼠标悬在「停止」上时按钮会突然消失。
+       */
+      function bindControlBarVisibility() {
+        document.addEventListener('pointermove', showControls, { passive: true });
+        document.addEventListener('pointerdown', showControls, { passive: true });
+        document.addEventListener('keydown', showControls);
+        document.addEventListener('wheel', showControls, { passive: true });
+
+        elements.controlsBar.addEventListener('pointerenter', function onEnter() {
+          uiState.pointerInside = true;
+          showControls();
+        });
+
+        elements.controlsBar.addEventListener('pointerleave', function onLeave() {
+          uiState.pointerInside = false;
+          scheduleControlHide();
+        });
+
+        elements.controlsBar.addEventListener('focusin', function onFocusIn() {
+          uiState.focused = true;
+          showControls();
+        });
+
+        elements.controlsBar.addEventListener('focusout', function onFocusOut() {
+          uiState.focused = false;
+          scheduleControlHide();
+        });
+
+        if (elements.paramToggle) {
+          elements.paramToggle.addEventListener('click', function onParamToggle() {
+            uiState.paramsCollapsed = !uiState.paramsCollapsed;
+            syncParameterRow();
+          });
+        }
+      }
+
+      /**
+       * 应用宿主下发的播放页外观配置（`player-config` 消息）。
+       *
+       * 页面不自己猜这些开关：紧凑布局与自动隐藏都是用户的设置，缺省值必须与宿主一致。
+       * @param {object} payload `player-config` 消息。
+       */
+      function applyPlayerUiConfig(payload) {
+        if (!payload || typeof payload !== 'object') {
+          return;
+        }
+
+        uiState.compact = payload.compactControls === true;
+        uiState.autoHide = payload.autoHideControls !== false;
+        document.body.classList.toggle('sp-compact', uiState.compact);
+        if (uiState.compact) {
+          // 紧凑模式本身就是一行，参数层不再单独收起。
+          uiState.paramsCollapsed = false;
+        }
+
+        syncParameterRow();
+        showControls();
       }
 
       /** 销毁当前播放器并释放资源。 */
@@ -1296,7 +1683,7 @@
           markPlaybackStarted(run, candidate, startedAt);
         }).catch(function onFailed(error) {
           logToHost(core.LOG_LEVELS.ERROR, '点击后仍无法播放：' + (error && error.message ? error.message : error));
-          setHintLocked('仍无法开始播放，请回主界面重新点「开始播放」。', 'warn', 8000);
+          setHintLocked('仍无法开始播放，请回主界面重新点「播放」。', 'warn', 8000);
         });
       }
 
@@ -1696,6 +2083,16 @@
           const silenceMs = Date.now() - run.lastPlaybackProgressAt;
           const localBuffer = core.getLocalBufferSeconds(video.buffered, video.currentTime);
           const starved = core.looksStarved(video, localBuffer);
+
+          /*
+            状态行左侧色条：缓冲越小越贴直播（绿），越大说明落后（黄/红）；
+            画面超过 BUFFER_HEALTH_STALL_MS 没前进时一律判红——那正是用户看到的卡住。
+          */
+          setBufferHealth(core.resolveBufferHealth(localBuffer, {
+            paused: state.pausedByUser,
+            playing: Boolean(run.playbackStarted),
+            stalled: starved || silenceMs >= BUFFER_HEALTH_STALL_MS,
+          }), localBuffer);
 
           /*
             把实测到的本地缓冲剩余量记为"实际延迟"，供状态行显示真实数值：
@@ -2203,7 +2600,7 @@
           report(outbound.STATUS, '已继续播放', run, run ? run.currentCandidate : null);
         }).catch(function onFailed(error) {
           logToHost(core.LOG_LEVELS.ERROR, '继续播放失败：' + (error && error.message ? error.message : error));
-          setHintLocked('继续播放失败，请重新点「开始播放」。', 'warn', 8000);
+          setHintLocked('继续播放失败，请重新点「播放」。', 'warn', 8000);
         });
       }
 
@@ -2393,6 +2790,8 @@
           elements.volDisplay.classList.add('hidden');
           document.body.style.cursor = fullscreen ? 'none' : 'default';
           elements.fsBtn.textContent = fullscreen ? '退出全屏' : '全屏';
+          // 进 / 出全屏都把控制条亮出来：刚切过去就淡出会让人以为控件没了。
+          showControls();
 
           /*
             关键：把全屏状态告诉宿主。WebView2 只有在宿主把对应元素标记为全屏元素
@@ -2736,6 +3135,9 @@
           case 'danmaku-state':
             handleDanmakuState(payload);
             break;
+          case 'player-config':
+            applyPlayerUiConfig(payload);
+            break;
           default:
             if (payload.type === 'volume') {
               applyVolume(payload.value);
@@ -2752,6 +3154,8 @@
       }
 
       bindControls();
+      bindControlBarVisibility();
+      syncParameterRow();
       initDanmaku();
       renderTargets({ extremeTargetMs: core.DEFAULT_EXTREME_TARGET_MS });
       applyVolume(core.INITIAL_VOLUME_PERCENT);

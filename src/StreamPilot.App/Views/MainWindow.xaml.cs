@@ -14,7 +14,7 @@ public partial class MainWindow : Window
     private const int StatusRefreshIntervalMs = 1000;
 
     /// <summary>左侧控制面板展开时的宽度（像素）。</summary>
-    private const double ControlPanelWidth = 360;
+    private const double ControlPanelWidth = 380;
 
     /// <summary>播放宿主（在 <c>Loaded</c> 时挂载到占位容器）。</summary>
     private readonly WebPlayerHost _playerHost;
@@ -22,6 +22,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _statusTimer;
     private ShellViewModel? _viewModel;
     private bool _isFullscreen;
+    private bool _panelCollapsed;
     private WindowState _restoreWindowState = WindowState.Normal;
     private WindowStyle _restoreWindowStyle = WindowStyle.SingleBorderWindow;
 
@@ -143,6 +144,7 @@ public partial class MainWindow : Window
             _restoreWindowStyle = WindowStyle;
             ControlPanel.Visibility = Visibility.Collapsed;
             ControlColumn.Width = new GridLength(0);
+            CollapsedPanelRestoreButton.Visibility = Visibility.Collapsed;
             WindowStyle = WindowStyle.None;
             WindowState = WindowState.Normal;
             WindowState = WindowState.Maximized;
@@ -152,11 +154,66 @@ public partial class MainWindow : Window
             WindowState = WindowState.Normal;
             WindowStyle = _restoreWindowStyle;
             WindowState = _restoreWindowState;
-            ControlColumn.Width = new GridLength(ControlPanelWidth);
-            ControlPanel.Visibility = Visibility.Visible;
+            ApplyControlPanelLayout();
         }
 
         _viewModel?.NotifyFullscreenChanged(isFullscreen);
+    }
+
+    /// <summary>
+    /// 顶栏「◀」：收起左侧控制面板（把宽度让给画面），不进入全屏。
+    /// </summary>
+    private void OnToggleControlPanel(object sender, RoutedEventArgs e)
+    {
+        if (_isFullscreen)
+        {
+            return;
+        }
+
+        SetControlPanelCollapsed(!_panelCollapsed);
+    }
+
+    /// <summary>折叠后浮在画面上方的「☰ 控制面板」：恢复展开。</summary>
+    private void OnRestoreControlPanel(object sender, RoutedEventArgs e)
+    {
+        if (_isFullscreen)
+        {
+            return;
+        }
+
+        SetControlPanelCollapsed(false);
+    }
+
+    /// <summary>
+    /// 展开或收起左侧控制面板，并同步折叠后画面上的「展开」入口。
+    /// </summary>
+    /// <param name="collapsed">是否收起。</param>
+    private void SetControlPanelCollapsed(bool collapsed)
+    {
+        if (_panelCollapsed == collapsed)
+        {
+            return;
+        }
+
+        _panelCollapsed = collapsed;
+        ApplyControlPanelLayout();
+    }
+
+    /// <summary>按当前折叠状态摆放左侧面板列与「展开」入口。</summary>
+    private void ApplyControlPanelLayout()
+    {
+        if (_panelCollapsed)
+        {
+            ControlColumn.Width = new GridLength(0);
+            ControlPanel.Visibility = Visibility.Collapsed;
+            CollapsedPanelRestoreButton.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            ControlColumn.Width = new GridLength(ControlPanelWidth);
+            ControlPanel.Visibility = Visibility.Visible;
+            CollapsedPanelRestoreButton.Visibility = Visibility.Collapsed;
+        }
     }
 
     private void OnPlayerInitializationFailed(object? sender, string message)

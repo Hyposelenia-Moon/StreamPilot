@@ -33,6 +33,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private PlatformOption _selectedDefaultPlatform = PlatformOption.All[0];
     private int _volume = PlaybackOptions.DefaultVolume;
     private bool _autoPlayOnResolve = true;
+    private bool _compactControls;
+    private bool _autoHideControls = true;
     private bool _extremePlayback;
     private bool _autoLaunchMpv;
     private bool _danmakuEnabled;
@@ -193,6 +195,20 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         get => _autoPlayOnResolve;
         set => SetField(ref _autoPlayOnResolve, value);
+    }
+
+    /// <summary>紧凑控制条（旧版一行）。</summary>
+    public bool CompactControls
+    {
+        get => _compactControls;
+        set => SetField(ref _compactControls, value);
+    }
+
+    /// <summary>播放中鼠标静止时自动隐藏控制条。</summary>
+    public bool AutoHideControls
+    {
+        get => _autoHideControls;
+        set => SetField(ref _autoHideControls, value);
     }
 
     /// <summary>解析成功后自动外挂 mpv。</summary>
@@ -461,6 +477,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         SelectedDefaultPlatform = PlatformOption.Find(options.DefaultPlatform) ?? PlatformOption.All[0];
         Volume = Clamp(options.Playback.Volume, 0, 100, PlaybackOptions.DefaultVolume);
         AutoPlayOnResolve = options.Playback.AutoPlayOnResolve;
+        CompactControls = options.Playback.CompactControls;
+        AutoHideControls = options.Playback.AutoHideControls;
         ExtremePlayback = options.Playback.Mode == PlaybackMode.Extreme;
         AutoLaunchMpv = options.Playback.AutoLaunchMpv;
 
@@ -580,6 +598,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 Volume = Clamp(Volume, 0, 100, PlaybackOptions.DefaultVolume),
                 AutoPlayOnResolve = AutoPlayOnResolve,
                 AutoLaunchMpv = AutoLaunchMpv,
+                CompactControls = CompactControls,
+                AutoHideControls = AutoHideControls,
             },
             Danmaku = (baseOptions.Danmaku with
             {

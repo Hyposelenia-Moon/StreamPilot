@@ -579,7 +579,10 @@ test('播放页不再包含顶部提示元素，且播放按钮顺序为 开始 
 
   assert.equal(html.includes('#statusLine'), true, '画面下方的状态行保留');
   const statusRule = html.slice(html.indexOf('#statusLine {'), html.indexOf('}', html.indexOf('#statusLine {')));
-  assert.equal(statusRule.includes('color: #2f6feb'), true, '状态行自身用主题强调蓝（AccentBrush）而不是灰字');
+  assert.equal(
+    statusRule.includes('color: var(--sp-color-accent)'),
+    true,
+    '状态行自身用主题强调蓝（AccentBrush）而不是灰字，色值取设计令牌');
 });
 
 test('formatPlaybackStatusText 状态行不显示候选主机名', () => {
@@ -813,21 +816,124 @@ test('布局探针必须按真实运行态填充档位与画质下拉，并保�
   assert.equal(probe.includes('collisions='), true, '探针输出必须直接给出碰撞对');
 });
 
-test('底部控制条允许换行且不得用绝对定位把控件叠在一起', () => {
+test('底部控制条分层：主控层常驻、参数层可收起，且任何控件都不得绝对定位叠在一起', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
   const controlsRule = extractRule(html, '#controls');
+  const rowRule = extractRule(html, '.controlRow');
 
   assert.equal(/display:\s*flex/.test(controlsRule), true, '控制条必须是 flex 容器');
-  assert.equal(/flex-wrap:\s*wrap/.test(controlsRule), true, '控制条必须允许换行，宽度不够时换行而不是把控件压到彼此身上');
-  assert.equal(/row-gap:\s*\d/.test(controlsRule), true, '换行后必须有行间距，行与行不能贴着（堆叠感）');
+  assert.equal(/flex-direction:\s*column/.test(controlsRule), true, '默认布局是主控层 / 参数层上下两层');
   assert.equal(/position:\s*(absolute|fixed)/.test(controlsRule), false, '控制条自身不能绝对定位');
 
-  // 全屏与其他控件同行排列（不用 margin-left:auto 独占行尾，否则会被挤到下一行）。
-  assert.equal(/margin-left:\s*auto/.test(extractRule(html, '#fsBtn')), false, '全屏按钮不得用 auto 外边距独占行尾（会挤到下一行）');
+  assert.equal(/flex-wrap:\s*wrap/.test(rowRule), true, '每一层都必须允许换行，宽度不够时换行而不是把控件压到彼此身上');
+  assert.equal(/row-gap:\s*[^;]+/.test(rowRule), true, '换行后必须有行间距，行与行不能贴着（堆叠感）');
 
-  // 控制条里任何控件都不许绝对定位到别的控件上面。
-  const children = html.slice(html.indexOf('<div id="controls">'), html.indexOf('<div id="statusLine">'));
+  // 紧凑模式（旧版一行）把两层摊平：display: contents 让子控件直接成为 #controls 的 flex 项。
+  const compactRule = extractRule(html, 'body.sp-compact .controlRow');
+  assert.equal(/display:\s*contents/.test(compactRule), true, '紧凑模式必须摊平两层，否则不会回到旧版一行布局');
+  const compactControls = extractRule(html, 'body.sp-compact #controls');
+  assert.equal(/flex-direction:\s*row/.test(compactControls), true, '紧凑模式下控制条要横排');
+  assert.equal(/flex-wrap:\s*wrap/.test(compactControls), true, '紧凑模式仍要允许换行');
+
+  // 主控层 / 参数层各放什么：线路与追帧属"调一次就不动"的参数，不能挤占主控层。
+  const primary = html.slice(html.indexOf('<div id="primaryRow"'), html.indexOf('<div id="paramRow"'));
+  const param = html.slice(html.indexOf('<div id="paramRow"'), html.indexOf('<div id="statusBar"'));
+
+  ['playBtn', 'pauseBtn', 'stopBtn', 'volume', 'danmakuBtn', 'qualitySelect', 'fsBtn'].forEach((id) => {
+    assert.equal(primary.includes('id="' + id + '"'), true, id + ' 必须留在主控层（高频操作）');
+  });
+
+  ['lineSelect', 'targetSelect', 'chaseBtn'].forEach((id) => {
+    assert.equal(param.includes('id="' + id + '"'), true, id + ' 必须收进参数层');
+    assert.equal(primary.includes('id="' + id + '"'), false, id + ' 不得再出现在主控层');
+  });
+
+  // 主控层结构：全屏仍在行尾，且不用 auto 外边距独占行尾（会挤到下一行）。
+  assert.equal(/margin-left:\s*auto/.test(extractRule(html, '#fsBtn')), false, '全屏按钮不得用 auto 外边距独占行尾');
+
+  // 控制区里任何控件都不许绝对定位到别的控件上面。
+  const children = html.slice(html.indexOf('<div id="controls">'), html.indexOf('<div id="statusBar"'));
   assert.equal(/position:\s*absolute/.test(children), false, '控制条内部不得用绝对定位摆放控件（那正是重叠的成因）');
+});
+
+test('控制条支持播放中自动隐藏，且提供「参数层收起」开关', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+
+  // 隐藏态：整条淡出且不接收鼠标（否则看不见的按钮还能被点到）。
+  const hiddenRule = extractRule(html, 'footer.sp-controls-hidden');
+  assert.equal(/opacity:\s*0(?:[;\s]|$)/.test(hiddenRule), true, '隐藏态必须淡出到完全透明');
+  assert.equal(/pointer-events:\s*none/.test(hiddenRule), true, '隐藏态必须同时关掉鼠标事件');
+
+  // 只允许在"真的在播"时隐藏：暂停 / 空闲 / 指针停在条上都不能隐藏。
+  assert.equal(html.includes('function canAutoHideControls'), true);
+  const canHide = html.slice(html.indexOf('function canAutoHideControls'), html.indexOf('function showControls'));
+  assert.equal(canHide.includes('!uiState.pointerInside'), true, '指针停在控制条上时不得隐藏');
+  assert.equal(canHide.includes('!state.pausedByUser'), true, '用户暂停时不得隐藏控制条');
+  assert.equal(canHide.includes('PLAYBACK_PHASES.PLAYING'), true, '只有播放阶段才允许自动隐藏');
+
+  // 参数层收起：按钮 + 收起态样式 + 通知无障碍技术的 aria-expanded。
+  assert.equal(html.includes('id="paramToggle"'), true, '参数层必须有收起开关');
+  assert.equal(html.includes('aria-expanded'), true, '收起开关必须同步 aria-expanded');
+  const collapsedRule = extractRule(html, '#paramRow.sp-collapsed');
+  assert.equal(/display:\s*none/.test(collapsedRule), true, '收起后参数层必须真正隐藏');
+});
+
+test('状态行带缓冲健康度色条，失败提示额外用 toast 显示', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+
+  assert.equal(html.includes('id="healthBar"'), true, '状态行左侧必须有健康度色条');
+  ['good', 'warn', 'bad'].forEach((health) => {
+    assert.equal(
+      html.includes('#healthBar[data-health="' + health + '"]'),
+      true,
+      '健康度 ' + health + ' 必须有对应颜色规则');
+  });
+
+  assert.equal(html.includes('id="toast"'), true, '右下角必须有 toast 浮层');
+  const toastRule = extractRule(html, '#toast');
+  assert.equal(/position:\s*absolute/.test(toastRule), true, 'toast 浮在画面之上');
+  assert.equal(/pointer-events:\s*none/.test(toastRule), true, 'toast 不能拦住鼠标');
+
+  // 状态行仍然保留（toast 只是加一层，不是替代）：宿主消息过期后要回落到播放状态。
+  assert.equal(html.includes('id="statusLine"'), true);
+  assert.equal(html.includes('TOAST_DURATION_MS'), true, 'toast 必须自动消失');
+});
+
+test('resolveBufferHealth：缓冲越小越贴直播，暂停 / 空闲 / 停滞各有明确取值', () => {
+  const { BUFFER_HEALTH } = core;
+
+  assert.equal(core.resolveBufferHealth(0.2, { playing: true }), BUFFER_HEALTH.GOOD, '缓冲 0.2s 贴着直播');
+  assert.equal(core.resolveBufferHealth(0.999, { playing: true }), BUFFER_HEALTH.GOOD);
+  assert.equal(core.resolveBufferHealth(1, { playing: true }), BUFFER_HEALTH.WARN, '1s 是黄条下界');
+  assert.equal(core.resolveBufferHealth(3, { playing: true }), BUFFER_HEALTH.WARN, '3s 仍是黄条');
+  assert.equal(core.resolveBufferHealth(3.01, { playing: true }), BUFFER_HEALTH.BAD, '超过 3s 判红');
+  assert.equal(core.resolveBufferHealth(120, { playing: true }), BUFFER_HEALTH.BAD);
+
+  assert.equal(core.resolveBufferHealth(0.2, { playing: true, stalled: true }), BUFFER_HEALTH.BAD,
+    '画面停滞时缓冲再小也是红条');
+  assert.equal(core.resolveBufferHealth(0.2, { playing: true, paused: true }), BUFFER_HEALTH.IDLE,
+    '用户暂停后不假装健康');
+  assert.equal(core.resolveBufferHealth(0.2, { playing: false }), BUFFER_HEALTH.IDLE, '没在播就是灰条');
+  assert.equal(core.resolveBufferHealth(null, { playing: true }), BUFFER_HEALTH.IDLE, '取不到缓冲时不猜');
+  assert.equal(core.resolveBufferHealth(Number.NaN, { playing: true }), BUFFER_HEALTH.IDLE);
+  assert.equal(core.resolveBufferHealth(undefined, { playing: true }), BUFFER_HEALTH.IDLE);
+  assert.equal(core.resolveBufferHealth(0.2, undefined), BUFFER_HEALTH.IDLE, '缺省 options 时按"没在播"处理');
+
+  assert.equal(core.BUFFER_HEALTH_WARN_SECONDS, 1);
+  assert.equal(core.BUFFER_HEALTH_BAD_SECONDS, 3);
+});
+
+test('界面配置由宿主下发：紧凑布局与自动隐藏都不在页面里写死', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+
+  assert.equal(html.includes("case 'player-config':"), true, '页面必须处理 player-config 消息');
+  assert.equal(html.includes('function applyPlayerUiConfig'), true);
+  const apply = html.slice(html.indexOf('function applyPlayerUiConfig'), html.indexOf('/** 销毁当前播放器'));
+  assert.equal(apply.includes('payload.compactControls === true'), true, '紧凑布局必须只在宿主明确下发 true 时打开');
+  assert.equal(apply.includes('payload.autoHideControls !== false'), true, '自动隐藏缺省为开，只有明确 false 才关');
+
+  // 页面自己不能硬编码这两个开关，否则设置改了不生效。
+  assert.equal(html.includes('localStorage'), false, '页面不得自行持久化界面开关');
 });
 
 test('状态行过长时用省略号收敛，不得溢出盖住控件', () => {
@@ -852,9 +958,10 @@ test('退出全屏不把已在播放的提示重新显示成空态', () => {
   assert.equal(core.shouldHideHint(null), false);
 });
 
-test('空态提示指向播放页底部的「开始播放」', () => {
+test('空态提示指向播放页底部的「播放」按钮', () => {
   assert.equal(core.EMPTY_HINT_TITLE, '等待直播源');
-  assert.equal(core.EMPTY_HINT_ACTION.includes('开始播放'), true);
+  assert.equal(core.EMPTY_HINT_ACTION.includes('「播放」'), true, '提示里的按钮名必须与控制条上的文案逐字一致');
+  assert.equal(core.EMPTY_HINT_ACTION.includes('「开始播放」'), false, '按钮已改名为「播放」，提示不得再写旧名');
   assert.equal(core.EMPTY_HINT_ACTION.includes('下方'), true, '按钮在播放页底部，必须说清楚位置');
   assert.equal(core.AUTOPLAY_BLOCKED_HINT.includes('点一下画面'), true, '自动播放被拦时给出可执行的下一步');
 });

@@ -113,6 +113,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>宿主 → 播放页：弹幕连接状态同步。</summary>
     private const string HostDanmakuStateType = "danmaku-state";
 
+    /// <summary>宿主 → 播放页：播放页外观配置（紧凑控制条 / 自动隐藏）。</summary>
+    private const string HostPlayerConfigType = "player-config";
+
     /// <summary>页面 → 宿主：用户切换弹幕显示开关。</summary>
     private const string PlayerDanmakuToggleType = "danmaku-toggle";
 
@@ -650,6 +653,8 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                     // 页面刚加载完还不知道弹幕开关与显示参数：先同步一次配置，
                     // 否则按钮要等到第一条弹幕到达才会亮起来。
                     SendDanmakuConfig();
+                    // 外观配置（紧凑控制条 / 自动隐藏）同样在就绪时同步一次。
+                    SendPlayerUiConfig();
                     break;
 
                 case PlayerTelemetryType:
@@ -1589,6 +1594,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             RefreshBridgeStatus();
             SendToPlayer(new { type = "volume", value = _options.Playback.Volume });
             ApplyDanmakuSettingsFromSettings();
+            SendPlayerUiConfig();
 
             StatusMessage = "设置已保存。";
             AppendLog("设置已保存");
@@ -2453,6 +2459,24 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         {
             _logger.LogError(LogLevel.Warn, "App.Shell", "断开弹幕连接失败。", exception);
         }
+    }
+
+    /// <summary>
+    /// 把播放页外观配置下发给播放页（紧凑控制条 / 自动隐藏）。
+    /// </summary>
+    /// <remarks>
+    /// 与弹幕配置一样只在「播放器就绪」与「设置保存」两个时机下发；外观开关不会随播放会话变化，
+    /// 没有必要塞进每条消息里。
+    /// </remarks>
+    private void SendPlayerUiConfig()
+    {
+        PlaybackOptions playback = _options.Playback;
+        SendToPlayer(new
+        {
+            type = HostPlayerConfigType,
+            compactControls = playback.CompactControls,
+            autoHideControls = playback.AutoHideControls,
+        });
     }
 
     /// <summary>

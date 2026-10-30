@@ -76,6 +76,12 @@ public sealed record PlaybackOptions
 
     /// <summary>解析成功后是否自动开始播放。</summary>
     public bool AutoPlayOnResolve { get; init; } = true;
+
+    /// <summary>紧凑控制条（旧版一行）：为 true 时播放页把主控层与参数层摊平成一行。</summary>
+    public bool CompactControls { get; init; }
+
+    /// <summary>播放中鼠标静止时自动隐藏控制条（默认开启；全屏下最需要）。</summary>
+    public bool AutoHideControls { get; init; } = true;
 }
 
 /// <summary>弹幕设置。</summary>

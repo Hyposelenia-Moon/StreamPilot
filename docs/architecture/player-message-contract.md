@@ -245,6 +245,23 @@
 `enabled=false` 表示用户没有启用弹幕（默认）——此时按钮仍可点，点一下等于"开启"：
 页面发 `danmaku-toggle{visible:true}`，宿主把总开关置为开启并持久化。
 
+### 1.13 `player-config`
+
+```json
+{
+  "type": "player-config",
+  "compactControls": false,
+  "autoHideControls": true
+}
+```
+
+**下发时机**同 `danmaku-config`：播放器就绪（`player-ready`）与设置保存。页面据此决定：
+
+- `compactControls`（布尔）：`true` 时播放页把「主控层 / 参数层」摊平成一行（旧版布局）；`false`（默认）时分两层。
+- `autoHideControls`（布尔）：播放中鼠标静止约 3 秒后淡出控制条；`false` 时控制条常驻。缺省按 `true` 处理（页面只在明确 `false` 时关闭）。
+
+这两个开关只在宿主的 `PlaybackOptions` 里持久化，页面**不**用 `localStorage` 自行保存——避免两处状态漂移。
+
 ---
 
 ## 2. 页面 → 宿主

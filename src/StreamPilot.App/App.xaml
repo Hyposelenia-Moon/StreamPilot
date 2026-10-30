@@ -95,6 +95,70 @@
         <Setter Property="Padding" Value="12" />
       </Style>
 
+      <!-- 左侧面板的 Tab 切换（预设 / 直播源 / 录制）：去掉系统默认的灰色选项卡，改用下划线的分段样式 -->
+      <Style x:Key="ControlTabControl" TargetType="TabControl">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="TabControl">
+              <Grid KeyboardNavigation.TabNavigation="Local">
+                <Grid.RowDefinitions>
+                  <RowDefinition Height="Auto" />
+                  <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <TabPanel Grid.Row="0"
+                          IsItemsHost="True"
+                          Background="{StaticResource PanelBackgroundBrush}"
+                          Margin="14,0" />
+                <Border Grid.Row="1"
+                        Background="Transparent"
+                        BorderBrush="{StaticResource BorderBrushSoft}"
+                        BorderThickness="0,1,0,0">
+                  <ContentPresenter ContentSource="SelectedContent" />
+                </Border>
+              </Grid>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+
+      <Style x:Key="ControlTabItem" TargetType="TabItem">
+        <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="Padding" Value="18,10" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="TabItem">
+              <Border x:Name="Root"
+                      Background="Transparent"
+                      BorderBrush="Transparent"
+                      BorderThickness="0,0,0,2"
+                      Padding="{TemplateBinding Padding}">
+                <ContentPresenter x:Name="Header"
+                                  ContentSource="Header"
+                                  HorizontalAlignment="Center"
+                                  VerticalAlignment="Center"
+                                  TextElement.Foreground="{TemplateBinding Foreground}"
+                                  TextElement.FontWeight="Normal" />
+              </Border>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                  <Setter TargetName="Header" Property="TextElement.Foreground" Value="{StaticResource AccentStrongBrush}" />
+                </Trigger>
+                <Trigger Property="IsSelected" Value="True">
+                  <Setter TargetName="Root" Property="BorderBrush" Value="{StaticResource AccentStrongBrush}" />
+                  <Setter TargetName="Header" Property="TextElement.Foreground" Value="{StaticResource AccentStrongBrush}" />
+                  <Setter TargetName="Header" Property="TextElement.FontWeight" Value="SemiBold" />
+                </Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+
       <!-- 按钮 -->
       <Style TargetType="Button">
         <Setter Property="Background" Value="{StaticResource ControlBackgroundBrush}" />

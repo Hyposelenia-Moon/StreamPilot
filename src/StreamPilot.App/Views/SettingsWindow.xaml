@@ -92,6 +92,12 @@
                           ToolTip="关闭时使用稳定缓冲（默认，建议）；开启后延迟压到 250ms 以内，缓冲超过阈值会硬跳到直播边缘" />
                 <CheckBox Content="解析成功后自动开始播放" IsChecked="{Binding AutoPlayOnResolve}"
                           Style="{StaticResource SettingFieldCheck}" />
+                <CheckBox Content="播放中鼠标静止时自动隐藏控制条" IsChecked="{Binding AutoHideControls}"
+                          Style="{StaticResource SettingFieldCheck}"
+                          ToolTip="播放中鼠标不动约 3 秒后淡出控制条，鼠标一动即恢复；关闭后控制条常驻" />
+                <CheckBox Content="紧凑控制条（旧版一行）" IsChecked="{Binding CompactControls}"
+                          Style="{StaticResource SettingFieldCheck}"
+                          ToolTip="把线路、追帧参数与播放/画质/全屏摊平成一行（旧版布局）；关闭时参数收进第二行" />
                 <CheckBox Content="解析成功后自动调用 mpv 播放" IsChecked="{Binding AutoLaunchMpv}"
                           Style="{StaticResource SettingFieldCheck}" Margin="0" />
               </StackPanel>

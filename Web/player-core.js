@@ -242,7 +242,7 @@ const INITIAL_VOLUME_PERCENT = 30;
 const EMPTY_HINT_TITLE = '等待直播源';
 
 /** 空态提示里的操作指引：真正要点的按钮在播放页底部，不在别处。 */
-const EMPTY_HINT_ACTION = '点下方「开始播放」即可观看';
+const EMPTY_HINT_ACTION = '点下方「播放」即可观看';
 
 /** 自动播放被浏览器策略拦截时的提示（需要用户先与页面交互一次）。 */
 const AUTOPLAY_BLOCKED_HINT = '浏览器暂时拦住了自动播放，点一下画面即可开始播放。';
@@ -950,13 +950,73 @@ function getLocalBufferSeconds(buffered, currentTime) {
   return Math.max(0, buffered.end(last) - Number(currentTime));
 }
 
+/** 缓冲健康度的分档阈值（秒）：低于 {@link BUFFER_HEALTH_WARN_SECONDS} 视为贴着直播。 */
+const BUFFER_HEALTH_WARN_SECONDS = 1;
+
+/** 缓冲健康度上限阈值（秒）：超过 {@link BUFFER_HEALTH_BAD_SECONDS} 视为落后直播太多。 */
+const BUFFER_HEALTH_BAD_SECONDS = 3;
+
+/**
+ * 缓冲健康度取值（与播放页 `#healthBar` 的 `data-health` 一一对应）。
+ * @enum {string}
+ */
+const BUFFER_HEALTH = Object.freeze({
+  /** 没有在播（空闲 / 用户暂停）：灰条，不假装健康。 */
+  IDLE: 'idle',
+  /** 缓冲 < 1 s：绿条，贴着直播。 */
+  GOOD: 'good',
+  /** 缓冲 1–3 s：黄条，稍有滞后。 */
+  WARN: 'warn',
+  /** 缓冲 > 3 s 或画面停滞：红条，需要追帧 / 重连。 */
+  BAD: 'bad',
+});
+
+/**
+ * 由本地缓冲剩余量判定缓冲健康度（状态行左侧色条的颜色来源）。
+ *
+ * 直播场景里"缓冲越少越贴直播"，所以小缓冲是健康、大缓冲反而是滞后；
+ * 画面停滞（`stalled`）时不论缓冲多少都判红——那正是用户看到的卡住。
+ * 判定顺序固定为：暂停 → 未在播 → 取不到缓冲 → 停滞 → 阈值，避免两个条件互相覆盖。
+ * @param {number|null} bufferSeconds 本地缓冲剩余秒数（见 {@link getLocalBufferSeconds}）。
+ * @param {{paused?:boolean,playing?:boolean,stalled?:boolean}} [options] 运行状态。
+ * @returns {string} {@link BUFFER_HEALTH} 之一。
+ */
+function resolveBufferHealth(bufferSeconds, options) {
+  const opts = options || {};
+  if (opts.paused) {
+    return BUFFER_HEALTH.IDLE;
+  }
+
+  if (!opts.playing) {
+    return BUFFER_HEALTH.IDLE;
+  }
+
+  if (bufferSeconds === null || bufferSeconds === undefined) {
+    return BUFFER_HEALTH.IDLE;
+  }
+
+  const ahead = Number(bufferSeconds);
+  if (!Number.isFinite(ahead)) {
+    return BUFFER_HEALTH.IDLE;
+  }
+
+  if (opts.stalled) {
+    return BUFFER_HEALTH.BAD;
+  }
+
+  if (ahead > BUFFER_HEALTH_BAD_SECONDS) {
+    return BUFFER_HEALTH.BAD;
+  }
+
+  return ahead >= BUFFER_HEALTH_WARN_SECONDS ? BUFFER_HEALTH.WARN : BUFFER_HEALTH.GOOD;
+}
+
 /**
  * 判断是否处于缓冲饥饿状态。
  * @param {{readyState:number}} video 视频元素状态快照。
  * @param {number|null} localBufferSeconds 本地缓冲剩余秒数。
  * @returns {boolean} 饥饿返回 true。
- */
-function looksStarved(video, localBufferSeconds) {
+ */function looksStarved(video, localBufferSeconds) {
   if (!video) {
     return true;
   }
@@ -1807,6 +1867,10 @@ const StreamPilotPlayerCore = {
   computeChaseTargetSeconds,
   hasProgressed,
   getLocalBufferSeconds,
+  resolveBufferHealth,
+  BUFFER_HEALTH,
+  BUFFER_HEALTH_WARN_SECONDS,
+  BUFFER_HEALTH_BAD_SECONDS,
   looksStarved,
   shouldProbeCandidate,
   getStartupTimeoutMs,
