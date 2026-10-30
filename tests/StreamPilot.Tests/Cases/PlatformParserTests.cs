@@ -635,6 +635,48 @@ public sealed class PlatformParserTests
         Assert.Null(BilibiliParser.TryParseRoomBaseInfo(emptyIndex.RootElement, "814"), "索引为空时应返回 null");
     }
 
+    /// <summary>B站：getRoomBaseInfo 批量响应能遍历每个房间，并保留真实号与短号供对齐。</summary>
+    /// <remarks>
+    /// 批量开播检测的核心：一次 <c>room_ids=a,b</c> 查回多个房间，<c>by_room_ids</c> 的键是真实号，
+    /// 短号在 <c>short_id</c> 字段里，两者都要读出来才能把结果对齐回请求的房间号。
+    /// </remarks>
+    [TestMethod("B站：getRoomBaseInfo 批量解析多房间并保留短号")]
+    public void BilibiliParsesRoomBaseInfoBatch()
+    {
+        const string BatchResponse =
+            """
+            { "code": 0, "data": { "by_room_ids": {
+                "856077": { "room_id": 856077, "short_id": 814, "live_status": 1,
+                    "title": "A", "uname": "主播A", "area_name": "分区A" },
+                "12345": { "room_id": 12345, "short_id": 0, "live_status": 0,
+                    "title": "B", "uname": "主播B", "area_name": "分区B" } } } }
+            """;
+
+        using JsonDocument document = JsonDocument.Parse(BatchResponse);
+        IReadOnlyList<BilibiliParser.RoomInfoSnapshot> snapshots =
+            BilibiliParser.TryParseRoomBaseInfoBatch(document.RootElement);
+
+        Assert.Equal(2, snapshots.Count, "两个房间都应被解析");
+        Assert.Equal("856077", snapshots[0].RoomId);
+        Assert.Equal("814", snapshots[0].ShortId, "短号必须从 short_id 字段读出来");
+        Assert.Equal(1, snapshots[0].LiveStatus);
+        Assert.Equal("主播A", snapshots[0].Anchor);
+        Assert.Equal("12345", snapshots[1].RoomId);
+        Assert.Null(snapshots[1].ShortId, "short_id=0 视为未给出");
+        Assert.Equal(0, snapshots[1].LiveStatus);
+    }
+
+    /// <summary>B站：getRoomBaseInfo 批量结构异常（data 缺失 / 索引改名）时返回空列表，不抛异常。</summary>
+    [TestMethod("B站：getRoomBaseInfo 批量结构异常时安全返回空列表")]
+    public void BilibiliRoomBaseInfoBatchToleratesStructureChanges()
+    {
+        using JsonDocument noData = JsonDocument.Parse("""{ "code": 0, "message": "OK" }""");
+        Assert.Equal(0, BilibiliParser.TryParseRoomBaseInfoBatch(noData.RootElement).Count, "缺少 data 应返回空列表");
+
+        using JsonDocument renamedIndex = JsonDocument.Parse("""{ "code": 0, "data": { "rooms": { "856077": { "live_status": 1 } } } }""");
+        Assert.Equal(0, BilibiliParser.TryParseRoomBaseInfoBatch(renamedIndex.RootElement).Count, "索引字段改名应返回空列表");
+    }
+
     /// <summary>B站（回归 ①）：<c>g_qn_desc</c> 为空或字段改名时，档位必须回退到 <c>accept_qn</c>，不能整条解析失败。</summary>
     [TestMethod("B站：g_qn_desc 为空时回退 accept_qn")]
     public void BilibiliFallsBackToAcceptedQualitiesWhenDescriptionsMissing()

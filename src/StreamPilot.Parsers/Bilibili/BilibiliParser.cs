@@ -2056,6 +2056,7 @@ internal sealed class BilibiliParser : PlatformParserBase, IBatchStatusParser
     /// 接口声明的直播状态；房间信息接口未给出该字段时为 <see cref="LiveStatusUnknown"/>
     /// （此时不得据此判定"未开播"，只能由播放接口的 <c>live_status</c> 决定）。
     /// </param>
+    /// <param name="ShortId">短号（用于把真实号对齐回请求的短号）；接口未给出时为 <see langword="null"/>。</param>
     internal sealed record RoomInfoSnapshot(
         string RoomId,
         string Title,

@@ -13,6 +13,7 @@ using StreamPilot.Core.Models;
 /// <param name="Name">显示名（例如主播名）。</param>
 /// <param name="Platform">所属平台。</param>
 /// <param name="RoomInput">房间号或直播间链接。</param>
+/// <param name="AutoRecord">是否在检测到开播时自动开始录制（默认关闭）。</param>
 /// <remarks>
 /// 预设的**身份**是 <see cref="Platform"/> + <see cref="Name"/>：同一个主播可能同时在多个平台开播，
 /// 因此"同名"不等于"同一条"；而 <see cref="RoomInput"/> 会随房间号变化（短号跳转、用户换房间），
