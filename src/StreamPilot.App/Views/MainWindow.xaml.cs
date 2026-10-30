@@ -90,6 +90,7 @@ public partial class MainWindow : Window
         {
             // 先取消后台的预设开播检测，避免回调打到已经开始释放的界面。
             _viewModel.CancelPresetChecks();
+            _viewModel.Shutdown();
             _viewModel.SendMessageRequested -= OnSendMessageRequested;
             _viewModel.FullscreenChanged -= OnFullscreenChanged;
         }

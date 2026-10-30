@@ -8,6 +8,7 @@ using StreamPilot.Core.Http;
 using StreamPilot.Core.Logging;
 using StreamPilot.Core.Models;
 using StreamPilot.Core.Parsers;
+using StreamPilot.Core.Services;
 using StreamPilot.Core.Utilities;
 
 /// <summary>
@@ -23,7 +24,7 @@ using StreamPilot.Core.Utilities;
 /// 画质由响应中的 current_qn / accept_qn 推导，签名参数 expires 写入候选有效期；
 /// Cookie 仅在调用方提供时注入，且永不写入日志（日志只写指纹或脱敏后的地址）。
 /// </remarks>
-internal sealed class BilibiliParser : PlatformParserBase
+internal sealed class BilibiliParser : PlatformParserBase, IBatchStatusParser
 {
     /// <summary>日志模块名。</summary>
     private const string ModuleName = "Parsers.Bilibili";
@@ -193,6 +194,9 @@ internal sealed class BilibiliParser : PlatformParserBase
 
     /// <summary>getRoomBaseInfo 响应里的主播名字段名。</summary>
     private const string AnchorField = "uname";
+
+    /// <summary>getRoomBaseInfo 响应里的短号字段名（用于把真实号对齐回请求的短号）。</summary>
+    private const string ShortIdField = "short_id";
 
     /// <summary>getRoomBaseInfo 响应里的分区名字段名。</summary>
     private const string AreaNameField = "area_name";
@@ -707,6 +711,140 @@ internal sealed class BilibiliParser : PlatformParserBase
         }
 
         return null;
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<RoomStatus>> QueryRoomStatusesAsync(
+        IReadOnlyList<string> roomIds,
+        string? cookie,
+        CancellationToken cancellationToken)
+    {
+        if (roomIds.Count == 0)
+        {
+            return [];
+        }
+
+        HttpRequestSpec spec = new()
+        {
+            Url = string.Concat(RoomBaseInfoUrlPrefix, string.Join(',', roomIds), RoomBaseInfoQuerySuffix),
+            Platform = PlatformId.Bilibili,
+            Operation = OperationGetRoomBaseInfo,
+            Headers = BuildApiHeaders(cookie),
+        };
+
+        try
+        {
+            using JsonDocument document = await _http.GetJsonAsync(spec, cancellationToken).ConfigureAwait(false);
+            return AlignBatchRoomStatuses(document.RootElement, roomIds);
+        }
+        catch (Exception exception) when (exception is ResolveException or JsonException or InvalidOperationException)
+        {
+            Logger.Warn(ModuleName, "批量查询房间状态失败。", new Dictionary<string, object?>
+            {
+                ["roomIds"] = string.Join(',', roomIds),
+                ["detail"] = exception.Message,
+            });
+
+            return roomIds.Select(id => RoomStatus.FromError(id, "批量查询失败：" + exception.Message)).ToList();
+        }
+    }
+
+    /// <summary>
+    /// 把 getRoomBaseInfo 批量响应对齐回请求的房间号列表（真实号与短号都能对上）。
+    /// </summary>
+    /// <param name="root">接口响应根节点。</param>
+    /// <param name="roomIds">请求的房间号列表。</param>
+    /// <returns>与 <paramref name="roomIds"/> 一一对应的状态快照。</returns>
+    private static IReadOnlyList<RoomStatus> AlignBatchRoomStatuses(JsonElement root, IReadOnlyList<string> roomIds)
+    {
+        IReadOnlyList<RoomInfoSnapshot> snapshots = TryParseRoomBaseInfoBatch(root);
+        List<RoomStatus> results = new(roomIds.Count);
+        foreach (string requested in roomIds)
+        {
+            RoomInfoSnapshot? match = snapshots.FirstOrDefault(snapshot =>
+                string.Equals(snapshot.RoomId, requested, StringComparison.Ordinal)
+                || string.Equals(snapshot.ShortId, requested, StringComparison.Ordinal));
+
+            results.Add(match is null
+                ? RoomStatus.FromError(requested, "房间不存在或接口未返回该房间。")
+                : new RoomStatus
+                {
+                    RoomId = requested,
+                    Status = MapLiveStatus(match.LiveStatus),
+                    Anchor = match.Anchor,
+                    Title = match.Title,
+                    Error = string.Empty,
+                });
+        }
+
+        return results;
+    }
+
+    /// <summary>把 B站的 <c>live_status</c> 整数映射为统一的直播状态枚举。</summary>
+    /// <param name="liveStatus">B站 live_status（0/1/2，未知为 -1）。</param>
+    /// <returns>统一的直播状态枚举。</returns>
+    private static LiveStatusKind MapLiveStatus(int liveStatus) => liveStatus switch
+    {
+        LiveStatusLive => LiveStatusKind.Live,
+        LiveStatusReplaying => LiveStatusKind.Replaying,
+        LiveStatusOffline => LiveStatusKind.Offline,
+        _ => LiveStatusKind.Unknown,
+    };
+
+    /// <summary>
+    /// 从 getRoomBaseInfo 批量响应中读取全部房间信息（纯函数，便于离线用例覆盖字段路径）。
+    /// </summary>
+    /// <param name="root">接口响应根节点。</param>
+    /// <returns>房间信息快照列表；结构不符合预期时返回空列表。</returns>
+    /// <remarks>
+    /// 与 <see cref="TryParseRoomBaseInfo"/>（单房间）的区别：单房间版取第一条即可，
+    /// 批量版要遍历 <c>by_room_ids</c> 的每个键，并把真实号（<c>room_id</c>）与短号（<c>short_id</c>）
+    /// 都保留下来，供调用方把结果对齐回请求的房间号。
+    /// </remarks>
+    internal static IReadOnlyList<RoomInfoSnapshot> TryParseRoomBaseInfoBatch(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object
+            || !TryReadInt32(root, "code", out int code)
+            || code != 0
+            || !TryReadProperty(root, "data", out JsonElement data)
+            || !TryReadProperty(data, RoomIdsIndexField, out JsonElement byRoomIds)
+            || byRoomIds.ValueKind != JsonValueKind.Object)
+        {
+            return [];
+        }
+
+        List<RoomInfoSnapshot> snapshots = [];
+        foreach (JsonProperty entry in byRoomIds.EnumerateObject())
+        {
+            JsonElement room = entry.Value;
+            if (room.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            string roomId = TryReadInt64(room, RoomIdField, out long reportedRoomId) && reportedRoomId > 0
+                ? reportedRoomId.ToString(CultureInfo.InvariantCulture)
+                : entry.Name;
+
+            string? shortId = TryReadInt64(room, ShortIdField, out long reportedShortId) && reportedShortId > 0
+                ? reportedShortId.ToString(CultureInfo.InvariantCulture)
+                : null;
+
+            int liveStatus = TryReadInt32(room, LiveStatusPropertyName, out int status)
+                ? status
+                : LiveStatusUnknown;
+
+            snapshots.Add(new RoomInfoSnapshot(
+                roomId,
+                ReadOptionalString(room, "title") ?? string.Empty,
+                ReadOptionalString(room, AnchorField) ?? string.Empty,
+                ReadOptionalString(room, AreaNameField) ?? string.Empty,
+                ReadOptionalString(room, "cover"),
+                liveStatus,
+                shortId));
+        }
+
+        return snapshots;
     }
 
     /// <summary>
@@ -1924,5 +2062,6 @@ internal sealed class BilibiliParser : PlatformParserBase
         string Anchor,
         string Category,
         string? CoverUrl,
-        int LiveStatus = LiveStatusUnknown);
+        int LiveStatus = LiveStatusUnknown,
+        string? ShortId = null);
 }

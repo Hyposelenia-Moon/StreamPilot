@@ -20,6 +20,20 @@ public interface IRoomResolver
     Task<ResolveOutcome> ResolveAsync(RoomQuery query, CancellationToken cancellationToken, bool bypassCache = false);
 
     /// <summary>
+    /// 批量查询多个房间的开播状态（不拉播放地址，用于预设开播检测）。
+    /// </summary>
+    /// <param name="queries">待查询的房间（按传入顺序返回结果）。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>与 <paramref name="queries"/> 一一对应的状态快照；单项失败时返回带错误原因的结果，不抛异常。</returns>
+    /// <remarks>
+    /// 支持批量查询的平台（B站 <c>getRoomBaseInfo</c>）用一次请求查完，其余平台逐房间降级到完整解析；
+    /// 实现方保证返回顺序与输入顺序一致，调用方据此把结果写回对应预设。
+    /// </remarks>
+    Task<IReadOnlyList<RoomStatus>> ResolveRoomStatusesAsync(
+        IReadOnlyList<RoomQuery> queries,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// 清空解析缓存，强制下一次解析重新请求平台。
     /// </summary>
     void InvalidateCache();

@@ -122,14 +122,11 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>页面 → 宿主：用户在失败状态点重试弹幕连接。</summary>
     private const string PlayerDanmakuRetryType = "danmaku-retry";
 
-    /// <summary>预设开播检查的最大并发数（避免同时打满平台接口）。</summary>
-    private const int PresetCheckConcurrency = 2;
-
     /// <summary>播放页档位消息里的目标延迟字段名。</summary>
     private const string TargetFieldName = "extremeTargetMs";
 
-    /// <summary>单个预设开播检查的超时时间。</summary>
-    private static readonly TimeSpan PresetCheckTimeout = TimeSpan.FromSeconds(10);
+    /// <summary>预设开播检测的周期轮询间隔（开播提醒 / 自动录制的共同节奏）。</summary>
+    private static readonly TimeSpan PresetPollInterval = TimeSpan.FromMinutes(2);
 
     /// <summary>「新增预设」对话框里解析直播链接的超时时间。</summary>
     private static readonly TimeSpan PresetLinkResolveTimeout = TimeSpan.FromSeconds(20);
@@ -240,6 +237,24 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     private bool _isCheckingPresets;
     private CancellationTokenSource? _presetCheckCancellation;
 
+    /// <summary>预设开播检测的周期轮询器（开播提醒 / 自动录制）。</summary>
+    private System.Threading.Timer? _presetPollTimer;
+
+    /// <summary>上次开播检测时每个预设的状态（键 = 平台 + 名称），用于"未开播 → 开播"的变化检测。</summary>
+    private readonly Dictionary<string, PresetLiveState> _previousPresetStates = [];
+
+    /// <summary>因「开播自动录制」而正在录制的预设（键 = 平台 + 名称，值 = 平台与房间号）。</summary>
+    private readonly Dictionary<string, (PlatformId Platform, string RoomId)> _autoRecordings = [];
+
+    /// <summary>mpv 线路选择的候选（与 <see cref="MpvLineOptions"/> 下标一一对应，0 为「自动」）。</summary>
+    private List<StreamCandidate> _mpvLineCandidates = [];
+
+    /// <summary>mpv 线路选择的选中下标（0 = 自动）。</summary>
+    private int _selectedMpvLineIndex;
+
+    /// <summary>托盘气泡通知（开播提醒 / 自动录制提示）。</summary>
+    private readonly TrayNotifier _trayNotifier;
+
     /// <summary>已订阅状态变化的预设项（重建列表时逐个退订，避免事件悬挂）。</summary>
     private readonly List<PresetItemViewModel> _presetItemSubscriptions = [];
 
@@ -305,6 +320,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         _resolveMpvPath = dependencies.ResolveMpvPath;
         _showSettingsDialog = dependencies.ShowSettingsDialog;
         _shortLinkResolver = new ShortLinkResolver(_logger);
+        _trayNotifier = new TrayNotifier(_logger);
 
         _roomInput = _options.LastRoomInput;
         _extremeTargetMs = NormalizeTarget(_options.Playback.ExtremeTargetMs);
@@ -340,6 +356,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
         // 启动后立即在后台检测一遍所有预设是否开播；不等待、不阻塞 UI。
         _ = RefreshPresetStatusAsync();
+
+        // 周期轮询：每 2 分钟后台检测一次，发现"未开播 → 开播"就提醒并按需自动录制。
+        _presetPollTimer = new System.Threading.Timer(_ => OnPresetPollTick(), null, PresetPollInterval, PresetPollInterval);
     }
 
     /// <summary>视图模型依赖集合（由组合根构造）。</summary>
@@ -447,6 +466,23 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>是否正在检测预设开播状态。</summary>
     public bool IsCheckingPresets => _isCheckingPresets;
+
+    /// <summary>mpv 外挂播放的线路选项（首项固定「自动」，其余按候选顺序编号）。</summary>
+    public ObservableCollection<string> MpvLineOptions { get; } = [];
+
+    /// <summary>mpv 外挂播放选中的线路下标（0 = 自动）。</summary>
+    public int SelectedMpvLineIndex
+    {
+        get => _selectedMpvLineIndex;
+        set
+        {
+            if (_selectedMpvLineIndex != value)
+            {
+                _selectedMpvLineIndex = value;
+                OnPropertyChanged();
+            }
+        }
+    }
 
     /// <summary>当前选中的平台选项（下拉直接绑定对象，避免 SelectedValue 更新时序问题）。</summary>
     public PlatformOption SelectedPlatformOption
@@ -854,6 +890,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             // 短号/跳转链接会被归一化成真实房间号：输入框随之固定为标准直播间链接。
             RoomInput = RoomInputNormalizer.BuildRoomUrl(outcome.Room.Platform, outcome.Room.RoomId);
             ShowCurrentRoomInfo();
+            RefreshMpvLines();
             StatusMessage = $"解析成功：{outcome.Room.Anchor} / {outcome.Room.Title}"
                 + $"（状态：{LiveStatus}，共 {outcome.Room.Candidates.Count} 条线路）";
             AppendLog(StatusMessage);
@@ -1097,7 +1134,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 调用桥接服务用 mpv 播放当前房间的第一个候选。
+    /// 调用桥接服务用 mpv 播放当前房间的候选（默认自动选最优，可指定线路）。
     /// </summary>
     /// <param name="updateStatus">是否直接改写状态提示（自动播放路径由调用方统一改写）。</param>
     /// <returns>mpv 已成功启动返回 <see langword="true"/>。</returns>
@@ -1113,9 +1150,11 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             return false;
         }
 
-        // mpv 播放选候选：不能简单取排序后的第一条——HEVC 的 FLV 是 Enhanced FLV 封装，
+        // 用户指定了线路时按所选候选播放；否则仍走"最优候选"：HEVC 的 FLV 是 Enhanced FLV 封装，
         // mpv/ffmpeg 对其 demux 会读错 NAL 大小（Invalid NAL unit size），必须改用同画质的 HLS(ts)。
-        StreamCandidate? candidate = PickMpvCandidate(_currentRoom.Candidates);
+        StreamCandidate? candidate = SelectedMpvLineIndex > 0
+            ? _mpvLineCandidates.ElementAtOrDefault(SelectedMpvLineIndex - 1)
+            : PickMpvCandidate(_currentRoom.Candidates);
 
         if (candidate is null)
         {
@@ -1140,6 +1179,54 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         }
 
         return started;
+    }
+
+    /// <summary>解析成功后刷新 mpv 线路选择（候选列表 + 回到「自动」）。</summary>
+    private void RefreshMpvLines()
+    {
+        _mpvLineCandidates = [];
+        MpvLineOptions.Clear();
+        MpvLineOptions.Add("自动（推荐）");
+
+        if (_currentRoom is null)
+        {
+            SelectedMpvLineIndex = 0;
+            return;
+        }
+
+        for (int index = 0; index < _currentRoom.Candidates.Count; index += 1)
+        {
+            StreamCandidate candidate = _currentRoom.Candidates[index];
+            _mpvLineCandidates.Add(candidate);
+            string lineName = index == 0 ? "主线路" : "备用线路 " + index;
+            MpvLineOptions.Add($"{lineName}（{candidate.CdnHost} · {DescribeMpvCandidate(candidate)}）");
+        }
+
+        SelectedMpvLineIndex = 0;
+    }
+
+    /// <summary>把候选的编码与封装拼成一行短描述（供 mpv 线路选择展示）。</summary>
+    /// <param name="candidate">候选。</param>
+    /// <returns>形如 <c>HEVC / HLS</c> 的短描述。</returns>
+    private static string DescribeMpvCandidate(StreamCandidate candidate)
+    {
+        string codec = candidate.Codec switch
+        {
+            VideoCodec.Hevc => "HEVC",
+            VideoCodec.Avc => "H.264",
+            VideoCodec.Av1 => "AV1",
+            _ => candidate.Codec.ToString(),
+        };
+
+        string format = candidate.Format switch
+        {
+            StreamFormat.HlsTs => "HLS",
+            StreamFormat.HlsFmp4 => "HLS-fMP4",
+            StreamFormat.FlvHttp => "FLV",
+            _ => candidate.Format.ToString(),
+        };
+
+        return codec + " / " + format;
     }
 
     /// <summary>
@@ -1665,7 +1752,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         PresetItemViewModel? restored = null;
         foreach (RoomPreset preset in _presetStore.Items)
         {
-            PresetItemViewModel item = new(preset, ApplyPresetCommand);
+            PresetItemViewModel item = new(preset, ApplyPresetCommand, OnAutoRecordChanged);
             item.PropertyChanged += OnPresetItemPropertyChanged;
             _presetItemSubscriptions.Add(item);
             PresetItems.Add(item);
@@ -1718,15 +1805,27 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(PresetSummary));
     }
 
-    /// <summary>
-    /// 依次检测所有预设是否开播。
-    /// </summary>
-    /// <remarks>
-    /// 并发上限 <see cref="PresetCheckConcurrency"/>，单个预设 10 秒超时；检查失败的预设只标记自己，
-    /// 不影响其它预设。整个流程可被 <see cref="CancelPresetChecks"/> 取消，绝不在 UI 线程阻塞。
-    /// </remarks>
+    /// <summary>用户点「刷新状态」：立即检测一遍所有预设（不触发提醒 / 自动录制）。</summary>
     /// <returns>异步任务。</returns>
-    private async Task RefreshPresetStatusAsync()
+    private async Task RefreshPresetStatusAsync() =>
+        await RefreshPresetStatusCoreAsync(fromPolling: false).ConfigureAwait(true);
+
+    /// <summary>周期轮询到点：切回 UI 线程后触发一次"带提醒"的检测。</summary>
+    private void OnPresetPollTick() =>
+        DispatchToUi(() => _ = RefreshPresetStatusCoreAsync(fromPolling: true));
+
+    /// <summary>
+    /// 检测所有预设是否开播，并把结果写回列表项。
+    /// </summary>
+    /// <param name="fromPolling">
+    /// 是否来自周期轮询：只有轮询发现"未开播 → 开播"时才弹提醒并按需自动录制；
+    /// 手动刷新只更新状态展示，不打扰用户。
+    /// </param>
+    /// <remarks>
+    /// B站预设走批量状态接口（一次请求查完），其它平台逐房间；单个预设失败只标记自己。
+    /// 整个流程可被 <see cref="CancelPresetChecks"/> 取消，绝不在 UI 线程阻塞。
+    /// </remarks>
+    private async Task RefreshPresetStatusCoreAsync(bool fromPolling)
     {
         if (PresetItems.Count == 0)
         {
@@ -1742,15 +1841,26 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         _presetCheckCancellation = cancellation;
         try
         {
-            using SemaphoreSlim gate = new(PresetCheckConcurrency, PresetCheckConcurrency);
-            List<Task> checks = [];
-            foreach (PresetItemViewModel item in PresetItems)
+            // 快照当前列表：查询期间列表可能被增删，这里用固定快照对齐结果。
+            List<PresetItemViewModel> items = [.. PresetItems];
+            List<RoomQuery> queries = items
+                .Select(item => BuildQueryFor(item.Platform, item.RoomInput))
+                .ToList();
+
+            IReadOnlyList<RoomStatus> statuses = await _resolver
+                .ResolveRoomStatusesAsync(queries, cancellation.Token)
+                .ConfigureAwait(true);
+
+            for (int index = 0; index < items.Count; index += 1)
             {
-                checks.Add(CheckPresetCoreAsync(item, gate, cancellation.Token));
+                ApplyPresetStatus(items[index], statuses[index], fromPolling);
             }
 
-            await Task.WhenAll(checks).ConfigureAwait(true);
-            AppendLog($"预设开播检测完成（共 {PresetItems.Count} 个）。");
+            AppendLog($"预设开播检测完成（共 {items.Count} 个）。");
+        }
+        catch (OperationCanceledException)
+        {
+            // 新一轮检测已接手，静默退出。
         }
         catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
         {
@@ -1765,11 +1875,143 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>把单个预设的状态快照写回列表项，并按需触发提醒 / 自动录制。</summary>
+    /// <param name="item">预设项。</param>
+    /// <param name="status">状态快照。</param>
+    /// <param name="fromPolling">是否来自周期轮询。</param>
+    private void ApplyPresetStatus(PresetItemViewModel item, RoomStatus status, bool fromPolling)
+    {
+        if (!string.IsNullOrEmpty(status.Error))
+        {
+            item.ApplyFailure(status.Error);
+            return;
+        }
+
+        string key = PresetStateKey(item);
+        _previousPresetStates.TryGetValue(key, out PresetLiveState previous);
+
+        switch (status.Status)
+        {
+            case LiveStatusKind.Live:
+                // 平台主播名只作兜底展示：预设里用户设定的名称始终优先（见 PresetItemViewModel.AnchorName）。
+                item.ApplyLive(status.Anchor ?? item.Preset.Name);
+                if (fromPolling && previous != PresetLiveState.Live)
+                {
+                    _trayNotifier.NotifyLive(item.AnchorName, ResolvePlatformName(item.Platform));
+                    _ = AutoRecordPresetAsync(item);
+                }
+                break;
+
+            case LiveStatusKind.Replaying:
+            case LiveStatusKind.Offline:
+                // 未开播/轮播时平台不返回主播名：传预设名，展示仍以用户设定的名称为准。
+                item.ApplyOffline(item.Preset.Name);
+                if (fromPolling && previous == PresetLiveState.Live)
+                {
+                    _ = StopAutoRecordingAsync(item);
+                }
+                break;
+
+            default:
+                item.ApplyOffline(item.Preset.Name);
+                break;
+        }
+
+        _previousPresetStates[key] = item.State;
+    }
+
+    /// <summary>预设状态变化检测的稳定键：平台 + 名称（与预设身份一致，房间号/链接变化不换键）。</summary>
+    private static string PresetStateKey(PresetItemViewModel item) =>
+        $"{(int)item.Platform}:{item.Preset.Name}";
+
+    /// <summary>「开播自动录制」开关变化：持久化到预设存储。</summary>
+    /// <param name="item">预设项。</param>
+    /// <param name="autoRecord">新开关值。</param>
+    private void OnAutoRecordChanged(PresetItemViewModel item, bool autoRecord)
+    {
+        RoomPreset updated = item.Preset with { AutoRecord = autoRecord };
+        if (_presetStore.Update(item.Preset, updated))
+        {
+            AppendLog("已" + (autoRecord ? "开启" : "关闭") + "「" + item.Preset.Name + "」的开播自动录制。");
+        }
+    }
+
+    /// <summary>检测到预设开播且勾选了自动录制时，解析该房间并自动开始录制。</summary>
+    /// <param name="item">开播的预设项。</param>
+    private async Task AutoRecordPresetAsync(PresetItemViewModel item)
+    {
+        if (!item.AutoRecord)
+        {
+            return;
+        }
+
+        string key = PresetStateKey(item);
+        if (_autoRecordings.ContainsKey(key))
+        {
+            return;
+        }
+
+        ResolveOutcome outcome = await _resolver
+            .ResolveAsync(BuildQueryFor(item.Platform, item.RoomInput), CancellationToken.None)
+            .ConfigureAwait(true);
+
+        if (!outcome.Success || outcome.Room is null)
+        {
+            AppendLog("自动录制失败（解析「" + item.Preset.Name + "」失败）。");
+            return;
+        }
+
+        ResolvedRoom room = outcome.Room;
+        RecordingRequest request = new()
+        {
+            Room = room,
+            SegmentPolicy = _options.Recording.Segment,
+            MaxDurationMinutes = _options.Recording.MaxDurationMinutes,
+        };
+
+        try
+        {
+            await _recording.StartAsync(request, CancellationToken.None).ConfigureAwait(true);
+            _autoRecordings[key] = (room.Platform, room.RoomId);
+            _trayNotifier.NotifyRecordingStarted(item.AnchorName);
+            AppendLog("已自动开始录制：「" + item.AnchorName + "」。");
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
+        {
+            AppendLog("自动录制「" + item.Preset.Name + "」失败：" + exception.Message);
+        }
+    }
+
+    /// <summary>检测到预设下播时，停止为它自动开启的录制。</summary>
+    /// <param name="item">下播的预设项。</param>
+    private async Task StopAutoRecordingAsync(PresetItemViewModel item)
+    {
+        string key = PresetStateKey(item);
+        if (!_autoRecordings.TryGetValue(key, out (PlatformId Platform, string RoomId) recording))
+        {
+            return;
+        }
+
+        _autoRecordings.Remove(key);
+        await _recording.StopAsync(recording.Platform, recording.RoomId, CancellationToken.None).ConfigureAwait(true);
+        AppendLog("「" + item.AnchorName + "」已下播，自动录制停止。");
+    }
+
     /// <summary>
     /// 取消进行中的预设开播检测。
     /// </summary>
     /// <remarks>窗口关闭时由宿主调用，避免检测回调打到已经开始释放的界面。</remarks>
     public void CancelPresetChecks() => _presetCheckCancellation?.Cancel();
+
+    /// <summary>释放视图模型持有的后台资源（周期轮询器、托盘图标）。</summary>
+    /// <remarks>窗口关闭时由宿主调用，避免轮询回调与托盘图标在界面释放后仍存活。</remarks>
+    public void Shutdown()
+    {
+        _presetPollTimer?.Dispose();
+        _presetPollTimer = null;
+        CancelPresetChecks();
+        _trayNotifier.Dispose();
+    }
 
     /// <summary>切换"检查中"状态并刷新相关命令的可用性。</summary>
     /// <param name="isChecking">是否正在检查。</param>
@@ -1778,94 +2020,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         _isCheckingPresets = isChecking;
         OnPropertyChanged(nameof(IsCheckingPresets));
         (RefreshPresetStatusCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-    }
-
-    /// <summary>在并发闸门与超时保护下检测单个预设；单个预设的失败不会影响其它预设。</summary>
-    /// <param name="item">预设项。</param>
-    /// <param name="gate">并发闸门。</param>
-    /// <param name="cancellationToken">取消令牌。</param>
-    /// <returns>异步任务。</returns>
-    private async Task CheckPresetCoreAsync(PresetItemViewModel item, SemaphoreSlim gate, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await gate.WaitAsync(cancellationToken).ConfigureAwait(true);
-            try
-            {
-                using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                timeout.CancelAfter(PresetCheckTimeout);
-                await CheckPresetAsync(item, timeout.Token).ConfigureAwait(true);
-            }
-            finally
-            {
-                gate.Release();
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            item.ApplyFailure("检查已取消。");
-        }
-        catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
-        {
-            item.ApplyFailure("检查失败：" + exception.Message);
-            _logger.LogError(LogLevel.Warn, _moduleName, "预设开播检测任务异常。", exception, new Dictionary<string, object?>
-            {
-                ["preset"] = item.Preset.Name,
-                ["platform"] = item.Platform.ToString(),
-            });
-        }
-    }
-
-    /// <summary>检测单个预设是否开播，并把结果写回列表项。</summary>
-    /// <param name="item">预设项。</param>
-    /// <param name="cancellationToken">带超时的取消令牌。</param>
-    /// <returns>异步任务。</returns>
-    private async Task CheckPresetAsync(PresetItemViewModel item, CancellationToken cancellationToken)
-    {
-        item.ApplyChecking();
-        try
-        {
-            ResolveOutcome outcome = await _resolver
-                .ResolveAsync(BuildQueryFor(item.Platform, item.RoomInput), cancellationToken)
-                .ConfigureAwait(true);
-
-            if (outcome.Success && outcome.Room is not null)
-            {
-                // 平台主播名只作兜底展示：预设里用户设定的名称始终优先（见 PresetItemViewModel.AnchorName）。
-                item.ApplyLive(outcome.Room.Anchor);
-                return;
-            }
-
-            if (outcome.Failure is ResolveFailure.NotLive or ResolveFailure.Replaying)
-            {
-                // 未开播/轮播时平台不返回主播名：传预设名，展示仍以用户设定的名称为准。
-                // 轮播归到"未开播"而不是"检查失败"：房间是有效的，只是现在没得看。
-                item.ApplyOffline(item.Preset.Name);
-                return;
-            }
-
-            string reason = outcome.Message.Length > 0 ? outcome.Message : ResolveMessages.DescribeFailure(outcome.Failure);
-            item.ApplyFailure(reason);
-            _logger.Warn(_moduleName, "预设开播检测失败。", new Dictionary<string, object?>
-            {
-                ["preset"] = item.Preset.Name,
-                ["platform"] = item.Platform.ToString(),
-                ["failure"] = outcome.Failure.ToString(),
-            });
-        }
-        catch (OperationCanceledException)
-        {
-            item.ApplyFailure("检查超时或已取消（可在网络空闲时点「刷新状态」重试）。");
-        }
-        catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
-        {
-            item.ApplyFailure("检查失败：" + exception.Message);
-            _logger.LogError(LogLevel.Warn, _moduleName, "预设开播检测异常。", exception, new Dictionary<string, object?>
-            {
-                ["preset"] = item.Preset.Name,
-                ["platform"] = item.Platform.ToString(),
-            });
-        }
     }
 
     /// <summary>点击预设：按预设自己的平台解析该房间（自动播放由设置里的开关决定，不再重复下发）。</summary>

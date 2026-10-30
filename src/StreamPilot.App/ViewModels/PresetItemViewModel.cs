@@ -91,16 +91,21 @@ public sealed class PresetItemViewModel : INotifyPropertyChanged
     private PresetLiveState _state = PresetLiveState.Unknown;
     private string _platformAnchor = string.Empty;
     private string _failureReason = string.Empty;
+    private bool _autoRecord;
+    private readonly Action<PresetItemViewModel, bool>? _autoRecordChanged;
 
     /// <summary>初始化预设项。</summary>
     /// <param name="preset">预设数据。</param>
     /// <param name="applyCommand">点击该项时执行的命令。</param>
-    public PresetItemViewModel(RoomPreset preset, ICommand applyCommand)
+    /// <param name="autoRecordChanged">「开播自动录制」开关变化时的回调（参数为本项与新值），可为 <see langword="null"/>。</param>
+    public PresetItemViewModel(RoomPreset preset, ICommand applyCommand, Action<PresetItemViewModel, bool>? autoRecordChanged = null)
     {
         ArgumentNullException.ThrowIfNull(preset);
         ArgumentNullException.ThrowIfNull(applyCommand);
         Preset = preset;
         ApplyCommand = applyCommand;
+        _autoRecordChanged = autoRecordChanged;
+        _autoRecord = preset.AutoRecord;
         _platformAnchor = preset.Name;
         BadgeText = ResolveBadgeText(preset.Platform);
         BadgeBrush = ResolveBadgeBrush(preset.Platform);
@@ -126,6 +131,24 @@ public sealed class PresetItemViewModel : INotifyPropertyChanged
 
     /// <summary>房间号或直播间链接。</summary>
     public string RoomInput => Preset.RoomInput;
+
+    /// <summary>
+    /// 是否在检测到开播时自动开始录制（「每预设独立开关」）。
+    /// </summary>
+    /// <remarks>
+    /// 运行时状态，持久化由宿主回调完成；这里只维护界面值与触发保存。
+    /// </remarks>
+    public bool AutoRecord
+    {
+        get => _autoRecord;
+        set
+        {
+            if (SetField(ref _autoRecord, value))
+            {
+                _autoRecordChanged?.Invoke(this, value);
+            }
+        }
+    }
 
     /// <summary>
     /// 展示用的名称：**用户设定的名称（<see cref="RoomPreset.Name"/>）始终优先**，

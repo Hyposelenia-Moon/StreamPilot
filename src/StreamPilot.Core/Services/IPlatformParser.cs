@@ -49,3 +49,26 @@ public interface IPlatformParser
     /// <exception cref="Errors.ResolveException">解析失败时抛出。</exception>
     Task<ResolvedRoom> ParseAsync(RoomQuery query, CancellationToken cancellationToken);
 }
+
+/// <summary>
+/// 平台解析器的可选能力：批量查询多个房间的开播状态。
+/// </summary>
+/// <remarks>
+/// 只有提供批量状态接口的平台（如 B站 <c>getRoomBaseInfo?room_ids=a,b,c</c>）实现本接口；
+/// 其余平台的开播检测回退到逐房间完整解析。查询失败时返回带错误原因的 <see cref="RoomStatus"/>，
+/// 不抛异常（单个房间失败不应拖垮整批）。
+/// </remarks>
+public interface IBatchStatusParser
+{
+    /// <summary>
+    /// 批量查询多个数字房间号的开播状态。
+    /// </summary>
+    /// <param name="roomIds">数字房间号列表（去重、去空后传入）。</param>
+    /// <param name="cookie">平台 Cookie，可为 <see langword="null"/>（匿名）。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>状态快照；与 <paramref name="roomIds"/> 对应，单个房间失败时返回错误结果。</returns>
+    Task<IReadOnlyList<RoomStatus>> QueryRoomStatusesAsync(
+        IReadOnlyList<string> roomIds,
+        string? cookie,
+        CancellationToken cancellationToken);
+}

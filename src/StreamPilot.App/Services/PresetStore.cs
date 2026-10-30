@@ -18,7 +18,7 @@ using StreamPilot.Core.Models;
 /// 因此"同名"不等于"同一条"；而 <see cref="RoomInput"/> 会随房间号变化（短号跳转、用户换房间），
 /// 不能参与身份判定。新增/覆盖/删除/选中恢复都用同一套身份口径，否则同名跨平台会互相串台。
 /// </remarks>
-public sealed record RoomPreset(string Name, PlatformId Platform, string RoomInput)
+public sealed record RoomPreset(string Name, PlatformId Platform, string RoomInput, bool AutoRecord = false)
 {
     /// <summary>
     /// 判断两条预设是否为同一条（身份 = 平台 + 名称）。
@@ -126,7 +126,7 @@ public sealed class PresetStore
             return false;
         }
 
-        RoomPreset normalized = new(name, preset.Platform, roomInput);
+        RoomPreset normalized = new(name, preset.Platform, roomInput, preset.AutoRecord);
         lock (_gate)
         {
             // 覆盖口径与删除口径必须完全一致（平台 + 名称），否则同名跨平台会互相误覆盖 / 误删。
@@ -163,7 +163,7 @@ public sealed class PresetStore
             return false;
         }
 
-        RoomPreset normalized = new(name, updated.Platform, roomInput);
+        RoomPreset normalized = new(name, updated.Platform, roomInput, updated.AutoRecord);
         RoomPreset identity = existing with { Name = NormalizeName(existing.Name) };
         bool changed;
         lock (_gate)
