@@ -170,6 +170,130 @@
         </ScrollViewer>
       </TabItem>
 
+      <!-- ============ 弹幕：只读接收，默认关闭 ============ -->
+      <TabItem Header="弹幕">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="4,10,4,4">
+          <StackPanel>
+            <Border Style="{StaticResource CardPanel}">
+              <StackPanel>
+                <TextBlock Text="弹幕显示" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
+                <TextBlock Text="弹幕只做接收与显示：不发送、不点赞、不采集，也不影响视频播放（连接失败只会少一层弹幕）。"
+                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,0,0,10" />
+
+                <CheckBox Content="启用弹幕（默认关闭）" IsChecked="{Binding DanmakuEnabled}"
+                          Style="{StaticResource SettingFieldCheck}"
+                          ToolTip="总开关。关闭时不建立弹幕连接，播放页的「弹幕」按钮也会置灰"
+                          AutomationProperties.AutomationId="DanmakuEnabledCheck" />
+
+                <StackPanel Style="{StaticResource SettingRow}">
+                  <TextBlock Text="显示模式" Style="{StaticResource SettingLabel}" />
+                  <ComboBox Style="{StaticResource SettingFieldCombo}"
+                            ItemsSource="{Binding DanmakuDisplayModeChoices}"
+                            SelectedItem="{Binding SelectedDanmakuDisplayMode, Mode=TwoWay}"
+                            ToolTip="{Binding SelectedDanmakuDisplayMode.Hint}"
+                            AutomationProperties.AutomationId="DanmakuDisplayModeCombo">
+                    <ComboBox.ItemTemplate>
+                      <DataTemplate>
+                        <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource TextBrush}" ToolTip="{Binding Hint}" />
+                      </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                  </ComboBox>
+                </StackPanel>
+
+                <StackPanel Style="{StaticResource SettingRow}">
+                  <TextBlock Text="显示哪些类型" Style="{StaticResource SettingLabel}" />
+                  <ComboBox Style="{StaticResource SettingFieldCombo}"
+                            ItemsSource="{Binding DanmakuFilterChoices}"
+                            SelectedItem="{Binding SelectedDanmakuFilter, Mode=TwoWay}"
+                            ToolTip="{Binding SelectedDanmakuFilter.Hint}"
+                            AutomationProperties.AutomationId="DanmakuFilterCombo">
+                    <ComboBox.ItemTemplate>
+                      <DataTemplate>
+                        <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource TextBrush}" ToolTip="{Binding Hint}" />
+                      </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                  </ComboBox>
+                </StackPanel>
+
+                <StackPanel Style="{StaticResource SettingRow}">
+                  <TextBlock Text="不透明度" Style="{StaticResource SettingLabel}" />
+                  <StackPanel Orientation="Horizontal">
+                    <Slider Width="180" Minimum="10" Maximum="100" TickFrequency="5" IsSnapToTickEnabled="True"
+                            Value="{Binding DanmakuOpacityPercent}" VerticalAlignment="Center"
+                            AutomationProperties.AutomationId="DanmakuOpacitySlider" />
+                    <TextBlock Text="{Binding DanmakuOpacityPercent, StringFormat={}{0}%}" Style="{StaticResource MutedText}"
+                               MinWidth="46" TextAlignment="Right" Margin="8,0,0,0" />
+                  </StackPanel>
+                </StackPanel>
+
+                <StackPanel Style="{StaticResource SettingRow}">
+                  <TextBlock Text="字号" Style="{StaticResource SettingLabel}" />
+                  <StackPanel Orientation="Horizontal">
+                    <Slider Width="180" Minimum="12" Maximum="48" TickFrequency="2" IsSnapToTickEnabled="True"
+                            Value="{Binding DanmakuFontSize}" VerticalAlignment="Center"
+                            AutomationProperties.AutomationId="DanmakuFontSizeSlider" />
+                    <TextBlock Text="{Binding DanmakuFontSize, StringFormat={}{0} px}" Style="{StaticResource MutedText}"
+                               MinWidth="46" TextAlignment="Right" Margin="8,0,0,0" />
+                  </StackPanel>
+                </StackPanel>
+
+                <StackPanel Style="{StaticResource SettingRow}">
+                  <TextBlock Text="横穿屏幕耗时" Style="{StaticResource SettingLabel}" />
+                  <StackPanel Orientation="Horizontal">
+                    <Slider Width="180" Minimum="4" Maximum="20" TickFrequency="1" IsSnapToTickEnabled="True"
+                            Value="{Binding DanmakuSpeedSeconds}" VerticalAlignment="Center"
+                            AutomationProperties.AutomationId="DanmakuSpeedSlider" />
+                    <TextBlock Text="{Binding DanmakuSpeedSeconds, StringFormat={}{0} 秒}" Style="{StaticResource MutedText}"
+                               MinWidth="46" TextAlignment="Right" Margin="8,0,0,0" />
+                  </StackPanel>
+                </StackPanel>
+
+                <StackPanel Style="{StaticResource SettingRow}">
+                  <TextBlock Text="同屏上限" Style="{StaticResource SettingLabel}" />
+                  <StackPanel Orientation="Horizontal">
+                    <Slider Width="180" Minimum="20" Maximum="200" TickFrequency="10" IsSnapToTickEnabled="True"
+                            Value="{Binding DanmakuMaxOnScreen}" VerticalAlignment="Center"
+                            AutomationProperties.AutomationId="DanmakuMaxOnScreenSlider" />
+                    <TextBlock Text="{Binding DanmakuMaxOnScreen, StringFormat={}{0} 条}" Style="{StaticResource MutedText}"
+                               MinWidth="46" TextAlignment="Right" Margin="8,0,0,0" />
+                  </StackPanel>
+                </StackPanel>
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource CardPanel}" Margin="0,12,0,0">
+              <StackPanel>
+                <TextBlock Text="屏蔽与合并" Style="{StaticResource SectionTitle}" Margin="0,0,0,8" />
+                <TextBlock Text="屏蔽词每行一条，也可以用逗号、顿号、分号分隔；弹幕内容包含任一关键词时整条不显示。合并重复会把同一内容的连续弹幕合成一条并累计次数。"
+                           Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,0,0,10" />
+
+                <TextBlock Text="屏蔽词" Style="{StaticResource SettingLabel}" />
+                <TextBox Style="{StaticResource CookieBox}"
+                         Text="{Binding DanmakuBlockedKeywords, UpdateSourceTrigger=PropertyChanged}"
+                         MinHeight="90"
+                         ToolTip="每行一条，例如：广告 / 加群 / 代练"
+                         AutomationProperties.AutomationId="DanmakuBlockedKeywordsBox" />
+
+                <CheckBox Content="合并重复弹幕（显示为「666 ×15」）" IsChecked="{Binding DanmakuMergeDuplicates}"
+                          Style="{StaticResource SettingFieldCheck}"
+                          AutomationProperties.AutomationId="DanmakuMergeCheck" />
+
+                <StackPanel Style="{StaticResource SettingRow}" Margin="0">
+                  <TextBlock Text="合并时间窗口" Style="{StaticResource SettingLabel}" />
+                  <StackPanel Orientation="Horizontal">
+                    <Slider Width="180" Minimum="1" Maximum="10" TickFrequency="1" IsSnapToTickEnabled="True"
+                            Value="{Binding DanmakuMergeWindowSeconds}" VerticalAlignment="Center"
+                            AutomationProperties.AutomationId="DanmakuMergeWindowSlider" />
+                    <TextBlock Text="{Binding DanmakuMergeWindowSeconds, StringFormat={}{0} 秒}" Style="{StaticResource MutedText}"
+                               MinWidth="46" TextAlignment="Right" Margin="8,0,0,0" />
+                  </StackPanel>
+                </StackPanel>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
       <!-- ============ 高级：默认不用改 ============ -->
       <TabItem Header="高级">
         <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="4,10,4,4">

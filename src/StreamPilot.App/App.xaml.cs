@@ -153,6 +153,7 @@ public partial class App : WpfApplication
         Resolve<IPlaybackCoordinator>(),
         Resolve<IRecordingCoordinator>(),
         Resolve<IPlaybackBridge>(),
+        Resolve<IDanmakuClient>(),
         _presetStore!,
         ResolveMpvPath,
         _logger,
@@ -273,6 +274,9 @@ public partial class App : WpfApplication
             factory,
             () => Options,
             _logger));
+
+        // 弹幕客户端：只读接收，连接失败只影响弹幕（不影响视频播放）。
+        registry.RegisterSingleton<IDanmakuClient>(_ => new BilibiliDanmakuClient(factory, _logger));
 
         return registry;
     }

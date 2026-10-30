@@ -104,6 +104,21 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// </summary>
     private const string TargetType = "target";
 
+    /// <summary>宿主 → 播放页：批量弹幕消息。</summary>
+    private const string HostDanmakuType = "danmaku";
+
+    /// <summary>宿主 → 播放页：弹幕配置（开关、显示模式、屏蔽词、字号等）同步。</summary>
+    private const string HostDanmakuConfigType = "danmaku-config";
+
+    /// <summary>宿主 → 播放页：弹幕连接状态同步。</summary>
+    private const string HostDanmakuStateType = "danmaku-state";
+
+    /// <summary>页面 → 宿主：用户切换弹幕显示开关。</summary>
+    private const string PlayerDanmakuToggleType = "danmaku-toggle";
+
+    /// <summary>页面 → 宿主：用户在失败状态点重试弹幕连接。</summary>
+    private const string PlayerDanmakuRetryType = "danmaku-retry";
+
     /// <summary>预设开播检查的最大并发数（避免同时打满平台接口）。</summary>
     private const int PresetCheckConcurrency = 2;
 
@@ -187,6 +202,12 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     private readonly IPlaybackCoordinator _playback;
     private readonly IRecordingCoordinator _recording;
     private readonly IPlaybackBridge _bridge;
+
+    /// <summary>弹幕客户端（只读接收；连接失败不影响视频播放）。</summary>
+    private readonly IDanmakuClient _danmaku;
+
+    /// <summary>本次连接是否已记录过"开始收到弹幕"（避免每个批次都写一行日志）。</summary>
+    private bool _danmakuFirstBatchLogged;
     private readonly IStructuredLogger _logger;
     private readonly Action<StreamPilotOptions> _saveOptions;
     private readonly PresetStore _presetStore;
@@ -271,6 +292,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         _playback = dependencies.Playback;
         _recording = dependencies.Recording;
         _bridge = dependencies.Bridge;
+        _danmaku = dependencies.Danmaku;
+        _danmaku.MessagesReceived += OnDanmakuMessagesReceived;
+        _danmaku.StateChanged += OnDanmakuStateChanged;
         _logger = dependencies.Logger;
         _options = dependencies.Options;
         _saveOptions = dependencies.SaveOptions;
@@ -320,6 +344,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <param name="Playback">播放编排服务。</param>
     /// <param name="Recording">录制编排服务。</param>
     /// <param name="Bridge">桥接服务。</param>
+    /// <param name="Danmaku">弹幕客户端（只读接收）。</param>
     /// <param name="Presets">预设存储。</param>
     /// <param name="ResolveMpvPath">mpv 路径解析回调（返回绝对路径，未找到返回 null）。</param>
     /// <param name="Logger">结构化日志。</param>
@@ -331,6 +356,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         IPlaybackCoordinator Playback,
         IRecordingCoordinator Recording,
         IPlaybackBridge Bridge,
+        IDanmakuClient Danmaku,
         PresetStore Presets,
         Func<string?, string?> ResolveMpvPath,
         IStructuredLogger Logger,
@@ -621,6 +647,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                     AppendLog("播放器内核已就绪（HEVC: " + ReadFlag(root, "hevc") + "，H.264: " + ReadFlag(root, "avc") + "）");
                     SendBridgeInfo();
                     SendToPlayer(new { type = "volume", value = _options.Playback.Volume });
+                    // 页面刚加载完还不知道弹幕开关与显示参数：先同步一次配置，
+                    // 否则按钮要等到第一条弹幕到达才会亮起来。
+                    SendDanmakuConfig();
                     break;
 
                 case PlayerTelemetryType:
@@ -704,6 +733,14 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
                 case PlayerRequestStopType:
                     StopPlaybackFromPlayer();
+                    break;
+
+                case PlayerDanmakuToggleType:
+                    _ = ApplyDanmakuVisibilityAsync(ReadVisibleFlag(root) ?? false);
+                    break;
+
+                case PlayerDanmakuRetryType:
+                    _ = RetryDanmakuAsync();
                     break;
 
                 default:
@@ -1006,6 +1043,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             {
                 AppendLog("提示：存在 HEVC 候选，若系统不支持 HEVC 解码，请使用「mpv 播放」。");
             }
+
+            // 弹幕按配置挂接在当前播放会话上；失败只影响弹幕，不影响视频。
+            await StartDanmakuAsync(plan.Room).ConfigureAwait(true);
 
             if (plan.Hint is not null)
             {
@@ -1342,6 +1382,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         _activeSessionId = 0;
         _isPlaybackPaused = false;
 
+        // 弹幕随播放会话一起停止；不等待（内部已处理异常，避免阻塞 UI 线程）。
+        _ = StopDanmakuAsync();
+
         // 本次观看已结束：左侧「当前直播」卡片回到初始态，不残留上一房间的开播状态 / 主播 / 标题 / 分区。
         ClearRoomInfo();
         StatusMessage = "已停止播放（画面已关闭，中继已释放）。";
@@ -1500,6 +1543,20 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         return element.GetBoolean();
     }
 
+    /// <summary>读取播放页「弹幕开关」消息里的 visible 字段。</summary>
+    /// <param name="root">消息根节点。</param>
+    /// <returns>字段值；缺失或类型不符时返回 <see langword="null"/>。</returns>
+    private static bool? ReadVisibleFlag(JsonElement root)
+    {
+        if (!root.TryGetProperty("visible", out JsonElement element)
+            || element.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            return null;
+        }
+
+        return element.GetBoolean();
+    }
+
     /// <summary>打开独立的设置窗口，保存后立即生效并把新音量下发给播放页。</summary>
     private void OpenSettings()
     {
@@ -1531,6 +1588,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             ApplyPlatformChangeFromSettings();
             RefreshBridgeStatus();
             SendToPlayer(new { type = "volume", value = _options.Playback.Volume });
+            ApplyDanmakuSettingsFromSettings();
 
             StatusMessage = "设置已保存。";
             AppendLog("设置已保存");
@@ -1541,6 +1599,30 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             StatusMessage = "设置操作失败：" + exception.Message;
             AppendLog("设置操作失败：" + exception.Message);
         }
+    }
+
+    /// <summary>
+    /// 设置保存后让弹幕配置立即生效：关掉总开关要断开连接，打开则按需连上。
+    /// </summary>
+    /// <remarks>
+    /// 屏蔽词、字号这些渲染参数只需下发配置，不重连；只有"连不连"这件事需要动连接。
+    /// </remarks>
+    private void ApplyDanmakuSettingsFromSettings()
+    {
+        if (!_options.Danmaku.Enabled)
+        {
+            _ = StopDanmakuAsync();
+            SendDanmakuConfig();
+            return;
+        }
+
+        if (_currentRoom is { } room
+            && _danmaku.State is not (DanmakuConnectionState.Connected or DanmakuConnectionState.Connecting))
+        {
+            _ = StartDanmakuAsync(room);
+        }
+
+        SendDanmakuConfig();
     }
 
     /// <summary>设置窗口保存后同步默认平台与界面提示。</summary>
@@ -2191,6 +2273,272 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     {
         string json = JsonSerializer.Serialize(payload, App.JsonOptions);
         SendMessageRequested?.Invoke(this, json);
+    }
+
+    /// <summary>弹幕批量消息到达：按配置过滤后转发给播放页。</summary>
+    /// <param name="sender">事件源。</param>
+    /// <param name="e">批量消息。</param>
+    /// <remarks>
+    /// 类型过滤在宿主侧完成，减少无谓的跨进程消息；屏蔽词与重复合并在页面侧做
+    /// （配置改动可立即生效，不需要重连弹幕）。
+    /// </remarks>
+    private void OnDanmakuMessagesReceived(object? sender, DanmakuBatchEventArgs e) =>
+        DispatchToUi(() => PublishDanmakuBatch(e));
+
+    /// <summary>
+    /// 把一批弹幕按类型过滤后转发给播放页。
+    /// </summary>
+    /// <param name="e">批量消息。</param>
+    private void PublishDanmakuBatch(DanmakuBatchEventArgs e)
+    {
+        DanmakuOptions options = _options.Danmaku;
+        List<object> items = [];
+        foreach (DanmakuMessage message in e.Messages)
+        {
+            if (!ShouldDisplayDanmaku(message, options))
+            {
+                continue;
+            }
+
+            items.Add(new
+            {
+                id = message.Sequence,
+                kind = message.Kind.ToString().ToLowerInvariant(),
+                user = message.User,
+                text = message.Text,
+                color = message.Color,
+                medal = message.MedalName,
+                medalLevel = message.MedalLevel,
+                privileged = message.IsPrivileged,
+            });
+        }
+
+        if (!_danmakuFirstBatchLogged)
+        {
+            /*
+              "弹幕没出来"是最常见的反馈，而原因可能差很远：没连上、连上了但房间没人说话、
+              或者被类型过滤全挡掉了。这里只记一次首批统计，让日志能直接区分这三种情况。
+            */
+            _danmakuFirstBatchLogged = true;
+            long received = _danmaku.ReceivedCount;
+            _logger.Info(_moduleName, "开始接收弹幕。", new Dictionary<string, object?>
+            {
+                ["received"] = received,
+                ["forwarded"] = items.Count,
+            });
+            AppendLog("已开始接收弹幕（累计 " + received + " 条）");
+        }
+
+        if (items.Count == 0)
+        {
+            return;
+        }
+
+        SendToPlayer(new
+        {
+            type = HostDanmakuType,
+            items,
+            displayMode = options.DisplayMode.ToString().ToLowerInvariant(),
+            blockedKeywords = options.BlockedKeywords,
+            mergeDuplicates = options.MergeDuplicates,
+            mergeWindowSeconds = options.MergeWindowSeconds,
+            opacity = options.Opacity,
+            fontSize = options.FontSize,
+            speedSeconds = options.SpeedSeconds,
+            maxOnScreen = options.MaxOnScreen,
+        });
+    }
+
+    /// <summary>弹幕连接状态变化：同步给播放页，用于显示"连接中 / 失败可重试"。</summary>
+    /// <param name="sender">事件源。</param>
+    /// <param name="state">新状态。</param>
+    private void OnDanmakuStateChanged(object? sender, DanmakuConnectionState state) =>
+        DispatchToUi(() => PublishDanmakuState(state));
+
+    /// <summary>把弹幕连接状态推送给播放页。</summary>
+    /// <param name="state">新状态。</param>
+    private void PublishDanmakuState(DanmakuConnectionState state)
+    {
+        if (state != DanmakuConnectionState.Connected)
+        {
+            _danmakuFirstBatchLogged = false;
+        }
+
+        SendToPlayer(new
+        {
+            type = HostDanmakuStateType,
+            state = state.ToString().ToLowerInvariant(),
+            receivedCount = _danmaku.ReceivedCount,
+        });
+    }
+
+    /// <summary>
+    /// 把后台事件切回 UI 线程再处理。
+    /// </summary>
+    /// <param name="action">要在 UI 线程执行的动作。</param>
+    /// <remarks>
+    /// 弹幕客户端在后台线程触发事件，而处理逻辑要改绑定属性、往 WebView2 投递消息，
+    /// 两者都只能在 UI 线程执行；跨线程会抛 InvalidOperationException 并丢掉这次更新
+    /// （实测表现为日志里的"弹幕状态事件处理失败：调用线程无法访问此对象"）。
+    /// </remarks>
+    private void DispatchToUi(Action action)
+    {
+        System.Windows.Threading.Dispatcher? dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.CheckAccess())
+        {
+            action();
+            return;
+        }
+
+        dispatcher.BeginInvoke(action);
+    }
+
+    private static bool ShouldDisplayDanmaku(DanmakuMessage message, DanmakuOptions options) =>
+        message.Kind switch
+        {
+            DanmakuKind.Chat => true,
+            DanmakuKind.Gift => options.Filter is DanmakuFilterMode.WithGift or DanmakuFilterMode.All,
+            DanmakuKind.Interact => options.Filter is DanmakuFilterMode.All,
+            DanmakuKind.System => options.Filter is DanmakuFilterMode.All,
+            _ => false,
+        };
+
+    /// <summary>
+    /// 按当前配置启动弹幕（全局关闭、非 B站、房间号非法时静默跳过）。
+    /// </summary>
+    /// <param name="room">当前播放的房间。</param>
+    /// <returns>启动完成的任务（失败不抛出，只记日志）。</returns>
+    /// <remarks>
+    /// 弹幕是附加能力：任何失败都只写日志与状态行，绝不影响视频播放。
+    /// </remarks>
+    private async Task StartDanmakuAsync(ResolvedRoom room)
+    {
+        if (!_options.Danmaku.Enabled)
+        {
+            return;
+        }
+
+        if (room.Platform != PlatformId.Bilibili)
+        {
+            return;
+        }
+
+        try
+        {
+            await _danmaku.ConnectAsync(
+                new DanmakuConnectRequest
+                {
+                    Platform = room.Platform,
+                    RoomId = room.RoomId,
+                    Cookie = _options.Platforms.BilibiliCookie,
+                },
+                CancellationToken.None).ConfigureAwait(true);
+        }
+        catch (DanmakuException exception)
+        {
+            _logger.LogError(LogLevel.Warn, "App.Shell", "挂接弹幕失败（不影响播放）。", exception);
+            AppendLog("弹幕连接失败：" + exception.Message);
+        }
+    }
+
+    /// <summary>停止弹幕连接（幂等，失败只记日志）。</summary>
+    /// <returns>停止完成的任务。</returns>
+    private async Task StopDanmakuAsync()
+    {
+        try
+        {
+            await _danmaku.DisconnectAsync(CancellationToken.None).ConfigureAwait(true);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            _logger.LogError(LogLevel.Warn, "App.Shell", "断开弹幕连接失败。", exception);
+        }
+    }
+
+    /// <summary>
+    /// 把当前弹幕配置下发给播放页（页面据此决定按钮状态与渲染参数）。
+    /// </summary>
+    /// <remarks>
+    /// 只在「播放器就绪」与「设置保存」两个时机下发：屏蔽词、字号这些参数改配置后立即生效，
+    /// 不需要重连弹幕；把配置塞进每条批量消息只会让每条消息都多背一份不变的数据。
+    /// </remarks>
+    private void SendDanmakuConfig()
+    {
+        DanmakuOptions options = _options.Danmaku;
+        SendToPlayer(new
+        {
+            type = HostDanmakuConfigType,
+            enabled = options.Enabled,
+            visible = options.Enabled && options.Visible,
+            state = _danmaku.State.ToString().ToLowerInvariant(),
+            filter = options.Filter.ToString().ToLowerInvariant(),
+            displayMode = options.DisplayMode.ToString().ToLowerInvariant(),
+            blockedKeywords = options.BlockedKeywords,
+            mergeDuplicates = options.MergeDuplicates,
+            mergeWindowSeconds = options.MergeWindowSeconds,
+            opacity = options.Opacity,
+            fontSize = options.FontSize,
+            speedSeconds = options.SpeedSeconds,
+            maxOnScreen = options.MaxOnScreen,
+        });
+    }
+
+    /// <summary>
+    /// 处理播放页的弹幕开关（L2 会话开关）。
+    /// </summary>
+    /// <param name="visible">用户希望弹幕是否显示。</param>
+    /// <returns>处理完成的任务。</returns>
+    /// <remarks>
+    /// 打开时把总开关一并置为 <see langword="true"/> 并落盘：用户既然在播放页点了开启，
+    /// 就说明他接受弹幕，下次启动不该又被关掉。
+    /// 关闭只把「可见」置为 false，**保持连接**——再点一次立刻有画面，不必重连等鉴权。
+    /// </remarks>
+    private async Task ApplyDanmakuVisibilityAsync(bool visible)
+    {
+        DanmakuOptions current = _options.Danmaku;
+        bool needsConnect = visible && !current.Enabled;
+        _options = _options with
+        {
+            Danmaku = current with
+            {
+                Enabled = current.Enabled || visible,
+                Visible = visible,
+            },
+        };
+
+        _saveOptions(_options);
+
+        if (!visible)
+        {
+            AppendLog("已隐藏弹幕（连接保持，再次开启可立即显示）。");
+            SendDanmakuConfig();
+            return;
+        }
+
+        if (needsConnect && _currentRoom is { } room)
+        {
+            await StartDanmakuAsync(room).ConfigureAwait(true);
+        }
+
+        AppendLog("已显示弹幕。");
+        SendDanmakuConfig();
+    }
+
+    /// <summary>
+    /// 重试弹幕连接（页面在「连接失败」时提供重试入口）。
+    /// </summary>
+    /// <returns>处理完成的任务。</returns>
+    private async Task RetryDanmakuAsync()
+    {
+        if (_currentRoom is not { } room)
+        {
+            return;
+        }
+
+        await StopDanmakuAsync().ConfigureAwait(true);
+        await StartDanmakuAsync(room).ConfigureAwait(true);
+        AppendLog("已重试弹幕连接。");
+        SendDanmakuConfig();
     }
 
     /// <summary>

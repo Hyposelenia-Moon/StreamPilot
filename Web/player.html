@@ -389,6 +389,43 @@
       min-width: 36px;
       text-align: right;
     }
+
+    /* ===== 弹幕层：盖在画面上但不拦截鼠标（pointer-events: none） ===== */
+    .sp-danmaku-layer {
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      overflow: hidden;
+      pointer-events: none;
+      color: #ffffff;
+      font-size: 24px;
+      opacity: 0.9;
+      white-space: nowrap;
+      text-shadow: 0 0 2px rgba(0, 0, 0, 0.9), 0 0 4px rgba(0, 0, 0, 0.6);
+    }
+
+    .sp-danmaku-layer.sp-danmaku-hidden {
+      display: none;
+    }
+
+    .sp-danmaku-item {
+      position: absolute;
+      left: 100%;
+      will-change: transform;
+      animation-name: sp-danmaku-scroll;
+      animation-timing-function: linear;
+      animation-fill-mode: forwards;
+    }
+
+    @keyframes sp-danmaku-scroll {
+      from {
+        transform: translateX(0);
+      }
+
+      to {
+        transform: translateX(calc(-100% - 100vw));
+      }
+    }
   </style>
 </head>
 
@@ -407,6 +444,7 @@
         音量滑块与点击画面都能立刻打开声音，行为不受影响。
       -->
       <video id="video" playsinline muted></video>
+      <div id="danmakuLayer" class="sp-danmaku-layer sp-danmaku-hidden" aria-hidden="true"></div>
       <div id="hint" class="empty" data-level="info">等待直播源</div>
       <div id="volDisplay" class="hidden">音量：30%</div>
     </div>
@@ -416,6 +454,7 @@
         <span class="controlLabel">音量</span>
         <input id="volume" type="range" min="0" max="100" step="1" value="30" />
         <span id="volumeLabel">30%</span>
+        <button type="button" id="danmakuBtn" title="显示弹幕（首次开启会连接弹幕服务器，可在设置里调整屏蔽词与样式）">弹幕</button>
         <span class="spacer"></span>
         <button type="button" id="chaseBtn" title="开启自动追帧并立刻追一次帧（跳到直播最新位置）">追帧</button>
         <label id="targetBox" for="targetSelect">
@@ -440,6 +479,8 @@
   </div>
 
   <script src="./player-core.js"></script>
+  <script src="./danmaku-core.js"></script>
+  <script src="./danmaku-renderer.js"></script>
   <script>
     'use strict';
 
@@ -494,6 +535,8 @@
         pauseBtn: document.getElementById('pauseBtn'),
         stopBtn: document.getElementById('stopBtn'),
         chaseBtn: document.getElementById('chaseBtn'),
+        danmakuBtn: document.getElementById('danmakuBtn'),
+        danmakuLayer: document.getElementById('danmakuLayer'),
         stage: document.getElementById('stage'),
       };
 
@@ -2560,6 +2603,104 @@
         }
       }
 
+      /** 弹幕渲染器（脚本缺失或容器不存在时为 null，弹幕功能自动禁用）。 */
+      let danmakuRenderer = null;
+
+      /** 弹幕开关与连接状态（由宿主 danmaku-config 下发，页面不自己猜）。 */
+      const danmakuState = { enabled: false, visible: false, state: 'disconnected' };
+
+      /** 初始化弹幕渲染器。 */
+      function initDanmaku() {
+        const layer = document.getElementById('danmakuLayer');
+        if (!layer || typeof window.DanmakuRenderer !== 'function') {
+          return;
+        }
+
+        danmakuRenderer = new window.DanmakuRenderer(layer);
+
+        const button = document.getElementById('danmakuBtn');
+        if (button) {
+          button.addEventListener('click', function onDanmakuToggle() {
+            const next = !danmakuState.visible;
+            danmakuState.visible = next;
+            if (danmakuRenderer) {
+              danmakuRenderer.setVisible(next);
+            }
+
+            syncDanmakuButton();
+            report('danmaku-toggle', next ? '显示弹幕' : '隐藏弹幕', state.run, state.run ? state.run.currentCandidate : null, {
+              visible: next,
+            });
+
+            // 上次连接失败时，重新打开等于"再试一次"：避免用户还要去设置里折腾。
+            if (next && danmakuState.state === 'failed') {
+              report('danmaku-retry', '重试弹幕连接', state.run, state.run ? state.run.currentCandidate : null);
+            }
+          });
+        }
+      }
+
+      /** 同步弹幕按钮的视觉状态与提示文案。 */
+      function syncDanmakuButton() {
+        const button = elements.danmakuBtn;
+        if (!button) {
+          return;
+        }
+
+        button.classList.toggle('active', danmakuState.visible);
+        if (danmakuState.state === 'failed') {
+          button.title = '弹幕连接失败（不影响视频播放）；点此重试';
+          return;
+        }
+
+        button.title = danmakuState.visible
+          ? '隐藏弹幕'
+          : '显示弹幕（首次开启会连接弹幕服务器，可在设置里调整屏蔽词与样式）';
+      }
+
+      /** 处理宿主下发的弹幕配置：更新渲染参数与按钮状态。 */
+      function handleDanmakuConfig(payload) {
+        if (!payload || typeof payload !== 'object') {
+          return;
+        }
+
+        danmakuState.enabled = payload.enabled === true;
+        danmakuState.visible = payload.visible === true;
+        danmakuState.state = typeof payload.state === 'string' ? payload.state : 'disconnected';
+
+        if (danmakuRenderer) {
+          danmakuRenderer.updateOptions(payload);
+          danmakuRenderer.setVisible(danmakuState.visible);
+        }
+
+        syncDanmakuButton();
+      }
+
+      /** 处理批量弹幕消息（宿主已按类型过滤，页面负责屏蔽词/合并/精简）。 */
+      function handleDanmakuBatch(payload) {
+        if (!danmakuRenderer || !payload || !Array.isArray(payload.items)) {
+          return;
+        }
+
+        danmakuRenderer.updateOptions(payload);
+        danmakuRenderer.push(payload.items);
+      }
+
+      /** 处理弹幕连接状态（失败只记日志，不影响播放）。 */
+      function handleDanmakuState(payload) {
+        if (!payload || typeof payload.state !== 'string') {
+          return;
+        }
+
+        danmakuState.state = payload.state;
+        syncDanmakuButton();
+        if (payload.state !== 'failed') {
+          return;
+        }
+
+        logToHost(core.LOG_LEVELS.WARN, '弹幕连接失败（不影响视频播放）');
+      }
+
       /** 处理来自宿主的消息。 */
       function handleHostMessage(payload) {
         if (!payload || typeof payload !== 'object') {
@@ -2586,6 +2727,15 @@
           case core.INBOUND_MESSAGE_TYPES.HOST_STATUS:
             applyHostStatus(payload);
             break;
+          case 'danmaku':
+            handleDanmakuBatch(payload);
+            break;
+          case 'danmaku-config':
+            handleDanmakuConfig(payload);
+            break;
+          case 'danmaku-state':
+            handleDanmakuState(payload);
+            break;
           default:
             if (payload.type === 'volume') {
               applyVolume(payload.value);
@@ -2602,6 +2752,7 @@
       }
 
       bindControls();
+      initDanmaku();
       renderTargets({ extremeTargetMs: core.DEFAULT_EXTREME_TARGET_MS });
       applyVolume(core.INITIAL_VOLUME_PERCENT);
       updatePauseButton();

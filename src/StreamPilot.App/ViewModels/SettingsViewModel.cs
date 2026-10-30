@@ -35,6 +35,16 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private bool _autoPlayOnResolve = true;
     private bool _extremePlayback;
     private bool _autoLaunchMpv;
+    private bool _danmakuEnabled;
+    private DanmakuChoice _selectedDanmakuDisplayMode = DanmakuChoice.DisplayModes[0];
+    private DanmakuChoice _selectedDanmakuFilter = DanmakuChoice.Filters[0];
+    private string _danmakuBlockedKeywords = string.Empty;
+    private bool _danmakuMergeDuplicates = true;
+    private int _danmakuMergeWindowSeconds = DanmakuOptions.DefaultMergeWindowSeconds;
+    private int _danmakuOpacityPercent = 90;
+    private int _danmakuFontSize = DanmakuOptions.DefaultFontSize;
+    private int _danmakuSpeedSeconds = DanmakuOptions.DefaultSpeedSeconds;
+    private int _danmakuMaxOnScreen = DanmakuOptions.DefaultMaxOnScreen;
     private string _bilibiliCookie = string.Empty;
     private string _douyinCookie = string.Empty;
     private string _huyaCookie = string.Empty;
@@ -190,6 +200,107 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         get => _autoLaunchMpv;
         set => SetField(ref _autoLaunchMpv, value);
+    }
+
+    /// <summary>
+    /// 是否启用弹幕（总开关）。
+    /// </summary>
+    /// <remarks>
+    /// 默认关闭：弹幕会遮挡画面，未经用户同意不该自动出现。
+    /// 播放页的「弹幕」按钮首次开启时也会把这个值置为 <see langword="true"/> 并落盘，
+    /// 所以两处入口是同一个开关，不会互相打架。
+    /// </remarks>
+    public bool DanmakuEnabled
+    {
+        get => _danmakuEnabled;
+        set => SetField(ref _danmakuEnabled, value);
+    }
+
+    /// <summary>显示模式选项（精简版 / 完整版）。</summary>
+    public IReadOnlyList<DanmakuChoice> DanmakuDisplayModeChoices { get; } = DanmakuChoice.DisplayModes;
+
+    /// <summary>当前显示模式。</summary>
+    public DanmakuChoice SelectedDanmakuDisplayMode
+    {
+        get => _selectedDanmakuDisplayMode;
+        set
+        {
+            if (value is not null)
+            {
+                SetField(ref _selectedDanmakuDisplayMode, value);
+            }
+        }
+    }
+
+    /// <summary>消息类型过滤选项。</summary>
+    public IReadOnlyList<DanmakuChoice> DanmakuFilterChoices { get; } = DanmakuChoice.Filters;
+
+    /// <summary>当前消息类型过滤。</summary>
+    public DanmakuChoice SelectedDanmakuFilter
+    {
+        get => _selectedDanmakuFilter;
+        set
+        {
+            if (value is not null)
+            {
+                SetField(ref _selectedDanmakuFilter, value);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 屏蔽词（每行一条）。
+    /// </summary>
+    /// <remarks>
+    /// 也接受逗号、顿号、分号、竖线分隔；解析在保存时统一完成（见 <see cref="DanmakuKeywordList"/>）。
+    /// </remarks>
+    public string DanmakuBlockedKeywords
+    {
+        get => _danmakuBlockedKeywords;
+        set => SetField(ref _danmakuBlockedKeywords, value ?? string.Empty);
+    }
+
+    /// <summary>是否合并重复弹幕。</summary>
+    public bool DanmakuMergeDuplicates
+    {
+        get => _danmakuMergeDuplicates;
+        set => SetField(ref _danmakuMergeDuplicates, value);
+    }
+
+    /// <summary>合并重复弹幕的时间窗口（秒）。</summary>
+    public int DanmakuMergeWindowSeconds
+    {
+        get => _danmakuMergeWindowSeconds;
+        set => SetField(ref _danmakuMergeWindowSeconds, value);
+    }
+
+    /// <summary>弹幕不透明度（百分比 10-100）。</summary>
+    /// <remarks>界面用整数百分比表示，配置里存 0.1-1.0 的小数，避免滑块绑定浮点带来的取整噪声。</remarks>
+    public int DanmakuOpacityPercent
+    {
+        get => _danmakuOpacityPercent;
+        set => SetField(ref _danmakuOpacityPercent, value);
+    }
+
+    /// <summary>弹幕字号（像素）。</summary>
+    public int DanmakuFontSize
+    {
+        get => _danmakuFontSize;
+        set => SetField(ref _danmakuFontSize, value);
+    }
+
+    /// <summary>弹幕横穿屏幕耗时（秒）。</summary>
+    public int DanmakuSpeedSeconds
+    {
+        get => _danmakuSpeedSeconds;
+        set => SetField(ref _danmakuSpeedSeconds, value);
+    }
+
+    /// <summary>同屏弹幕上限。</summary>
+    public int DanmakuMaxOnScreen
+    {
+        get => _danmakuMaxOnScreen;
+        set => SetField(ref _danmakuMaxOnScreen, value);
     }
 
     /// <summary>B站 Cookie（可留空）。</summary>
@@ -352,6 +463,39 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         AutoPlayOnResolve = options.Playback.AutoPlayOnResolve;
         ExtremePlayback = options.Playback.Mode == PlaybackMode.Extreme;
         AutoLaunchMpv = options.Playback.AutoLaunchMpv;
+
+        DanmakuOptions danmaku = options.Danmaku.Normalize();
+        DanmakuEnabled = danmaku.Enabled;
+        SelectedDanmakuDisplayMode = DanmakuChoice.Find(DanmakuChoice.DisplayModes, (int)danmaku.DisplayMode);
+        SelectedDanmakuFilter = DanmakuChoice.Find(DanmakuChoice.Filters, (int)danmaku.Filter);
+        DanmakuBlockedKeywords = DanmakuKeywordList.Format(danmaku.BlockedKeywords);
+        DanmakuMergeDuplicates = danmaku.MergeDuplicates;
+        DanmakuMergeWindowSeconds = Clamp(
+            danmaku.MergeWindowSeconds,
+            DanmakuOptions.MinMergeWindowSeconds,
+            DanmakuOptions.MaxMergeWindowSeconds,
+            DanmakuOptions.DefaultMergeWindowSeconds);
+        DanmakuOpacityPercent = Clamp(
+            (int)Math.Round(danmaku.Opacity * 100, MidpointRounding.AwayFromZero),
+            (int)(DanmakuOptions.MinOpacity * 100),
+            100,
+            90);
+        DanmakuFontSize = Clamp(
+            danmaku.FontSize,
+            DanmakuOptions.MinFontSize,
+            DanmakuOptions.MaxFontSize,
+            DanmakuOptions.DefaultFontSize);
+        DanmakuSpeedSeconds = Clamp(
+            danmaku.SpeedSeconds,
+            DanmakuOptions.MinSpeedSeconds,
+            DanmakuOptions.MaxSpeedSeconds,
+            DanmakuOptions.DefaultSpeedSeconds);
+        DanmakuMaxOnScreen = Clamp(
+            danmaku.MaxOnScreen,
+            DanmakuOptions.MinMaxOnScreen,
+            DanmakuOptions.MaxMaxOnScreen,
+            DanmakuOptions.DefaultMaxOnScreen);
+
         BilibiliCookie = options.Platforms.BilibiliCookie;
         DouyinCookie = options.Platforms.DouyinCookie;
         HuyaCookie = options.Platforms.HuyaCookie;
@@ -418,6 +562,13 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             return false;
         }
 
+        IReadOnlyList<string> blockedKeywords = DanmakuKeywordList.Parse(DanmakuBlockedKeywords);
+        if (!DanmakuKeywordList.IsWithinLimit(blockedKeywords))
+        {
+            StatusMessage = $"屏蔽词最多 {DanmakuKeywordList.MaxKeywordCount} 条，请精简后重试。";
+            return false;
+        }
+
         result = baseOptions with
         {
             DefaultPlatform = SelectedDefaultPlatform.Id,
@@ -430,6 +581,21 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 AutoPlayOnResolve = AutoPlayOnResolve,
                 AutoLaunchMpv = AutoLaunchMpv,
             },
+            Danmaku = (baseOptions.Danmaku with
+            {
+                Enabled = DanmakuEnabled,
+                // 打开总开关时同步把"可见"置为 true：否则用户勾了开关却看不到任何弹幕。
+                Visible = DanmakuEnabled || baseOptions.Danmaku.Visible,
+                DisplayMode = (DanmakuDisplayMode)SelectedDanmakuDisplayMode.Value,
+                Filter = (DanmakuFilterMode)SelectedDanmakuFilter.Value,
+                BlockedKeywords = blockedKeywords,
+                MergeDuplicates = DanmakuMergeDuplicates,
+                MergeWindowSeconds = DanmakuMergeWindowSeconds,
+                Opacity = DanmakuOpacityPercent / 100d,
+                FontSize = DanmakuFontSize,
+                SpeedSeconds = DanmakuSpeedSeconds,
+                MaxOnScreen = DanmakuMaxOnScreen,
+            }).Normalize(),
             Recording = baseOptions.Recording with
             {
                 OutputDirectory = recordingDirectory,

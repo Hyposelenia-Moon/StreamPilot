@@ -1665,3 +1665,19 @@ test('换线必须退避且有次数上限，避免重载风暴', () => {
   assert.equal(html.includes('switchCount'), true, '页面必须维护换线计数');
 });
 
+
+test('弹幕开关回传宿主，配置由宿主单向下发', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
+
+  // 开关必须回传宿主：页面自己 switch 一下、宿主毫不知情，就会出现"下次启动又被关掉"。
+  assert.equal(html.includes("report('danmaku-toggle'"), true, '切换弹幕必须回传 danmaku-toggle');
+  assert.equal(html.includes('visible: next'), true, '回传要带 visible 字段，宿主据此落盘');
+
+  // 配置由宿主下发：页面不自己读配置，避免两处状态各说各话。
+  assert.equal(html.includes("case 'danmaku-config'"), true, '页面必须处理宿主下发的 danmaku-config');
+  assert.equal(html.includes('handleDanmakuConfig'), true, '配置处理要走独立函数');
+  assert.equal(html.includes('danmakuState.visible = payload.visible === true'), true, '可见性以宿主下发为准');
+
+  // 失败后重新打开等于重试：不该逼用户回设置里折腾。
+  assert.equal(html.includes("report('danmaku-retry'"), true, '失败态重新开启要触发重试');
+});

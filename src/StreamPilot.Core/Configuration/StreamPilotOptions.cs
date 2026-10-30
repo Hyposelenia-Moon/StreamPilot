@@ -30,6 +30,9 @@ public sealed record StreamPilotOptions
     /// <summary>播放相关设置。</summary>
     public PlaybackOptions Playback { get; init; } = new();
 
+    /// <summary>弹幕相关设置。</summary>
+    public DanmakuOptions Danmaku { get; init; } = new();
+
     /// <summary>录制相关设置。</summary>
     public RecordingOptions Recording { get; init; } = new();
 
@@ -73,6 +76,132 @@ public sealed record PlaybackOptions
 
     /// <summary>解析成功后是否自动开始播放。</summary>
     public bool AutoPlayOnResolve { get; init; } = true;
+}
+
+/// <summary>弹幕设置。</summary>
+/// <remarks>
+/// 默认<b>关闭</b>（v0.2.2 评审结论）：首次使用需用户在播放页主动开启，
+/// 避免弹幕未经允许就遮挡画面。
+/// </remarks>
+public sealed record DanmakuOptions
+{
+    /// <summary>默认同屏弹幕上限。</summary>
+    public const int DefaultMaxOnScreen = 60;
+
+    /// <summary>默认字号（像素）。</summary>
+    public const int DefaultFontSize = 24;
+
+    /// <summary>默认横穿屏幕耗时（秒）。</summary>
+    public const int DefaultSpeedSeconds = 8;
+
+    /// <summary>默认合并重复弹幕的时间窗口（秒）。</summary>
+    public const int DefaultMergeWindowSeconds = 3;
+
+    /// <summary>不透明度下限。</summary>
+    public const double MinOpacity = 0.1;
+
+    /// <summary>字号下限（像素）。</summary>
+    public const int MinFontSize = 12;
+
+    /// <summary>字号上限（像素）。</summary>
+    public const int MaxFontSize = 48;
+
+    /// <summary>横穿屏幕耗时下限（秒）。</summary>
+    public const int MinSpeedSeconds = 4;
+
+    /// <summary>横穿屏幕耗时上限（秒）。</summary>
+    public const int MaxSpeedSeconds = 20;
+
+    /// <summary>同屏上限的最小值。</summary>
+    public const int MinMaxOnScreen = 20;
+
+    /// <summary>同屏上限的最大值。</summary>
+    public const int MaxMaxOnScreen = 200;
+
+    /// <summary>合并窗口下限（秒）。</summary>
+    public const int MinMergeWindowSeconds = 1;
+
+    /// <summary>合并窗口上限（秒）。</summary>
+    public const int MaxMergeWindowSeconds = 10;
+
+    /// <summary>全局开关；默认关闭。</summary>
+    public bool Enabled { get; init; }
+
+    /// <summary>上次会话的可见性（用户开启后记录，下次沿用）。</summary>
+    public bool Visible { get; init; } = true;
+
+    /// <summary>消息类型过滤（决定显示哪些类型）。</summary>
+    public DanmakuFilterMode Filter { get; init; } = DanmakuFilterMode.ChatOnly;
+
+    /// <summary>显示模式（决定单条弹幕显示多少信息）。</summary>
+    public DanmakuDisplayMode DisplayMode { get; init; } = DanmakuDisplayMode.Compact;
+
+    /// <summary>弹幕不透明度（0.1-1.0）。</summary>
+    public double Opacity { get; init; } = 0.9;
+
+    /// <summary>字号（像素，12-48）。</summary>
+    public int FontSize { get; init; } = DefaultFontSize;
+
+    /// <summary>横穿屏幕耗时（秒，4-20）。</summary>
+    public int SpeedSeconds { get; init; } = DefaultSpeedSeconds;
+
+    /// <summary>同屏弹幕上限（20-200）。</summary>
+    public int MaxOnScreen { get; init; } = DefaultMaxOnScreen;
+
+    /// <summary>
+    /// 屏蔽词列表：弹幕文本**包含**任一关键词（不区分大小写）时不显示。
+    /// </summary>
+    /// <remarks>
+    /// 在渲染前过滤（配置改动立即生效，无需重连）。空字符串与纯空白关键词会被忽略。
+    /// </remarks>
+    public IReadOnlyList<string> BlockedKeywords { get; init; } = [];
+
+    /// <summary>是否合并重复弹幕：相同文本在 <see cref="MergeWindowSeconds"/> 内只显示一条并累加次数。</summary>
+    public bool MergeDuplicates { get; init; } = true;
+
+    /// <summary>合并重复弹幕的时间窗口（秒，1-10）。</summary>
+    public int MergeWindowSeconds { get; init; } = DefaultMergeWindowSeconds;
+
+    /// <summary>
+    /// 把配置收敛到合法范围：越界的数值夹到边界，屏蔽词去空去重。
+    /// </summary>
+    /// <returns>收敛后的配置（本身不可变）。</returns>
+    /// <remarks>
+    /// 配置文件可能被手工改过、也可能来自更早的版本；渲染侧不该再为"0 秒横穿""字号 0"这类
+    /// 非法值写防御代码，读写两侧都在这里收敛一次即可。
+    /// </remarks>
+    public DanmakuOptions Normalize() => this with
+    {
+        Opacity = double.IsFinite(Opacity) ? Math.Clamp(Opacity, MinOpacity, 1.0) : 0.9,
+        FontSize = Math.Clamp(FontSize, MinFontSize, MaxFontSize),
+        SpeedSeconds = Math.Clamp(SpeedSeconds, MinSpeedSeconds, MaxSpeedSeconds),
+        MaxOnScreen = Math.Clamp(MaxOnScreen, MinMaxOnScreen, MaxMaxOnScreen),
+        MergeWindowSeconds = Math.Clamp(MergeWindowSeconds, MinMergeWindowSeconds, MaxMergeWindowSeconds),
+        BlockedKeywords = DanmakuKeywordList.Parse(DanmakuKeywordList.Format(BlockedKeywords)),
+    };
+}
+
+/// <summary>弹幕显示模式（决定单条弹幕显示多少信息）。</summary>
+public enum DanmakuDisplayMode
+{
+    /// <summary>精简版：只显示「昵称 + 文本」，视觉最轻、信息密度最高。</summary>
+    Compact = 0,
+
+    /// <summary>完整版：额外显示粉丝牌、用户等级与弹幕颜色。</summary>
+    Full = 1,
+}
+
+/// <summary>弹幕消息类型过滤（决定显示哪些类型）。</summary>
+public enum DanmakuFilterMode
+{
+    /// <summary>只看普通弹幕。</summary>
+    ChatOnly = 0,
+
+    /// <summary>弹幕 + 礼物。</summary>
+    WithGift = 1,
+
+    /// <summary>全部（含进场互动与系统消息）。</summary>
+    All = 2,
 }
 
 /// <summary>录制设置。</summary>
