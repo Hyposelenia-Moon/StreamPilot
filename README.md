@@ -235,17 +235,13 @@ StreamPilot/
 |--------|----------|
 | `dotnet build StreamPilot.slnx -c Debug` | **0 警告 / 0 错误**（`TreatWarningsAsErrors=true`） |
 | `build\test.ps1` | **四个阶段全部通过** |
-| C# 单元测试 | **279 / 279 通过**（`tests/StreamPilot.Tests/Cases/*.cs`） |
+| C# 单元测试 | **286 / 286 通过**（`tests/StreamPilot.Tests/Cases/*.cs`） |
 | 前端回归测试 | **99 / 99 通过**（`tests/web/*.test.js`，`node --test`） |
 | 静态红线自检 | 通过 |
-| `node build/analyze-csharp.mjs` | **143 文件 / 38476 行 / 243 类型 / 1286 方法**，未发现结构性问题 |
+| `node build/analyze-csharp.mjs` | **149 文件 / 40228 行 / 253 类型 / 1336 方法**，未发现结构性问题 |
 | 发布产物 | `StreamPilot-windows-v0.2.2.zip`（附校验值文件，见 `build\publish.ps1`） |
 | 真实房间实测（B站 814） | 解析 12 条候选；**经真实中继 12/12 返回媒体数据**（FLV 文件头、HLS 播放列表改写后的切片、TS 同步字节） |
 | 播放页控制条几何实测 | 无头 Edge 渲染真实页面（`node tests/web/layout-probe/run-probe.js`，档位 / 画质下拉按真实运行态填好选项），1280→480 px 逐档 × 3 快照（「追帧」/「停止追帧」/ 停止追帧 + 长状态行）：**14 宽度 × 3 快照 = 42 次测量，0 处重叠**；控制条单行阈值随画质档位名宽度变化——普通档位名（最宽 `1080P 高码率`）时 **1024 px 起单行**，带 HDR / 高帧率 后缀的最宽档位名（下拉被 `max-width: 220px` 收敛）时 **1120 px 起单行**；1024–620 px 为两行，560 px 起为三行 |
-
-> 上表的 C# 单元测试数量是**预设平台改动之前**的整轮结果：本轮新增 `PlatformDetectionTests`
-> 与 `PresetStoreTests`（共 16 个用例），用例总数与 `build\test.ps1` 结论需在集成时按实际运行结果更新；
-> `node build/analyze-csharp.mjs` 一行已按改动后的实际输出更新。
 
 > 真实房间实测的做法：将解析出的候选线路注册进真实中继（`BridgeHost`）后，像播放页一样只请求本机中继地址完成，覆盖「解析 → 中继 → CDN → 媒体字节」整条链路；它不等于 WebView2 中出画，出画仍需在真机上肉眼确认。
 

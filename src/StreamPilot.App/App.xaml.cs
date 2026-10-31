@@ -12,6 +12,7 @@ using StreamPilot.Core.Models;
 using StreamPilot.Core.Parsers;
 using StreamPilot.Core.Runtime;
 using StreamPilot.Core.Services;
+using StreamPilot.Core.Updates;
 using StreamPilot.Parsers;
 using StreamPilot.Parsers.Bigo;
 using StreamPilot.Parsers.Bilibili;
@@ -49,6 +50,8 @@ public partial class App : WpfApplication
     private HttpClientFactory? _httpClients;
     private PresetStore? _presetStore;
     private MpvLauncher? _mpvLauncher;
+    private GitHubReleaseClient? _updateClient;
+    private UpdateInstaller? _updateInstaller;
 
     /// <summary>当前生效的配置（供 UI 与桥接读取最新值）。</summary>
     internal StreamPilotOptions Options => _optionsStore?.Current ?? new StreamPilotOptions();
@@ -95,6 +98,9 @@ public partial class App : WpfApplication
             StartBridgeIfEnabled(options);
             shell.RefreshBridgeStatus();
             TryPersistDetectedMpvPath();
+
+            // 上次更新留下的 .old 备份此时已无人占用，启动时顺手清掉。
+            _updateInstaller?.CleanupPreviousVersions();
         }
         catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
         {
@@ -159,7 +165,10 @@ public partial class App : WpfApplication
         _logger,
         options,
         SaveOptions,
-        ShowSettingsDialog);
+        ShowSettingsDialog,
+        _updateClient!,
+        _updateInstaller!,
+        ShowUpdateDialog);
 
     /// <summary>解析 mpv 可执行文件路径；未指定时按默认顺序自动探测。</summary>
     /// <param name="configuredPath">配置中的路径，可为空。</param>
@@ -181,6 +190,28 @@ public partial class App : WpfApplication
         }
 
         return window.ShowDialog() == true;
+    }
+
+    /// <summary>
+    /// 以模态方式打开更新窗口。
+    /// </summary>
+    /// <param name="release">目标版本。</param>
+    /// <returns>窗口已打开并关闭后返回 <see langword="true"/>。</returns>
+    private bool ShowUpdateDialog(UpdateReleaseInfo release)
+    {
+        if (_updateInstaller is null)
+        {
+            return false;
+        }
+
+        UpdateWindow window = new(release, _updateInstaller, Options.Update.MirrorPrefix, AppVersion.Current);
+        if (MainWindow is { } owner && !ReferenceEquals(owner, window))
+        {
+            window.Owner = owner;
+        }
+
+        window.ShowDialog();
+        return true;
     }
 
     /// <summary>
@@ -241,6 +272,10 @@ public partial class App : WpfApplication
         registry.RegisterInstance(factory);
         HttpTextClient textClient = new(factory, _logger);
         registry.RegisterInstance(textClient);
+
+        // 软件内更新（GitHub Releases）：检查与安装共用同一个 HTTP 工厂，因此沿用配置里的代理。
+        _updateClient = new GitHubReleaseClient(factory, _logger);
+        _updateInstaller = new UpdateInstaller(factory, _logger);
 
         // 解析层（Parsers 工程实现 Core 契约）
         registry.RegisterSingleton<IPlatformParserFactory>(_ => new PlatformParserFactory(

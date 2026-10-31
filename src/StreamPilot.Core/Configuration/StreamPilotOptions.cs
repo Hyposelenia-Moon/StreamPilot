@@ -47,6 +47,9 @@ public sealed record StreamPilotOptions
 
     /// <summary>日志设置。</summary>
     public LoggingOptions Logging { get; init; } = new();
+
+    /// <summary>更新设置。</summary>
+    public UpdateOptions Update { get; init; } = new();
 }
 
 /// <summary>播放设置。</summary>
@@ -316,4 +319,24 @@ public sealed record LoggingOptions
 
     /// <summary>是否记录 Trace 级日志（含 URL 指纹，永不含签名原文）。</summary>
     public bool VerboseDiagnostics { get; init; }
+}
+
+/// <summary>软件内更新设置。</summary>
+public sealed record UpdateOptions
+{
+    /// <summary>启动后是否自动检查更新（延迟若干秒，失败不打扰）。</summary>
+    public bool CheckOnStartup { get; init; } = true;
+
+    /// <summary>是否把预发布版本（prerelease）也算作可更新版本。</summary>
+    public bool IncludePrerelease { get; init; }
+
+    /// <summary>
+    /// 下载加速前缀（例如 <c>https://ghfast.top/</c>），拼在 GitHub 下载地址前面；为空表示直连。
+    /// </summary>
+    /// <remarks>
+    /// 只影响更新包的下载，不改变检查更新所用的 API 地址：镜像站通常只代理
+    /// <c>github.com</c> 的文件下载，不代理 <c>api.github.com</c>。
+    /// 检查不通时应该配「网络代理」，而不是镜像前缀。
+    /// </remarks>
+    public string MirrorPrefix { get; init; } = string.Empty;
 }

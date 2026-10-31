@@ -8,6 +8,8 @@ using System.Windows;
 using StreamPilot.Core.Configuration;
 using StreamPilot.Core.Logging;
 using StreamPilot.Core.Models;
+using StreamPilot.Core.Runtime;
+using StreamPilot.Core.Updates;
 using WinFormsDialogResult = System.Windows.Forms.DialogResult;
 using WinFormsFolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 using WinFormsOpenFileDialog = System.Windows.Forms.OpenFileDialog;
@@ -23,6 +25,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 {
     private readonly Func<string?, string?> _resolveMpvPath;
     private readonly IStructuredLogger _logger;
+    private readonly Func<Task<UpdateCheckResult>>? _checkUpdate;
     private readonly string _moduleName = "App.Settings";
 
     /// <summary>分片最小字节数的界面输入上限（MiB）：只是输入框的合理范围，不是分片上限。</summary>
@@ -68,18 +71,29 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private bool _bridgeAutoStart = true;
     private bool _verboseDiagnostics;
     private int _logRetainDays = 5;
+    private bool _checkUpdateOnStartup = true;
+    private bool _includePrerelease;
+    private string _updateMirrorPrefix = string.Empty;
+    private string _updateCheckStatus = string.Empty;
+    private bool _isCheckingUpdate;
     private string _statusMessage = string.Empty;
 
     /// <summary>初始化设置视图模型。</summary>
     /// <param name="resolveMpvPath">mpv 路径解析函数（返回解析后的绝对路径，未找到返回 <see langword="null"/>）。</param>
     /// <param name="logger">结构化日志。</param>
     /// <param name="logLines">与主界面共享的"最近事件"滚动列表，可为 <see langword="null"/>。</param>
-    public SettingsViewModel(Func<string?, string?> resolveMpvPath, IStructuredLogger logger, ObservableCollection<string>? logLines = null)
+    /// <param name="checkUpdate">手动检查更新的回调（由主视图模型提供），可为 <see langword="null"/>。</param>
+    public SettingsViewModel(
+        Func<string?, string?> resolveMpvPath,
+        IStructuredLogger logger,
+        ObservableCollection<string>? logLines = null,
+        Func<Task<UpdateCheckResult>>? checkUpdate = null)
     {
         ArgumentNullException.ThrowIfNull(resolveMpvPath);
         ArgumentNullException.ThrowIfNull(logger);
         _resolveMpvPath = resolveMpvPath;
         _logger = logger;
+        _checkUpdate = checkUpdate;
 
         LogLines = logLines ?? [];
 
@@ -91,6 +105,10 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         OpenConfigFolderCommand = new RelayCommand(_ => OpenFolder(Path.GetDirectoryName(AppPaths.ConfigFile) ?? AppPaths.UserDataDirectory));
         OpenLogFolderCommand = new RelayCommand(_ => OpenFolder(AppPaths.LogDirectory));
         OpenRecordingFolderCommand = new RelayCommand(_ => OpenFolder(EffectiveRecordingDirectory));
+        CheckUpdateCommand = new AsyncRelayCommand(
+            _ => CheckUpdateAsync(),
+            HandleCheckUpdateErrorAsync,
+            _ => !_isCheckingUpdate && _checkUpdate is not null);
     }
 
     /// <inheritdoc />
@@ -122,6 +140,40 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     /// <summary>打开录制目录。</summary>
     public RelayCommand OpenRecordingFolderCommand { get; }
+
+    /// <summary>手动检查更新命令。</summary>
+    public AsyncRelayCommand CheckUpdateCommand { get; }
+
+    /// <summary>当前版本号（只读展示）。</summary>
+    public string CurrentVersion => AppVersion.Current;
+
+    /// <summary>启动后自动检查更新。</summary>
+    public bool CheckUpdateOnStartup
+    {
+        get => _checkUpdateOnStartup;
+        set => SetField(ref _checkUpdateOnStartup, value);
+    }
+
+    /// <summary>是否把预发布版本也算作可更新版本。</summary>
+    public bool IncludePrerelease
+    {
+        get => _includePrerelease;
+        set => SetField(ref _includePrerelease, value);
+    }
+
+    /// <summary>更新包下载加速前缀（留空直连 GitHub）。</summary>
+    public string UpdateMirrorPrefix
+    {
+        get => _updateMirrorPrefix;
+        set => SetField(ref _updateMirrorPrefix, value ?? string.Empty);
+    }
+
+    /// <summary>检查更新的结果提示。</summary>
+    public string UpdateCheckStatus
+    {
+        get => _updateCheckStatus;
+        private set => SetField(ref _updateCheckStatus, value);
+    }
 
     /// <summary>实际生效的录制目录（留空时为默认目录）。</summary>
     public string EffectiveRecordingDirectory =>
@@ -537,6 +589,11 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         MaxAttempts = Clamp(options.Network.MaxAttempts, 1, 5, 3);
         UserAgent = options.Network.UserAgent;
 
+        CheckUpdateOnStartup = options.Update.CheckOnStartup;
+        IncludePrerelease = options.Update.IncludePrerelease;
+        UpdateMirrorPrefix = options.Update.MirrorPrefix;
+        UpdateCheckStatus = string.Empty;
+
         BridgePort = Clamp(options.Bridge.PreferredPort, 1024, 65535, BridgeConstants.DefaultPort);
         BridgeAutoStart = options.Bridge.AutoStart;
 
@@ -656,6 +713,12 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             {
                 VerboseDiagnostics = VerboseDiagnostics,
                 RetainedFileCount = LogRetainDays,
+            },
+            Update = baseOptions.Update with
+            {
+                CheckOnStartup = CheckUpdateOnStartup,
+                IncludePrerelease = IncludePrerelease,
+                MirrorPrefix = UpdateMirrorPrefix.Trim(),
             },
         };
 
@@ -777,5 +840,41 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         field = value;
         OnPropertyChanged(propertyName);
         return true;
+    }
+
+    /// <summary>
+    /// 手动检查更新：结果直接显示在设置页（启动检查是静默的，这里要给出明确回执）。
+    /// </summary>
+    /// <returns>异步任务。</returns>
+    private async Task CheckUpdateAsync()
+    {
+        if (_checkUpdate is null)
+        {
+            return;
+        }
+
+        _isCheckingUpdate = true;
+        UpdateCheckStatus = "正在检查…";
+        CheckUpdateCommand.RaiseCanExecuteChanged();
+        try
+        {
+            UpdateCheckResult result = await _checkUpdate().ConfigureAwait(true);
+            UpdateCheckStatus = result.Message;
+        }
+        finally
+        {
+            _isCheckingUpdate = false;
+            CheckUpdateCommand.RaiseCanExecuteChanged();
+        }
+    }
+
+    /// <summary>检查更新命令的异常处理：只把失败写进设置页，不弹窗打断。</summary>
+    /// <param name="exception">异常。</param>
+    /// <returns>已完成的任务。</returns>
+    private Task HandleCheckUpdateErrorAsync(Exception exception)
+    {
+        _logger.LogError(LogLevel.Warn, _moduleName, "手动检查更新失败。", exception);
+        UpdateCheckStatus = "检查更新失败：" + exception.Message;
+        return Task.CompletedTask;
     }
 }

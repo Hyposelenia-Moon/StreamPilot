@@ -43,11 +43,29 @@
               <ColumnDefinition Width="*" />
               <ColumnDefinition Width="Auto" />
               <ColumnDefinition Width="Auto" />
+              <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0" Text="StreamPilot 控制台" FontWeight="SemiBold" VerticalAlignment="Center" />
-            <Button Grid.Column="1" Content="⚙ 设置" Command="{Binding OpenSettingsCommand}"
+
+            <!-- 只有检查到新版本时才出现：平时不占位置，也不制造"这里有个按钮但没用"的困惑 -->
+            <Button Grid.Column="1" Command="{Binding OpenUpdateCommand}" Margin="0,0,8,0"
+                    ToolTip="发现新版本：点此查看更新说明并安装">
+              <Button.Style>
+                <Style TargetType="Button" BasedOn="{StaticResource PrimaryButton}">
+                  <Setter Property="Visibility" Value="Collapsed" />
+                  <Style.Triggers>
+                    <DataTrigger Binding="{Binding IsUpdateAvailable}" Value="True">
+                      <Setter Property="Visibility" Value="Visible" />
+                    </DataTrigger>
+                  </Style.Triggers>
+                </Style>
+              </Button.Style>
+              <TextBlock Text="{Binding UpdateBannerText}" FontWeight="SemiBold" />
+            </Button>
+
+            <Button Grid.Column="2" Content="⚙ 设置" Command="{Binding OpenSettingsCommand}"
                     Padding="12,7" Margin="0,0,8,0" AutomationProperties.AutomationId="OpenSettingsButton" />
-            <Button Grid.Column="2" x:Name="CollapsePanelButton" Content="◀"
+            <Button Grid.Column="3" x:Name="CollapsePanelButton" Content="◀"
                     Padding="8,7" Margin="0" Click="OnToggleControlPanel"
                     ToolTip="收起控制面板（把宽度让给画面）；展开可点画面左上角「☰」，或按 Ctrl+B" />
           </Grid>

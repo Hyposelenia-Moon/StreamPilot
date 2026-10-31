@@ -14,7 +14,9 @@ using StreamPilot.Core.Configuration;
 using StreamPilot.Core.Logging;
 using StreamPilot.Core.Models;
 using StreamPilot.Core.Parsers;
+using StreamPilot.Core.Runtime;
 using StreamPilot.Core.Services;
+using StreamPilot.Core.Updates;
 
 /// <summary>
 /// 主窗口视图模型：承载直播 / 录制 / 设置三个面板的状态与命令。
@@ -137,6 +139,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>预设开播检测的周期轮询间隔（开播提醒 / 自动录制的共同节奏）。</summary>
     private static readonly TimeSpan PresetPollInterval = TimeSpan.FromMinutes(2);
 
+    /// <summary>启动后延迟多久检查更新（毫秒）：避开启动与首帧渲染的高峰期。</summary>
+    private const int StartupUpdateCheckDelayMs = 8000;
+
     /// <summary>「新增预设」对话框里解析直播链接的超时时间。</summary>
     private static readonly TimeSpan PresetLinkResolveTimeout = TimeSpan.FromSeconds(20);
 
@@ -222,6 +227,16 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     private readonly PresetStore _presetStore;
     private readonly Func<string?, string?> _resolveMpvPath;
     private readonly Func<SettingsViewModel, bool> _showSettingsDialog;
+
+    /// <summary>GitHub Release 查询客户端（检查更新）。</summary>
+    private readonly GitHubReleaseClient _updateClient;
+
+    /// <summary>更新包下载与应用。</summary>
+    private readonly UpdateInstaller _updateInstaller;
+
+    /// <summary>打开更新窗口的回调（由组合根提供，视图模型不直接 new 窗口）。</summary>
+    private readonly Func<UpdateReleaseInfo, bool> _showUpdateDialog;
+
     private readonly string _moduleName = "App.Shell";
 
     /// <summary>平台分享短链解析器：把 v.douyin.com / b23.tv 跟随跳转成真实房间地址。</summary>
@@ -286,6 +301,10 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>预设列表当前选中项（见 <see cref="SelectedPresetItem"/>）。</summary>
     private PresetItemViewModel? _selectedPresetItem;
+
+    /// <summary>已发现但尚未安装的新版本；为 null 表示没有可用更新。</summary>
+    private UpdateReleaseInfo? _availableUpdate;
+
     private string _roomInput = string.Empty;
     private int _extremeTargetMs;
     private bool _isBusy;
@@ -331,6 +350,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         _presetStore = dependencies.Presets;
         _resolveMpvPath = dependencies.ResolveMpvPath;
         _showSettingsDialog = dependencies.ShowSettingsDialog;
+        _updateClient = dependencies.UpdateClient;
+        _updateInstaller = dependencies.UpdateInstaller;
+        _showUpdateDialog = dependencies.ShowUpdateDialog;
         _shortLinkResolver = new ShortLinkResolver(_logger);
         _trayNotifier = new TrayNotifier(_logger);
 
@@ -371,6 +393,11 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
         // 周期轮询：每 2 分钟后台检测一次，发现"未开播 → 开播"就提醒并按需自动录制。
         _presetPollTimer = new System.Threading.Timer(_ => OnPresetPollTick(), null, PresetPollInterval, PresetPollInterval);
+
+        OpenUpdateCommand = new RelayCommand(_ => OpenUpdate(), _ => _availableUpdate is not null);
+
+        // 启动检查放在最后：此时界面已建好，检查失败也不会影响主流程。
+        StartStartupUpdateCheck();
     }
 
     /// <summary>视图模型依赖集合（由组合根构造）。</summary>
@@ -385,6 +412,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <param name="Options">初始配置。</param>
     /// <param name="SaveOptions">配置保存回调。</param>
     /// <param name="ShowSettingsDialog">打开设置窗口的回调（返回 true 表示用户点了保存）。</param>
+    /// <param name="UpdateClient">GitHub Release 查询客户端。</param>
+    /// <param name="UpdateInstaller">更新包下载与安装器。</param>
+    /// <param name="ShowUpdateDialog">打开更新窗口的回调。</param>
     public sealed record Dependencies(
         IRoomResolver Resolver,
         IPlaybackCoordinator Playback,
@@ -396,7 +426,10 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         IStructuredLogger Logger,
         StreamPilotOptions Options,
         Action<StreamPilotOptions> SaveOptions,
-        Func<SettingsViewModel, bool> ShowSettingsDialog);
+        Func<SettingsViewModel, bool> ShowSettingsDialog,
+        GitHubReleaseClient UpdateClient,
+        UpdateInstaller UpdateInstaller,
+        Func<UpdateReleaseInfo, bool> ShowUpdateDialog);
 
     /// <summary>页面消息到达事件（宿主 → 页面方向的发送由该事件提供通道）。</summary>
     public event EventHandler<string>? SendMessageRequested;
@@ -461,6 +494,17 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>打开设置窗口命令。</summary>
     public ICommand OpenSettingsCommand { get; }
+
+    /// <summary>打开更新窗口命令（仅在发现新版本时可用）。</summary>
+    public ICommand OpenUpdateCommand { get; }
+
+    /// <summary>是否已发现可用的新版本（控制顶栏「更新」按钮的显隐）。</summary>
+    public bool IsUpdateAvailable => _availableUpdate is not null;
+
+    /// <summary>顶栏「更新」按钮的文案（例如「更新 0.2.3」）。</summary>
+    public string UpdateBannerText => _availableUpdate is null
+        ? string.Empty
+        : "更新 " + _availableUpdate.Version;
 
     /// <summary>把当前平台与房间号保存为预设。</summary>
     public ICommand SavePresetCommand { get; }
@@ -1693,7 +1737,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     {
         try
         {
-            SettingsViewModel settings = new(_resolveMpvPath, _logger, LogLines);
+            SettingsViewModel settings = new(_resolveMpvPath, _logger, LogLines, CheckForUpdateAsync);
             settings.Load(_options);
             AppendLog("打开设置窗口。");
 
@@ -1732,6 +1776,95 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             AppendLog("设置操作失败：" + exception.Message);
         }
     }
+
+    /// <summary>
+    /// 启动后延迟检查更新。
+    /// </summary>
+    /// <remarks>
+    /// 失败完全静默：离线、被墙、超出匿名限流都不该在启动时弹提示。
+    /// 检查结果只在「发现新版本」时体现为顶栏按钮 + 托盘气泡。
+    /// </remarks>
+    private void StartStartupUpdateCheck()
+    {
+        if (!_options.Update.CheckOnStartup)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(StartupUpdateCheckDelayMs).ConfigureAwait(false);
+                UpdateCheckResult result = await _updateClient
+                    .CheckAsync(CurrentSemanticVersion(), _options.Update.IncludePrerelease, CancellationToken.None)
+                    .ConfigureAwait(false);
+                DispatchToUi(() => ApplyUpdateCheckResult(result, silent: true));
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
+            {
+                _logger.LogError(LogLevel.Warn, _moduleName, "启动检查更新失败。", exception);
+            }
+        });
+    }
+
+    /// <summary>
+    /// 手动检查更新（设置页的「检查更新」按钮）：结果如实回报给调用方，并写进状态行。
+    /// </summary>
+    /// <returns>检查结果。</returns>
+    private async Task<UpdateCheckResult> CheckForUpdateAsync()
+    {
+        UpdateCheckResult result = await _updateClient
+            .CheckAsync(CurrentSemanticVersion(), _options.Update.IncludePrerelease, CancellationToken.None)
+            .ConfigureAwait(true);
+        ApplyUpdateCheckResult(result, silent: false);
+        return result;
+    }
+
+    /// <summary>把检查结果反映到界面：有更新则点亮顶栏按钮并弹一条托盘气泡。</summary>
+    /// <param name="result">检查结果。</param>
+    /// <param name="silent">静默模式（启动检查）下，无更新与失败都不打扰用户。</param>
+    private void ApplyUpdateCheckResult(UpdateCheckResult result, bool silent)
+    {
+        if (result.Status == UpdateCheckStatus.UpdateAvailable && result.Release is not null)
+        {
+            UpdateReleaseInfo release = result.Release;
+            _availableUpdate = release;
+            OnPropertyChanged(nameof(IsUpdateAvailable));
+            OnPropertyChanged(nameof(UpdateBannerText));
+            (OpenUpdateCommand as RelayCommand)?.RaiseCanExecuteChanged();
+            StatusMessage = "发现新版本 " + release.Version + "，点右上角「更新」查看。";
+            AppendLog("发现新版本：" + release.Version);
+            _trayNotifier.NotifyUpdate(release.Version.ToString());
+            return;
+        }
+
+        if (silent)
+        {
+            _logger.Info(_moduleName, "启动检查更新：" + result.Message);
+            return;
+        }
+
+        StatusMessage = result.Message;
+        AppendLog(result.Message);
+    }
+
+    /// <summary>打开更新窗口（只有发现新版本后才有意义）。</summary>
+    private void OpenUpdate()
+    {
+        if (_availableUpdate is null)
+        {
+            return;
+        }
+
+        _showUpdateDialog(_availableUpdate);
+    }
+
+    /// <summary>当前版本号（解析失败时按 0.0.0 处理，任何发布版都会被判定为"有更新"）。</summary>
+    private static SemanticVersion CurrentSemanticVersion() =>
+        SemanticVersion.TryParse(AppVersion.Current, out SemanticVersion version)
+            ? version
+            : new SemanticVersion(0, 0, 0);
 
     /// <summary>
     /// 设置保存后让弹幕配置立即生效：关掉总开关要断开连接，打开则按需连上。

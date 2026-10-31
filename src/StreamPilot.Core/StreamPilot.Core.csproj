@@ -12,4 +12,9 @@
     <Description>StreamPilot 领域模型、契约接口、结构化日志、HTTP 客户端与配置存取。</Description>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- 纯函数式的内部解析逻辑（更新包解析、状态映射等）开放给测试工程。 -->
+    <InternalsVisibleTo Include="StreamPilot.Tests" />
+  </ItemGroup>
+
 </Project>
