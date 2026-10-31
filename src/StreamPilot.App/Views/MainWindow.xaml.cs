@@ -16,15 +16,6 @@ public partial class MainWindow : Window
     /// <summary>左侧控制面板展开时的宽度（像素）。</summary>
     private const double ControlPanelWidth = 380;
 
-    /// <summary>
-    /// 左侧控制面板收起后的窄条宽度（像素）。
-    /// </summary>
-    /// <remarks>
-    /// 收起后不能把列宽设成 0：恢复按钮必须留在左侧列里，
-    /// 否则只能浮在播放区上，而 WebView2 是原生 HWND（HwndHost），会把 WPF 浮层盖住。
-    /// </remarks>
-    private const double ControlPanelCollapsedWidth = 36;
-
     /// <summary>播放宿主（在 <c>Loaded</c> 时挂载到占位容器）。</summary>
     private readonly WebPlayerHost _playerHost;
 
@@ -62,6 +53,7 @@ public partial class MainWindow : Window
         {
             _viewModel.SendMessageRequested -= OnSendMessageRequested;
             _viewModel.FullscreenChanged -= OnFullscreenChanged;
+            _viewModel.PanelExpandRequested -= OnPanelExpandRequested;
         }
 
         _viewModel = e.NewValue as ShellViewModel;
@@ -69,6 +61,7 @@ public partial class MainWindow : Window
         {
             _viewModel.SendMessageRequested += OnSendMessageRequested;
             _viewModel.FullscreenChanged += OnFullscreenChanged;
+            _viewModel.PanelExpandRequested += OnPanelExpandRequested;
         }
     }
 
@@ -102,6 +95,7 @@ public partial class MainWindow : Window
             _viewModel.Shutdown();
             _viewModel.SendMessageRequested -= OnSendMessageRequested;
             _viewModel.FullscreenChanged -= OnFullscreenChanged;
+            _viewModel.PanelExpandRequested -= OnPanelExpandRequested;
         }
 
         _playerHost.MessageReceived -= OnPlayerMessageReceived;
@@ -110,6 +104,17 @@ public partial class MainWindow : Window
     }
 
     private void OnSendMessageRequested(object? sender, string json) => _playerHost.SendMessage(json);
+
+    /// <summary>播放页左上角的「☰ 控制面板」被点击：把左侧面板展开回来。</summary>
+    private void OnPanelExpandRequested(object? sender, EventArgs e)
+    {
+        if (_isFullscreen)
+        {
+            return;
+        }
+
+        SetControlPanelCollapsed(false);
+    }
 
     private void OnPlayerMessageReceived(object? sender, string json) => _viewModel?.OnPlayerMessage(json);
 
@@ -182,19 +187,8 @@ public partial class MainWindow : Window
         SetControlPanelCollapsed(!_panelCollapsed);
     }
 
-    /// <summary>折叠后浮在画面上方的「☰ 控制面板」：恢复展开。</summary>
-    private void OnRestoreControlPanel(object sender, RoutedEventArgs e)
-    {
-        if (_isFullscreen)
-        {
-            return;
-        }
-
-        SetControlPanelCollapsed(false);
-    }
-
     /// <summary>
-    /// 展开或收起左侧控制面板，并同步折叠后画面上的「展开」入口。
+    /// 展开或收起左侧控制面板。
     /// </summary>
     /// <param name="collapsed">是否收起。</param>
     private void SetControlPanelCollapsed(bool collapsed)
@@ -208,27 +202,45 @@ public partial class MainWindow : Window
         ApplyControlPanelLayout();
     }
 
-    /// <summary>按当前折叠状态摆放左侧面板列与「展开」入口。</summary>
+    /// <summary>按当前折叠状态摆放左侧面板列。</summary>
     /// <remarks>
-    /// 收起时保留 <see cref="ControlPanelCollapsedWidth"/> 的窄条而不是收成 0：
-    /// 恢复按钮必须留在左侧列内，浮在播放区上的 WPF 按钮会被 WebView2 的原生窗口盖住，
-    /// 表现就是"点了收起之后再也恢复不了"。
+    /// 收起时整列归零（不再保留窄条，那一条空栏既占地方也难看）。
+    /// 恢复入口由播放页左上角的「☰ 控制面板」提供：WebView2 是原生窗口，浮在播放区上的
+    /// WPF 按钮会被它盖住，所以入口只能画在页面里；<see cref="OnPreviewKeyDown"/> 的 Ctrl+B 是键盘兜底。
     /// </remarks>
     private void ApplyControlPanelLayout()
     {
-        ControlPanel.Visibility = Visibility.Visible;
         if (_panelCollapsed)
         {
-            ControlColumn.Width = new GridLength(ControlPanelCollapsedWidth);
-            ControlPanelContent.Visibility = Visibility.Collapsed;
-            CollapsedRail.Visibility = Visibility.Visible;
+            ControlColumn.Width = new GridLength(0);
+            ControlPanel.Visibility = Visibility.Collapsed;
         }
         else
         {
             ControlColumn.Width = new GridLength(ControlPanelWidth);
-            ControlPanelContent.Visibility = Visibility.Visible;
-            CollapsedRail.Visibility = Visibility.Collapsed;
+            ControlPanel.Visibility = Visibility.Visible;
         }
+
+        _viewModel?.NotifyControlPanelCollapsedChanged(_panelCollapsed);
+    }
+
+    /// <summary>
+    /// Ctrl+B：切换左侧控制面板（面板收起后没有可见的宿主按钮，键盘兜底）。
+    /// </summary>
+    /// <param name="e">键盘事件参数。</param>
+    protected override void OnPreviewKeyDown(System.Windows.Input.KeyEventArgs e)
+    {
+        ArgumentNullException.ThrowIfNull(e);
+        if (e.Key == System.Windows.Input.Key.B
+            && (System.Windows.Input.Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Control) == System.Windows.Input.ModifierKeys.Control
+            && !_isFullscreen)
+        {
+            SetControlPanelCollapsed(!_panelCollapsed);
+            e.Handled = true;
+            return;
+        }
+
+        base.OnPreviewKeyDown(e);
     }
 
     private void OnPlayerInitializationFailed(object? sender, string message)

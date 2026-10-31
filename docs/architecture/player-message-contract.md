@@ -251,16 +251,20 @@
 {
   "type": "player-config",
   "compactControls": false,
-  "autoHideControls": true
+  "autoHideControls": true,
+  "panelCollapsed": false
 }
 ```
 
-**下发时机**同 `danmaku-config`：播放器就绪（`player-ready`）与设置保存。页面据此决定：
+**下发时机**：播放器就绪（`player-ready`）、设置保存、左侧控制面板折叠态变化。页面据此决定：
 
 - `compactControls`（布尔）：`true` 时播放页把「主控层 / 参数层」摊平成一行（旧版布局）；`false`（默认）时分两层。
 - `autoHideControls`（布尔）：播放中鼠标静止约 3 秒后淡出控制条；`false` 时控制条常驻。缺省按 `true` 处理（页面只在明确 `false` 时关闭）。
+- `panelCollapsed`（布尔）：宿主左侧控制面板是否收起。`true` 时播放页在画面左上角显示「☰ 控制面板」，
+  点击发 `panel-expand` 让宿主展开面板（**这是面板收起后唯一的可见入口**：宿主左列宽度归零，
+  而 WebView2 是原生窗口，叠在画面上的 WPF 按钮会被它遮住）。
 
-这两个开关只在宿主的 `PlaybackOptions` 里持久化，页面**不**用 `localStorage` 自行保存——避免两处状态漂移。
+这几个开关只在宿主的 `PlaybackOptions` 里持久化，页面**不**用 `localStorage` 自行保存——避免两处状态漂移。
 
 ---
 
@@ -302,6 +306,7 @@
 | `request-stop` | 用户点了播放页底部的「停止播放」（销毁播放器、关闭画面） | — ；宿主调用 `IPlaybackCoordinator.StopActive()` 释放新旧两轮中继并把状态置为"未播放" |
 | `danmaku-toggle` | 用户点了播放页底部的「弹幕」按钮 | `visible`（布尔）；宿主可据此持久化 `DanmakuOptions.Visible` |
 | `danmaku-retry` | 用户在弹幕连接失败时点「重试」 | — ；宿主重新建立弹幕连接 |
+| `panel-expand` | 用户在画面左上角点「☰ 控制面板」（面板收起态） | — ；宿主把左列从 0 恢复成 380 宽并回下发 `player-config{panelCollapsed:false}` |
 
 > `paused`（媒体元素自身状态）与 `pausedByUser`（页面记录的用户意图）必须分开看：
 > 真机实测"缓冲涨到 100 秒、`reconnects` 恒为 0"的坏状态里两者不一致

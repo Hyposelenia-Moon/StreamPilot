@@ -18,7 +18,11 @@
       <ColumnDefinition Width="*" />
     </Grid.ColumnDefinitions>
 
-    <!-- 左侧：控制面板（进入全屏时整体隐藏，把窗口让给播放区域） -->
+    <!--
+      左侧：控制面板（全屏时整体隐藏，把窗口让给播放区域）。
+      顶栏「◀」把面板收成 0 宽；恢复入口画在播放页左上角（页面发 panel-expand 回来），
+      因为 WebView2 是原生 HWND，浮在播放区上的 WPF 按钮会被它盖住、点不到。Ctrl+B 作为键盘兜底。
+    -->
     <Border Grid.Column="0"
             x:Name="ControlPanel"
             Background="{StaticResource PanelBackgroundBrush}"
@@ -45,7 +49,7 @@
                     Padding="12,7" Margin="0,0,8,0" AutomationProperties.AutomationId="OpenSettingsButton" />
             <Button Grid.Column="2" x:Name="CollapsePanelButton" Content="◀"
                     Padding="8,7" Margin="0" Click="OnToggleControlPanel"
-                    ToolTip="收起控制面板（把宽度让给画面）" />
+                    ToolTip="收起控制面板（把宽度让给画面）；展开可点画面左上角「☰」，或按 Ctrl+B" />
           </Grid>
         </Border>
 
@@ -180,26 +184,32 @@
                             <TextBlock Text="{Binding DisplayText}" TextTrimming="CharacterEllipsis" />
                           </Button>
 
-                          <StackPanel Grid.Column="2" Orientation="Horizontal">
-                            <CheckBox IsChecked="{Binding AutoRecord}"
-                                      VerticalAlignment="Center"
-                                      Margin="0,0,4,0"
-                                      ToolTip="开播自动录制（检测到开播即开始录制，下播自动停止）"
-                                      AutomationProperties.AutomationId="AutoRecordCheckBox" />
-                            <Button Content="编辑"
-                                    Command="{Binding DataContext.EditPresetCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                    CommandParameter="{Binding}"
-                                    AutomationProperties.AutomationId="EditPresetButton"
-                                    ToolTip="修改主播名称、直播链接或平台"
-                                    Padding="10,5"
-                                    Margin="6,0,0,0" />
-                            <Button Content="删除"
-                                    Command="{Binding DataContext.DeletePresetCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                    CommandParameter="{Binding}"
-                                    ToolTip="删除这个预设"
-                                    Padding="10,5"
-                                    Margin="6,0,0,0" />
-                          </StackPanel>
+                              <StackPanel Grid.Column="2" Orientation="Horizontal">
+                                <!-- 文字标签不能省：只有一个小方框时，没人知道它代表"开播自动录制" -->
+                                <CheckBox Content="自动录"
+                                          IsChecked="{Binding AutoRecord}"
+                                          VerticalAlignment="Center"
+                                          VerticalContentAlignment="Center"
+                                          FontSize="13"
+                                          Margin="0,0,6,0"
+                                          ToolTip="勾选后：后台每 2 分钟检测一次，该预设开播时自动开始录制，下播自动停止"
+                                          AutomationProperties.AutomationId="AutoRecordCheckBox" />
+                                <Button Content="编辑"
+                                        Command="{Binding DataContext.EditPresetCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                        CommandParameter="{Binding}"
+                                        AutomationProperties.AutomationId="EditPresetButton"
+                                        ToolTip="修改主播名称、直播链接或平台"
+                                        FontSize="13"
+                                        Padding="8,5"
+                                        Margin="0,0,0,0" />
+                                <Button Content="删除"
+                                        Command="{Binding DataContext.DeletePresetCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                        CommandParameter="{Binding}"
+                                        ToolTip="删除这个预设"
+                                        FontSize="13"
+                                        Padding="8,5"
+                                        Margin="6,0,0,0" />
+                              </StackPanel>
                         </Grid>
                       </DataTemplate>
                     </ListBox.ItemTemplate>
@@ -257,24 +267,6 @@
           </StackPanel>
         </ScrollViewer>
         </Grid>
-
-        <!--
-          折叠态窄条：收起后面板只保留 36px 宽的一条，恢复入口留在这里。
-          不能把恢复按钮浮在播放区上——WebView2 是原生 HWND（HwndHost），
-          会盖住同一 Grid 里后声明的 WPF 元素，按钮既看不见也点不到。
-        -->
-        <Border x:Name="CollapsedRail"
-                Visibility="Collapsed"
-                Background="{StaticResource PanelBackgroundBrush}">
-          <StackPanel VerticalAlignment="Top" HorizontalAlignment="Center" Margin="0,10,0,0">
-            <Button Content="▶"
-                    Padding="8,6"
-                    Margin="0"
-                    Click="OnRestoreControlPanel"
-                    AutomationProperties.AutomationId="ExpandPanelButton"
-                    ToolTip="展开控制面板" />
-          </StackPanel>
-        </Border>
       </Grid>
     </Border>
 

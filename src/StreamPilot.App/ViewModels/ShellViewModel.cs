@@ -122,6 +122,15 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>页面 → 宿主：用户在失败状态点重试弹幕连接。</summary>
     private const string PlayerDanmakuRetryType = "danmaku-retry";
 
+    /// <summary>
+    /// 页面 → 宿主：请求展开左侧控制面板。
+    /// </summary>
+    /// <remarks>
+    /// 面板收起后左列宽度归零，宿主自己的按钮会随面板一起消失；恢复入口因此放在播放页左上角
+    /// （WebView2 内部，不会被原生窗口遮挡），由这条消息把请求送回宿主。
+    /// </remarks>
+    private const string PlayerPanelExpandType = "panel-expand";
+
     /// <summary>播放页档位消息里的目标延迟字段名。</summary>
     private const string TargetFieldName = "extremeTargetMs";
 
@@ -298,6 +307,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>播放页是否处于用户暂停状态（页面遥测里的 paused 是权威状态，暂停不销毁会话）。</summary>
     private bool _isPlaybackPaused;
 
+    /// <summary>左侧控制面板是否收起（收起时播放页左上角显示展开入口）。</summary>
+    private bool _isControlPanelCollapsed;
+
     /// <summary>用户选择的画质档位键；为空表示取平台最高档。</summary>
     private string? _preferredQualityKey;
 
@@ -392,11 +404,33 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>播放页进入/退出全屏（宿主据此放大播放区域）。</summary>
     public event EventHandler<bool>? FullscreenChanged;
 
+    /// <summary>播放页请求展开左侧控制面板（面板收起时画面左上角的入口）。</summary>
+    public event EventHandler? PanelExpandRequested;
+
     /// <summary>
     /// 由宿主回传最终生效的全屏状态，便于界面提示与页面保持一致。
     /// </summary>
     /// <param name="isFullscreen">是否全屏。</param>
     public void NotifyFullscreenChanged(bool isFullscreen) => FullscreenChanged?.Invoke(this, isFullscreen);
+
+    /// <summary>
+    /// 把左侧控制面板的折叠状态同步给播放页。
+    /// </summary>
+    /// <remarks>
+    /// 面板收起后宿主没有任何可见按钮可以让它回来（左列宽度归零），所以恢复入口必须画在播放页里：
+    /// 页面据此决定画面左上角的「☰ 控制面板」是否显示。
+    /// </remarks>
+    /// <param name="collapsed">面板是否已收起。</param>
+    public void NotifyControlPanelCollapsedChanged(bool collapsed)
+    {
+        if (_isControlPanelCollapsed == collapsed)
+        {
+            return;
+        }
+
+        _isControlPanelCollapsed = collapsed;
+        SendPlayerUiConfig();
+    }
 
     /// <summary>属性变更通知。</summary>
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -746,6 +780,11 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
                 case PlayerFullscreenExitType:
                     FullscreenChanged?.Invoke(this, false);
+                    break;
+
+                case PlayerPanelExpandType:
+                    // 面板已展开时再点一次不会有多余动作：宿主侧的 SetControlPanelCollapsed 是幂等的。
+                    PanelExpandRequested?.Invoke(this, EventArgs.Empty);
                     break;
 
                 case PlayerQualityType:
@@ -2616,10 +2655,10 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 把播放页外观配置下发给播放页（紧凑控制条 / 自动隐藏）。
+    /// 把播放页外观配置下发给播放页（紧凑控制条 / 自动隐藏 / 面板折叠态）。
     /// </summary>
     /// <remarks>
-    /// 与弹幕配置一样只在「播放器就绪」与「设置保存」两个时机下发；外观开关不会随播放会话变化，
+    /// 与弹幕配置一样只在「播放器就绪」「设置保存」「面板折叠态变化」三个时机下发；外观开关不会随播放会话变化，
     /// 没有必要塞进每条消息里。
     /// </remarks>
     private void SendPlayerUiConfig()
@@ -2630,6 +2669,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             type = HostPlayerConfigType,
             compactControls = playback.CompactControls,
             autoHideControls = playback.AutoHideControls,
+            panelCollapsed = _isControlPanelCollapsed,
         });
     }
 
