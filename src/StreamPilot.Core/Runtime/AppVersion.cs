@@ -8,7 +8,7 @@ using System.Reflection;
 public static class AppVersion
 {
     /// <summary>无法读取程序集版本时的回退值（与 <c>StreamPilot.App.csproj</c> 的版本号保持一致）。</summary>
-    private const string FallbackVersion = "0.2.2";
+    private const string FallbackVersion = "0.2.3";
 
     private static readonly Lazy<string> LazyVersion = new(ResolveVersion);
 
