@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8" />
+  <title>弹幕压测</title>
+  <style>
+    body {
+      margin: 0;
+      background: #0f1115;
+      overflow: hidden;
+    }
+
+    #stage {
+      position: relative;
+      width: 1280px;
+      height: 720px;
+      overflow: hidden;
+      background: linear-gradient(160deg, #1c2330 0%, #10141b 100%);
+    }
+
+    /* 与 player.html 里的弹幕样式保持一致，压测才有意义 */
+    .sp-danmaku-layer {
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      overflow: hidden;
+      pointer-events: none;
+      color: #ffffff;
+      font-size: 24px;
+      opacity: 0.9;
+      white-space: nowrap;
+      text-shadow: 0 0 2px rgba(0, 0, 0, 0.9), 0 0 4px rgba(0, 0, 0, 0.6);
+      font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+    }
+
+    .sp-danmaku-layer.sp-danmaku-hidden {
+      display: none;
+    }
+
+    .sp-danmaku-item {
+      position: absolute;
+      left: 100%;
+      will-change: transform;
+      animation-name: sp-danmaku-scroll;
+      animation-timing-function: linear;
+      animation-fill-mode: forwards;
+    }
+
+    @keyframes sp-danmaku-scroll {
+      from {
+        transform: translateX(0);
+      }
+
+      to {
+        transform: translateX(calc(-100% - 100vw));
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div id="stage">
+    <div id="danmakuLayer" class="sp-danmaku-layer"></div>
+  </div>
+
+  <script src="../../../Web/danmaku-core.js"></script>
+  <script src="../../../Web/danmaku-renderer.js"></script>
+  <script>
+    // 页面里的任何异常都要能被运行器看到，否则只会表现为"60 秒没结果"。
+    window.addEventListener('error', function (event) {
+      window.__stressResult = { error: 'onerror: ' + event.message };
+      document.title = 'ERROR ' + event.message;
+    });
+  </script>
+  <script>
+    (function () {
+      'use strict';
+
+      // 速率可由 URL 参数覆盖（默认验收线 1000 条/分钟；加 ?rate=3000 看余量）。
+      const rateParam = Number(new URLSearchParams(window.location.search).get('rate'));
+      const MESSAGES_PER_MINUTE = Number.isFinite(rateParam) && rateParam > 0 ? rateParam : 1000;
+      const DURATION_MS = 60000;
+      const INTERVAL_MS = 60000 / MESSAGES_PER_MINUTE;
+
+      const layer = document.getElementById('danmakuLayer');
+      if (!window.StreamPilotDanmakuCore || !window.DanmakuRenderer) {
+        window.__stressResult = { error: 'danmaku scripts not loaded' };
+        document.title = 'ERROR scripts';
+        return;
+      }
+
+      const renderer = new window.DanmakuRenderer(layer);
+      renderer.updateOptions({
+        displayMode: 'full',
+        filter: 'none',
+        blockedKeywords: [],
+        mergeDuplicates: true,
+        mergeWindowSeconds: 3,
+        opacity: 0.9,
+        fontSize: 25,
+        speedSeconds: 8,
+        maxOnScreen: 100,
+      });
+      renderer.setVisible(true);
+
+      const users = ['观众甲', '路过的猫', '夜行者', '小明', '风一样的男子', '咸鱼', '摸鱼选手', '热心网友'];
+      const texts = [
+        '这波操作太秀了',
+        '主播今天状态不错',
+        '前排围观',
+        '哈哈哈哈哈哈哈哈',
+        '画质好清晰',
+        '刚来，请问在讲什么',
+        '这个操作我学会了',
+        '666666',
+        '有人在吗',
+        '弹幕护体',
+      ];
+
+      let pushed = 0;
+      let frames = 0;
+      let longFrames = 0;
+      let maxDomNodes = 0;
+      let running = true;
+      let lastFrameAt = performance.now();
+      let windowStart = performance.now();
+      let windowFrames = 0;
+      let worstSecondFps = Number.POSITIVE_INFINITY;
+      let bestSecondFps = 0;
+      const heapStart = readHeapMb();
+      const startedAt = performance.now();
+
+      function readHeapMb() {
+        const memory = performance.memory;
+        return memory ? Math.round((memory.usedJSHeapSize / 1048576) * 10) / 10 : null;
+      }
+
+      function nextMessage() {
+        const user = users[pushed % users.length];
+        const text = texts[(pushed * 7) % texts.length];
+        const message = { user: user, text: text };
+        if (pushed % 5 === 0) {
+          message.medal = '粉丝牌';
+          message.medalLevel = (pushed % 20) + 1;
+        }
+        return message;
+      }
+
+      function onFrame(now) {
+        const delta = now - lastFrameAt;
+        lastFrameAt = now;
+        if (delta > 20) {
+          longFrames++;
+        }
+
+        frames++;
+        windowFrames++;
+        if (layer.childElementCount > maxDomNodes) {
+          maxDomNodes = layer.childElementCount;
+        }
+
+        const windowElapsed = now - windowStart;
+        if (windowElapsed >= 1000) {
+          const fps = (windowFrames * 1000) / windowElapsed;
+          if (fps < worstSecondFps) {
+            worstSecondFps = fps;
+          }
+          if (fps > bestSecondFps) {
+            bestSecondFps = fps;
+          }
+          windowStart = now;
+          windowFrames = 0;
+        }
+
+        if (running) {
+          requestAnimationFrame(onFrame);
+        }
+      }
+
+      // 按 1000 条/分钟匀速推送：每 60ms 一条，不人为堆积。
+      const timer = setInterval(function () {
+        renderer.push([nextMessage()]);
+        pushed++;
+      }, INTERVAL_MS);
+      requestAnimationFrame(onFrame);
+
+      setTimeout(function () {
+        running = false;
+        clearInterval(timer);
+        const elapsed = performance.now() - startedAt;
+        const heapEnd = readHeapMb();
+        const result = {
+          totalPushed: pushed,
+          durationMs: Math.round(elapsed),
+          avgFps: Math.round((frames * 1000 / elapsed) * 10) / 10,
+          worstSecondFps: Number.isFinite(worstSecondFps) ? Math.round(worstSecondFps * 10) / 10 : null,
+          bestSecondFps: Math.round(bestSecondFps * 10) / 10,
+          longFrames: longFrames,
+          maxDomNodes: maxDomNodes,
+          heapStartMb: heapStart,
+          heapEndMb: heapEnd,
+          heapDeltaMb: heapStart !== null && heapEnd !== null ? Math.round((heapEnd - heapStart) * 10) / 10 : null,
+        };
+        window.__stressResult = result;
+        document.title = 'DONE ' + JSON.stringify(result);
+      }, DURATION_MS);
+    }());
+  </script>
+</body>
+
+</html>

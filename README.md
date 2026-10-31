@@ -163,6 +163,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build\run-dev.ps1
 # 全部测试：C# 单测 + 前端回归 + 静态红线自检 + 离线结构分析
 powershell -NoProfile -ExecutionPolicy Bypass -File build\test.ps1
 
+# 弹幕压测（无头 Edge，默认 1000 条/分钟 × 60 秒；--rate=3000 看余量）
+node tests/web/stress/run-stress.mjs
+
 # 打包发布（产物写入 D:\文件\实用软件\b站插件\StreamPilot_publish\）
 #   StreamPilot-windows-v<版本>\            发行版目录（含 exe / Web\ / docs\ / VERSION.txt）
 #   StreamPilot-windows-v<版本>.zip         发行版压缩包
@@ -242,6 +245,7 @@ StreamPilot/
 | 发布产物 | `StreamPilot-windows-v0.2.2.zip`（附校验值文件，见 `build\publish.ps1`） |
 | 真实房间实测（B站 814） | 解析 12 条候选；**经真实中继 12/12 返回媒体数据**（FLV 文件头、HLS 播放列表改写后的切片、TS 同步字节） |
 | 播放页控制条几何实测 | 无头 Edge 渲染真实页面（`node tests/web/layout-probe/run-probe.js`，档位 / 画质下拉按真实运行态填好选项），1280→480 px 逐档 × 3 快照（「追帧」/「停止追帧」/ 停止追帧 + 长状态行）：**14 宽度 × 3 快照 = 42 次测量，0 处重叠**；控制条单行阈值随画质档位名宽度变化——普通档位名（最宽 `1080P 高码率`）时 **1024 px 起单行**，带 HDR / 高帧率 后缀的最宽档位名（下拉被 `max-width: 220px` 收敛）时 **1120 px 起单行**；1024–620 px 为两行，560 px 起为三行 |
+| 弹幕压测（1000 条/分钟 × 60 秒） | **60 fps 满帧、0 长帧、弹幕层峰值 80 节点、JS 堆增长 0 MB**（`node tests/web/stress/run-stress.mjs`，无头 Edge 走真实渲染路径）；`--rate=3000` 同样 60 fps / 0 长帧 / 峰值 120 节点 |
 
 > 真实房间实测的做法：将解析出的候选线路注册进真实中继（`BridgeHost`）后，像播放页一样只请求本机中继地址完成，覆盖「解析 → 中继 → CDN → 媒体字节」整条链路；它不等于 WebView2 中出画，出画仍需在真机上肉眼确认。
 
