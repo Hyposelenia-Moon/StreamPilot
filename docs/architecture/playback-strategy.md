@@ -20,9 +20,11 @@
 | 模式 | 说明 | 首帧超时 | 极限追帧目标 |
 |------|------|----------|--------------|
 | `stable` | 稳定缓冲，抗抖动优先（**默认**） | 8000 ms | — |
-| `extreme` | 极限追帧，低延迟优先（设置里勾选「极限追帧」后启用） | 6000 ms | 150 / 200 / 250 ms（默认 250） |
+| `extreme` | 极限追帧，低延迟优先（播放页「缓冲」下拉选「极限追帧」后启用） | 6000 ms | 150 / 200 / 250 ms（默认 250） |
 
-模式来自 `StreamPilotOptions.Playback.Mode`，由设置窗口的「极限追帧」勾选项写入；`PlayAsync` 不再硬编码 extreme。
+模式来自 `StreamPilotOptions.Playback.Mode`，由播放页「缓冲」下拉切换并经 `playback-mode` 消息写回宿主持久化；
+目标延迟档位在「设置 → 播放 → 极限追帧目标延迟」里调整（`SettingsViewModel.ExtremeTargetOptions`）。
+`PlayAsync` 不再硬编码 extreme。
 旧配置（`schemaVersion = 1`）里的 `mode=Extreme` 是当年没有入口时的旧默认值，加载时会迁移为 `stable`（`JsonOptionsStore.Migrate`）。
 
 档位归一化：仅 `150`/`200`/`250` 视为有效毫秒值，其他值一律回落为 **250 ms**
@@ -32,13 +34,13 @@
 
 页面**不会**因为抖动把档位改成别的值（早期版本的 `applyStallFallback` 已删除）。
 
-原因：档位入口只有画面下方一处，用户看到的档位必须就是真正生效的档位；偷偷把 250 改成"稳定档"
+原因：档位入口只有「设置 → 播放」一处，用户看到的档位必须就是真正生效的档位；偷偷把 250 改成"稳定档"
 会让"我明明选了 250"变成不可解释的现象。抖动时该做的是按本模式的阈值尽快重连（见第 5 节），
 而不是替用户改设置——参考播放页同样只做重连、不改档位。
 
 ## 2. mpegts.js 配置（HTTP-FLV 优先链路）
 
-`buildMpegtsConfig(extreme, targetSeconds, autoChase)`（`autoChase === false` 表示用户点了「停止追帧」，见第 10 节）：
+`buildMpegtsConfig(extreme, targetSeconds, autoChase)`（`autoChase` 恒为 `true`：v0.2.3 起「停止追帧」开关已随按钮一并移除，追帧始终开启）：
 
 | 选项 | 极限追帧（150/200/250 ms） | 稳定模式 |
 |------|---------------------------|----------|
@@ -194,7 +196,7 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
    本项目也未开启，因此元素暂停时它**完全不追帧**；
 3. mpegts.js 的下载节流（`notifyBufferedPositionChanged`）对直播流不生效
    （实现里是 `!this._config.isLive && ...`），于是"元素不消费 + 不追帧"下缓冲按网络速率无上限增长；
-4. 页面自己的追帧只在用户点按钮 / 换档位 / 继续播放时触发，**没有任何按缓冲大小自动触发的路径**——
+4. 页面自己的追帧只在用户切到「极限追帧」/ 继续播放时触发，**没有任何按缓冲大小自动触发的路径**——
    这就是"缓冲到 80 秒反而不再追"的原因。
 
 **处置**（`core.isBufferRunaway` / `core.decideBufferRunawayAction`，纯函数、被单测覆盖）：
@@ -245,12 +247,12 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
 探测开关、`LOADING_COMPLETE` 重连条件、手动追帧夹取、进度判定与缓冲计算、播放计划过滤、错误归类、首帧超时选择、
 画质下拉规范化（档位键回落与码率标签）、消息契约（含 `log`、页面侧请求消息与 `request-stop`）、
 **状态行延迟分段（`formatLatencySegment` / `isValidLatencyMs` 的合法值 / `null` / `NaN` / 负数）**、
-**追帧开关（`shouldAutoChase` 的默认开启与显式停止、`chaseButtonLabel` 两侧文案、
-停止追帧对 mpegts.js / hls.js 配置的影响，且不改变缓冲策略）**、
+**缓冲模式（`shouldAutoChase` 默认开启、`modeLabel` 的稳定缓冲 / 极限追帧 250/150 ms 形态、
+极限/稳定两模式对 mpegts.js / hls.js 配置的影响）**、
 **状态行整条文案（`formatPlaybackStatusText` 的四种逐字形态，以及旧的 `· 追帧中` / `已停止追帧` 形态不再出现）**、
 **引擎配置适配层（能力表判定、注入引擎替身后的热改 / 受控重建、成功-失败的上报差异、不重复重建、
 快照与恢复保留的必要状态、页面静态断言"不得再出现裸的引擎 configure 调用"）**、播放页静态结构（顶部提示已彻底移除、
-播放控制三键顺序为 开始 → 暂停/继续 → 停止、追帧相关按钮只剩合并后的 `#chaseBtn` 一个）。
+播放控制三键顺序为 开始 → 暂停/继续 → 停止、参数层是「线路 + 缓冲」下拉，无追帧按钮）。
 
 新增覆盖（2026-10）：**探测启动期限**（`PROBE_START_DEADLINE_MS` 必须短于 `PROBE_TIMEOUT_MS`，页面必须使用并把超时标成
 `probe-deadline`）、**hls.js 媒体错误分类**（`isHlsCodecErrorDetail` 只认编解码器缺失，其余先尝试恢复）。
@@ -278,21 +280,21 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
 - 档位名与码率由解析层提供（见 [ADR 0003](../adr/0003-parser-contract.md) 第 6.1 节），
   页面不自行编造档位名；显示时若档位名里已含码率（"蓝光4M"）就不再叠加，避免"蓝光4M · 4000 kbps"这种不一致。
 
-## 9. 追帧档位切换
+## 9. 极限追帧目标档位（在「设置 → 播放」调整）
 
-- 档位入口是播放页底部「追帧档位」下拉（150 / 200 / 250 ms，默认 250），
-  **播放中**改动时页面回 `target` 消息给宿主（宿主只记住该值供下次播放沿用）；
+- 档位入口在「设置 → 播放 → 极限追帧目标延迟」（150 / 200 / 250 ms，默认 250），
+  只影响「极限追帧」模式；稳定缓冲不使用它。播放页「缓冲」下拉只负责切换模式，
+  不再提供档位选择（档位移到设置，避免与模式下拉挤在同一行）。
 - **档位语义是"改配置"，不是"换地址"**：改的是目标延迟与由此推导的阈值，
   候选地址、候选队列、会话号与中继都不变（换地址走 `quality` → 宿主重新解析 → 重发 `play`，见第 8 节）；
-- 宿主也可下发同名 `target` 消息要求页面切换（`docs/architecture/player-message-contract.md` 第 1.2.1 节）；
-- 没有活动会话时只保存档位，下次 `play` 时生效；
+- 宿主在下次 `play` 时通过 `extremeTargetMs` 字段下发档位；没有活动会话时只保存，下次播放生效；
 - 状态文案只在画面下方的状态行显示（页面顶部不再有提示行）：`modeLabel` 同时接受
   `extremeTargetMs` 与 `extremeTargetSeconds`，避免字段缺失时静默回落成默认值
   （曾表现为"选了 250 仍显示 200"）。
 
 ### 9.1 引擎配置适配层（`core.applyEngineConfig`）
 
-**根因（SP-01）**：过去页面把「换档位 / 停止追帧」实现成裸调用引擎实例上的 `configure(config)`，
+**根因（SP-01）**：过去页面把「切换模式 / 换档位」实现成裸调用引擎实例上的 `configure(config)`，
 而**两家引擎的实例上都没有这个方法**：
 
 | 库 | 库内事实 | 结论 |
@@ -313,7 +315,7 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
   保留 `currentCandidate`、`queue`、`sessionId`、`pausedByUser`、`statusPhase`、音量、追帧档位、模式与播放位置；
   重建**不**清 `playbackStarted` / `everPlayed`，因此不会重复触发首帧逻辑、不会重复上报、状态行也不会闪回；
 - 只有 `{ok: true}` 才允许调用方 `setStatus` 与上报成功；失败一律上报 `warning` 并保持原状态
-  （调用方回滚 `autoChaseEnabled` / `extremeTargetMs`）。
+  （调用方回滚 `run.mode` / `run.extreme`）。
 - 页面只调用 `core.applyEngineConfigWithBackoff(...)`（内部仍是 `core.applyEngineConfig` 的判定）：
   受控重建前先断开旧连接、再做一次**有界退避**，最后才按新配置创建。
   退避复用重连退避序列的第一档（`RECONNECT_DELAYS_MS[REBUILD_BACKOFF_STEP] = 250 ms`，
@@ -323,55 +325,32 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
   不改状态行阶段、不产生任何上报，因此状态行不会闪回「播放中」、也不会重复上报，
   重建失败仍按失败上报（见 [ADR 0007](../adr/0007-relay-attack-surface-and-timeouts.md)）。
 
-## 10. 合并后的追帧开关（「追帧 / 停止追帧」）与暂停播放的区别
+## 10. 缓冲模式下拉（「稳定缓冲 / 极限追帧」）与暂停播放的区别
 
-播放页底部只有一个与追帧开关相关的入口：**「追帧 / 停止追帧」**（`#chaseBtn`）。
-按钮文案由 `core.chaseButtonLabel(state)`（`state` = `core.shouldAutoChase(run)` 的结果）给出，
-它切换的是"要不要按目标延迟把画面拉回直播边缘"这一**策略**，不是"要不要继续播放"。
+播放页底部参数层有一个「缓冲」下拉（`#modeSelect`），选项固定为**稳定缓冲** / **极限追帧**。
+它切换的是"缓冲策略"——稳定缓冲允许较大缓冲、抗抖动优先；极限追帧把延迟压到目标档位、
+缓冲超过阈值就硬跳。切换走第 9.1 节的适配层（`applyPlayerTargetConfig`），并回一条
+`playback-mode` 消息给宿主持久化（下次播放沿用）。
 
-| 当前状态 | 按钮文案 | 点击后 |
-|----------|----------|--------|
-| 自动追帧进行中 | 停止追帧 | 关闭自动追帧（热改播放器配置）：库内硬跳与倍速追赶都关掉，画面以正常倍速实时推进 |
-| 已停止自动追帧 | 追帧 | 开启自动追帧**并立刻追一次帧**（`chaseToLiveEdge(CHASE_KEEP_DEFAULT_SECONDS)`，跳到缓冲末端前 0.08 s） |
+| 维度 | 切换缓冲模式 | 暂停播放 |
+|------|-------------|----------|
+| 接口 | 页面本地改配置（`run.mode` / `run.extreme`），并回 `playback-mode`（带 `mode`） | 页面回 `toggle-pause`，宿主回下发 `pause` |
+| 媒体元素 | 继续播放（**不调用** `video.pause()`）；切到极限追帧后额外追一次帧到直播边缘 | `video.pause()`，画面完全停住 |
+| 播放器 | 不销毁会话与地址；配置按第 9.1 节的适配层落地（hls.js 热改、mpegts.js 受控重建，重建保留全部会话状态） | 不销毁 |
+| 地址 / 中继 | 不释放 | 不释放 |
+| 恢复方式 | 把下拉切回另一项 | 「继续播放」 |
 
-「追帧」保留原一次性追帧的效果：合并前它是独立按钮（只 seek 一次、不改开关），
-现在它同时承担"开启策略"与"立刻拉回一次"两件事，用户不必再点两次。
+v0.2.3 起「停止追帧」开关随旧按钮一并移除，`core.shouldAutoChase(run)` 恒为 `true`
+（自动追帧始终开启）；`run.autoChaseEnabled` 字段仍保留以兼容旧会话与旧调用点。
 
-| 维度 | 停止追帧 | 追帧（开启 + 追一次） | 暂停播放 |
-|------|----------|----------------------|----------|
-| 接口 | 无新消息类型：页面本地改配置，并回一条 `status` 说明（带 `autoChaseEnabled`） | 同左（同一条 `status`） | 页面回 `toggle-pause`，宿主回下发 `pause` |
-| 媒体元素 | 继续播放（**不调用** `video.pause()`） | 继续播放 | `video.pause()`，画面完全停住 |
-| 播放器 | 不销毁会话与地址；配置按第 9.1 节的适配层落地（hls.js 热改、mpegts.js 受控重建，重建保留全部会话状态） | 同左 | 不销毁 |
-| 地址 / 中继 | 不释放 | 不释放 | 不释放 |
-| 延迟走向 | 按实时速率增长（不再被拉回目标值） | 立刻拉回缓冲末端前 0.08 s，之后继续按目标延迟拉回 | 暂停期间缓冲继续增长，继续播放时可能先追帧 |
-| 恢复方式 | 再点一次按钮（文案变回「追帧」） | 再点一次按钮（文案变为「停止追帧」） | 「继续播放」 |
-
-`core.shouldAutoChase(run)`（纯函数、被单测覆盖）是唯一判定入口：
-**字段缺失视为开启**（`run.autoChaseEnabled !== false`），只有用户显式停止才算关闭，
-这样旧会话与旧调用点不会因为字段缺失被误当成"已停止追帧"。
-
-停止追帧后写入播放器的配置（`core.buildMpegtsConfig(extreme, target, false)` / `core.buildHlsConfig(extreme, false)`）：
-落地方式见第 9.1 节的适配层（mpegts.js 受控重建、hls.js 热改 + 读回校验）。
-
-| 链路 | 停止追帧时 | 默认（自动追帧） |
-|------|------------|------------------|
-| mpegts.js | `liveBufferLatencyChasing = false`、`liveSync = false`，并把 `liveBufferLatencyMaxLatency` / `liveSyncMaxLatency` 写成永不触发的值 | `true` / `extreme` 时 `true`，阈值为 0.42–0.52 s / 0.29–0.39 s |
-| hls.js | `maxLiveSyncPlaybackRate = 1`、`liveMaxLatencyDurationCount` 写成不可能达到的值 | `1.5` 与 `4`（极限档）/ `8`（稳定档） |
-| 两者共同 | `autoCleanupSourceBuffer` / `maxBufferLength` / `enableStashBuffer` 等**一律不变** | — |
-
-两点边界必须记住：
-
-1. **停止追帧不关闭缓冲失控保护**（第 5.2 节）。前者是"不主动追"，后者是"画面真的停住且缓冲涨到 8 s 以上时的兜底重连"，
-   两者目的相反，不能互相牵连：停止追帧后画面仍在前进，失控保护就不会介入；
-2. **停止追帧不改变目标延迟档位**：`150/200/250` 只被记住（重新开启后立即生效），下拉框不回退、不改写。
+缓冲失控保护（第 5.2 节）与模式无关：它是"画面真的停住且缓冲涨到 8 s 以上时的兜底重连"，
+切换模式不会关闭它。
 
 ### 10.1 底部控制条的抗重叠约束
 
-`#chaseBtn` 的文案会在运行时从「追帧」变成「停止追帧」，宽度变化会挤压同一行的其他控件；
-底部控制条（`#controls` + `#statusLine`）因此有四条硬约束（由 `tests/web/player-core.test.js` 静态断言锁定）：
+「缓冲」下拉是固定两选项的选择器（稳定缓冲 / 极限追帧，均 4 字），不存在文案切换导致的宽度跳变；
+底部控制条（`#controls` + `#statusLine`）仍有三条硬约束（由 `tests/web/player-core.test.js` 静态断言锁定）：
 
-- **#chaseBtn 预留固定宽度**：13px 字号下最长文案「停止追帧」= 4 字 ≈ 52px 文字 + 左右各 8px 内边距 + 2px 边框 = 70px，
-  再加 8px 余量取 `min-width: 78px`——文案切换不再引起重排，所以不存在"某个窗口宽度下点一下按钮就换行"的跳变；
 - **#controls 允许换行**：`display: flex` + `flex-wrap: wrap` + `row-gap: 8px`，宽度不够时换行而不是压缩重叠；
 - **右下角控件独占行尾**：`#fsBtn` 用 `margin-left: auto` 靠右，换行后独自占一行，不与左侧按钮争同一行空间；
 - **#statusLine 只在自己这一行被裁掉**：`white-space: nowrap` + `overflow: hidden` + `text-overflow: ellipsis` + `max-width: 100%`，
@@ -379,14 +358,13 @@ mpegts `MEDIA_MSE_ERROR`、卡顿超阈值、首帧超时（未开始播放 → 
 
 #### 10.1.1 实测口径（无头 Edge，`node tests/web/layout-probe/run-probe.js`）
 
-**测量前提**：探针测量前会把 `#targetSelect` / `#qualitySelect` 填成真实运行态的选项
-（页面运行时 `renderTargets` / `renderQualities` 必然会填），下拉宽度由**最宽的选项**决定：
-
-- 档位下拉：`150 ms` / `200 ms` / `250 ms`（与 `renderTargets` 逐字一致）；
-- 画质下拉：各平台真实档位名，最宽形态为 `1080P 原画（HDR 高帧率）`（受 `max-width: 220px` 收敛）。
+**测量前提**：探针测量前会把 `#qualitySelect` 填成真实运行态的选项
+（页面运行时 `renderQualities` 必然会填），下拉宽度由**最宽的选项**决定：
+各平台真实档位名，最宽形态为 `1080P 原画（HDR 高帧率）`（受 `max-width: 220px` 收敛）。
+「缓冲」下拉是静态两选项，无需填充。
 
 **空下拉的结论不可用**：下拉为空时控件比真实运行态窄一截，早先"860px 起单行"就是这么测出来的偏乐观结论。
-探针保留三种快照（「追帧」/「停止追帧」/ 停止追帧 + 长状态行），在 14 个宽度（1280 → 480）下逐档测量：
+探针保留三种快照（「稳定缓冲」/「极限追帧」/ 极限追帧 + 长状态行），在 14 个宽度（1280 → 480）下逐档测量：
 
 | 宽度（px） | 行数（最宽档位名） | 行数（普通档位名） | 「全屏」与播放控制同行 | 碰撞对 |
 |------------|--------------------|--------------------|------------------------|--------|

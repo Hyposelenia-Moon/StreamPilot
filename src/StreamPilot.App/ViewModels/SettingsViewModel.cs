@@ -38,7 +38,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private bool _autoPlayOnResolve = true;
     private bool _compactControls;
     private bool _autoHideControls = true;
-    private bool _extremePlayback;
     private bool _autoLaunchMpv;
     private bool _danmakuEnabled;
     private DanmakuChoice _selectedDanmakuDisplayMode = DanmakuChoice.DisplayModes[0];
@@ -209,10 +208,10 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
     }
 
-    /// <summary>默认追帧档位（毫秒）。</summary>
+    /// <summary>极限追帧目标延迟（毫秒），在「播放」页下拉里选择。</summary>
     /// <remarks>
-    /// 界面上不再提供第二处档位选择（档位入口只在主界面），此值在保存时按原配置透传，
-    /// 避免"设置里忘了改就把用户的档位改回默认值"。
+    /// 只影响「极限追帧」模式下的目标延迟；稳定缓冲模式不使用它。
+    /// 播放模式本身在播放页的「缓冲」下拉里选择，设置页只负责档位。
     /// </remarks>
     public int ExtremeTargetMs
     {
@@ -227,18 +226,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         set => SetField(ref _volume, value);
     }
 
-    /// <summary>
-    /// 是否使用「极限追帧」模式（默认关闭 = 稳定缓冲）。
-    /// </summary>
-    /// <remarks>
-    /// 极限档把延迟压到 250 ms 以内，代价是缓冲一超过阈值就硬跳、弱网下持续跳帧；
-    /// 它适合网络稳定且必须盯直播边缘的场景。默认走稳定缓冲，避免"一开播就卡"的第一印象。
-    /// </remarks>
-    public bool ExtremePlayback
-    {
-        get => _extremePlayback;
-        set => SetField(ref _extremePlayback, value);
-    }
+    /// <summary>极限追帧目标延迟的候选档位（毫秒），供「播放」页下拉选择。</summary>
+    public IReadOnlyList<int> ExtremeTargetOptions { get; } = new[] { 150, 200, 250 };
 
     /// <summary>解析成功后自动播放。</summary>
     public bool AutoPlayOnResolve
@@ -515,7 +504,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         AutoPlayOnResolve = options.Playback.AutoPlayOnResolve;
         CompactControls = options.Playback.CompactControls;
         AutoHideControls = options.Playback.AutoHideControls;
-        ExtremePlayback = options.Playback.Mode == PlaybackMode.Extreme;
         AutoLaunchMpv = options.Playback.AutoLaunchMpv;
 
         DanmakuOptions danmaku = options.Danmaku.Normalize();
@@ -633,7 +621,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             {
                 MpvPath = resolvedMpv,
                 ExtremeTargetMs = NormalizeTarget(ExtremeTargetMs),
-                Mode = ExtremePlayback ? PlaybackMode.Extreme : PlaybackMode.Stable,
                 Volume = Clamp(Volume, 0, 100, PlaybackOptions.DefaultVolume),
                 AutoPlayOnResolve = AutoPlayOnResolve,
                 AutoLaunchMpv = AutoLaunchMpv,

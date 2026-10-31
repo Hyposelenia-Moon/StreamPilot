@@ -87,9 +87,20 @@
                   </StackPanel>
                 </StackPanel>
 
-                <CheckBox Content="极限追帧（低延迟；弱网会跳帧）" IsChecked="{Binding ExtremePlayback}"
-                          Style="{StaticResource SettingFieldCheck}"
-                          ToolTip="关闭时使用稳定缓冲（默认，建议）；开启后延迟压到 250ms 以内，缓冲超过阈值会硬跳到直播边缘" />
+                <StackPanel Style="{StaticResource SettingRow}">
+                  <TextBlock Text="极限追帧目标延迟" Style="{StaticResource SettingLabel}" />
+                  <ComboBox Style="{StaticResource SettingFieldCombo}"
+                            ItemsSource="{Binding ExtremeTargetOptions}"
+                            SelectedItem="{Binding ExtremeTargetMs, Mode=TwoWay}"
+                            ToolTip="在播放页「缓冲」下拉选择「极限追帧」时生效；值越小延迟越低、越容易跳帧"
+                            AutomationProperties.AutomationId="ExtremeTargetCombo">
+                    <ComboBox.ItemTemplate>
+                      <DataTemplate>
+                        <TextBlock Text="{Binding StringFormat={}{0} ms}" Foreground="{StaticResource TextBrush}" />
+                      </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                  </ComboBox>
+                </StackPanel>
                 <CheckBox Content="解析成功后自动开始播放" IsChecked="{Binding AutoPlayOnResolve}"
                           Style="{StaticResource SettingFieldCheck}" />
                 <CheckBox Content="播放中鼠标静止时自动隐藏控制条" IsChecked="{Binding AutoHideControls}"

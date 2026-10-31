@@ -91,8 +91,9 @@
                          TextTrimming="CharacterEllipsis" ToolTip="{Binding RoomCategory}" VerticalAlignment="Center"
                          MaxWidth="96" Margin="8,0,0,0" />
             </Grid>
+            <!-- 标题允许自动换行：长标题（如「巫师3：狂猎 一…」）不再被单行省略号截断，完整显示 -->
             <TextBlock Text="{Binding RoomTitle}" Style="{StaticResource MutedText}"
-                       TextTrimming="CharacterEllipsis" ToolTip="{Binding RoomTitle}" Margin="0,4,0,0" />
+                       TextWrapping="Wrap" ToolTip="{Binding RoomTitle}" Margin="0,4,0,0" />
           </StackPanel>
         </Border>
 

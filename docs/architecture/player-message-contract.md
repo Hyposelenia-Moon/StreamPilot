@@ -74,15 +74,14 @@
 `probe-rejected`）。**不按耗时排序**是因为走本地中继时该耗时主要由回环与中继转发决定，
 与实际 CDN 质量无关，按它排序只会打乱宿主的平台优先级（详见 `docs/architecture/playback-strategy.md` 第 4 节）。
 
-### 1.2 `target`
+### 1.2 `target`（已移除）
+
+> v0.2.3 起，播放页不再处理 `target`：追帧档位（150 / 200 / 250 ms）移到「设置 → 播放」里调整，
+> 由宿主在下次 `play` 的 `extremeTargetMs` 字段下发。此处保留说明仅用于对照旧版契约。
 
 ```json
 { "type": "target", "extremeTargetMs": 250 }
 ```
-
-**热切换追帧档位**（不重连、不重新探测）：页面把新档位写到当前运行对象上、刷新画面下方的状态行，
-并立即向缓冲末端追一次；页面随后回一条 `status`（"追帧档位已切换为 250 ms"）。
-宿主在没有活动会话时只记住该值，下次 `play` 时生效。
 
 ### 1.3 `stop`（兼容保留）
 
@@ -252,7 +251,8 @@
   "type": "player-config",
   "compactControls": false,
   "autoHideControls": true,
-  "panelCollapsed": false
+  "panelCollapsed": false,
+  "mode": "stable"
 }
 ```
 
@@ -263,6 +263,7 @@
 - `panelCollapsed`（布尔）：宿主左侧控制面板是否收起。`true` 时播放页在画面左上角显示「☰ 控制面板」，
   点击发 `panel-expand` 让宿主展开面板（**这是面板收起后唯一的可见入口**：宿主左列宽度归零，
   而 WebView2 是原生窗口，叠在画面上的 WPF 按钮会被它遮住）。
+- `mode`（字符串）：`stable` / `extreme`，初始化「缓冲」下拉的缺省值（未开始播放时使用）。
 
 这几个开关只在宿主的 `PlaybackOptions` 里持久化，页面**不**用 `localStorage` 自行保存——避免两处状态漂移。
 
@@ -292,7 +293,7 @@
 | `probe-rejected` | 单条候选返回 4xx/5xx，已被丢弃 | `outcome`、`statusCode` |
 | `candidate-queue` | 候选队列生成 | `sourceIndexes`、`knownGoodCount`、`inconclusiveCount` |
 | `candidate-active` | 开始连接某候选 | — |
-| `status` | 状态变化 | `firstFrameMs`、`mode`；暂停/继续时 `message` 为"已暂停播放"/"已继续播放"；切换合并后的追帧按钮时 `message` 为"已开启自动追帧…"/"已停止自动追帧…"并带 `autoChaseEnabled`（布尔） |
+| `status` | 状态变化 | `firstFrameMs`、`mode`；暂停/继续时 `message` 为"已暂停播放"/"已继续播放"；切换「缓冲」下拉时 `message` 为"切换播放模式：稳定缓冲/极限追帧" |
 | `log` | 页面诊断日志（页面不再显示日志面板） | `level`（`info`/`warn`/`error`）；宿主按级别落盘并追加到"最近事件" |
 | `telemetry` | 每 ≥10 s 一次 | `currentTime`、`bufferedAheadMs`、`readyState`、`networkState`、`paused`、`pausedByUser`、`elementPaused`、`ended`、`playbackRate`、`secondsSinceProgress`、`droppedVideoFrames`、`totalVideoFrames`、`mode`、`extremeTargetMs`、`runawayChaseAttempts`、`reconnects` |
 | `warning` | 可恢复问题（切换候选、重连、缓冲失控追帧） | `errorName`、`errorMessage`、`reconnectCount`、`bufferedAheadMs`、`secondsSinceProgress`、`runawayChaseAttempts`、`chased` |
@@ -300,7 +301,7 @@
 | `reconnecting` | 断流后重连 | `reconnectCount` |
 | `refresh-needed` | 所有候选不可用，请宿主重新解析 | — |
 | `quality` | 用户在下拉里换了画质档位 | `key`（档位键）；宿主据此按该档位重新解析并重新下发 `play` |
-| `target` | 用户在播放页底部改了追帧档位 | `extremeTargetMs`（150/200/250）；宿主只记住该值供下次播放沿用 |
+| `playback-mode` | 用户在「缓冲」下拉里切换播放模式 | `mode`（`stable` / `extreme`）；宿主更新并持久化，下次播放沿用 |
 | `request-play` | 用户点了播放页底部的「开始播放」 | — ；宿主执行与「解析房间」相同的解析与下发流程 |
 | `toggle-pause` | 用户点了播放页底部的「暂停播放 / 继续播放」 | — ；宿主切换暂停状态并回下发 `pause` |
 | `request-stop` | 用户点了播放页底部的「停止播放」（销毁播放器、关闭画面） | — ；宿主调用 `IPlaybackCoordinator.StopActive()` 释放新旧两轮中继并把状态置为"未播放" |
@@ -323,13 +324,11 @@
 页面与纯逻辑模块共用 `Web/player-core.js` 中的常量，禁止在页面里写字符串字面量：
 
 ```js
-core.INBOUND_MESSAGE_TYPES  // play / chase（页面内部追帧按钮使用）/ stop / target / pause / mpv / host-status
-core.OUTBOUND_MESSAGE_TYPES // ready / checking / probe-result / probe-rejected / ... / log / quality / request-play / toggle-pause / request-stop
+core.INBOUND_MESSAGE_TYPES  // play / chase（宿主一次性追帧）/ stop / pause / mpv / host-status
+core.OUTBOUND_MESSAGE_TYPES // ready / checking / probe-result / probe-rejected / ... / log / quality / playback-mode / request-play / toggle-pause / request-stop
 core.LOG_LEVELS             // info / warn / error（`log` 与 `host-status` 的 level 字段共用同一套级别）
 core.STATUS_IDLE_TEXT       // 未连接（页面初始化与停止播放后的状态行文案）
-core.CHASE_BUTTON_LABELS   // 追帧 / 停止追帧（画面底部合并后的追帧按钮文案，由 chaseButtonLabel 取用）
 core.CHASE_STATUS_LABELS   // 未开启追帧（状态行末尾括号分段里"没在追帧"时的固定文案）
-core.chaseButtonLabel      // 合并按钮文案判定（入参为 shouldAutoChase 的结果）
 core.shouldAutoChase       // 追帧开关判定（字段缺失视为开启，仅显式 false 表示已停止）
 core.chaseStatusLabel      // 状态行末尾括号分段取值（追帧中给 modeLabel，停止后给 未开启追帧）
 core.formatLatencySegment  // 状态行的延迟分段（非法值返回 null，由调用方整段省略）
@@ -351,11 +350,9 @@ core.resolveStatusLine      // 状态行显示判定（宿主消息优先，超�
   避免同一句话在状态行里显示两遍。
 - 删除或改名 `type` 属于破坏性变更，必须同时更新本文件、`player.html`、`ShellViewModel` 与前端测试。
 - 宿主**不再下发** `chase`（追帧入口只在播放页底部，页面自己触发）；`INBOUND_MESSAGE_TYPES.CHASE`
-  由页面内部的追帧按钮使用，因此常量必须保留。
-- 「追帧 / 停止追帧」合并为一个按钮（`#chaseBtn`）**不改变消息契约**，因此本文件除文案与常量名外无需改动：
-  它仍是页面本地的播放策略开关（`run.autoChaseEnabled`），开启时额外做一次本地 `seek`（不需要宿主配合），
-  只把一次 `status` 消息作为操作反馈同步给宿主（`extras.autoChaseEnabled`），
-  宿主既不回下发任何消息，也不新增/删除任何 `type`，因此旧版宿主与旧版页面都不受影响。
-  页面 → 宿主这条 `status` 的 `message` 文案由"已取消/已恢复自动追帧"改为"已开启/已停止自动追帧"，
-  宿主只把它写进日志与状态行（不解析文本语义），属于兼容变更。
+  保留为宿主一次性追帧的兼容通道（`handleChase` 直接调用 `chaseToLiveEdge`）。
+- v0.2.3 把「追帧 / 停止追帧」按钮与「追帧档位」下拉合并为单个「缓冲」下拉（`#modeSelect`，稳定缓冲 / 极限追帧）：
+  切换模式是页面本地的播放策略变更（`run.mode` / `run.extreme`），走统一适配层 `applyPlayerTargetConfig` 应用配置，
+  并额外发一条 `playback-mode` 消息给宿主持久化；宿主不回下发任何消息。
+  `target` 与 `chaseButtonLabel` / `CHASE_BUTTON_LABELS` 已删除，追帧档位移入设置（`SettingsViewModel.ExtremeTargetOptions`）。
 - `Web/player-core.js` 被 `node --test tests/web` 覆盖：任何阈值或档位改动都必须同步更新用例。

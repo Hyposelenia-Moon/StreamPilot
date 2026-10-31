@@ -305,20 +305,10 @@ const STATUS_PARENTHESIS_CLOSE = '）';
 const LATENCY_PLACEHOLDER = null;
 
 /*
- * 合并后的「追帧 / 停止追帧」按钮只有一处入口，判定入口统一是 `shouldAutoChase`：
- *  - 按钮文案描述"点下去会发生什么"（`chaseButtonLabel`）：正在自动追帧时是「停止追帧」，否则是「追帧」；
- *  - 状态行末尾的括号分段描述"当前处在哪个状态"（`CHASE_STATUS_LABELS`）：追帧中直接给当前模式与
- *    目标档位（`modeLabel`），未追帧给固定的 `未开启追帧`，两种状态都有标记，
- *    用户才能一眼看出追帧到底开没开（只在"已停止"时加分段会让"正在追帧"无从确认）。
+ * 状态行末尾的括号分段描述"当前处在哪个状态"（`CHASE_STATUS_LABELS`）：
+ * 追帧中直接给当前模式与目标档位（`modeLabel`），未追帧给固定的 `未开启追帧`，
+ * 两种状态都有标记，用户才能一眼看出当前缓冲策略（只在"已停止"时加分段会让"正在追帧"无从确认）。
  */
-
-/** 追帧按钮文案的两侧取值。 */
-const CHASE_BUTTON_LABELS = Object.freeze({
-  /** 当前未自动追帧：点击后开启自动追帧并立刻追一次帧。 */
-  START: '追帧',
-  /** 当前正在自动追帧：点击后停止自动追帧（不暂停播放）。 */
-  STOP: '停止追帧',
-});
 
 /** 状态行末尾括号分段里的追帧状态取值。 */
 const CHASE_STATUS_LABELS = Object.freeze({
@@ -517,6 +507,8 @@ const OUTBOUND_MESSAGE_TYPES = Object.freeze({
    * 与宿主侧的 `TargetType` 同名，宿主按 `extremeTargetMs` 字段取值。
    */
   TARGET: 'target',
+  /** 页面在「缓冲」下拉里切换播放模式（稳定缓冲 / 极限追帧）：宿主据此更新并持久化。 */
+  MODE: 'playback-mode',
   REQUEST_PLAY: 'request-play',
   TOGGLE_PAUSE: 'toggle-pause',
   /** 页面请求停止播放：销毁播放器、释放会话与地址，宿主据此回收中继。 */
@@ -744,15 +736,6 @@ function readActualLatencyMs(run) {
   }
 
   return isValidLatencyMs(run.lastLatencyMs) ? Number(run.lastLatencyMs) : LATENCY_PLACEHOLDER;
-}
-
-/**
- * 合并后的追帧按钮文案（「追帧」/「停止追帧」）。
- * @param {*} state 当前是否自动追帧（{@link shouldAutoChase} 的结果）。
- * @returns {string} 按钮文案：正在自动追帧时为「停止追帧」，否则为「追帧」。
- */
-function chaseButtonLabel(state) {
-  return state ? CHASE_BUTTON_LABELS.STOP : CHASE_BUTTON_LABELS.START;
 }
 
 /**
@@ -1837,7 +1820,6 @@ const StreamPilotPlayerCore = {
   LATENCY_UNIT_SUFFIX,
   STATUS_PARENTHESIS_OPEN,
   STATUS_PARENTHESIS_CLOSE,
-  CHASE_BUTTON_LABELS,
   CHASE_STATUS_LABELS,
   ENGINE_KINDS,
   ENGINE_CAPABILITIES,
@@ -1886,7 +1868,6 @@ const StreamPilotPlayerCore = {
   formatLatencySegment,
   readActualLatencyMs,
   shouldAutoChase,
-  chaseButtonLabel,
   chaseStatusLabel,
   normalizeStatusLevel,
   getHostStatusHoldMs,

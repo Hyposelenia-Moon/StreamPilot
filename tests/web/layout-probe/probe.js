@@ -3,9 +3,9 @@
 /*
  * 底部控制条布局探针（人工排查用，**不在沙箱内自动运行**）。
  *
- * 用途：把播放页副本交给无头浏览器，在多个窄窗口宽度下切换「追帧 / 停止追帧」与长状态行，
+ * 用途：把播放页副本交给无头浏览器，在多个窄窗口宽度下切换「缓冲」下拉的两种模式与长状态行，
  *      打印每个控件的行号与相互重叠情况，用来复现/复查"右下角堆叠"。
- *      测量前会把档位 / 画质下拉填成真实运行态的选项（空下拉比真实态窄，结论会偏乐观）。
+ *      测量前会把画质下拉填成真实运行态的选项（空下拉比真实态窄，结论会偏乐观）。
  *
  * 用法（必须在能启动浏览器的环境里跑，本仓库沙箱禁止启动外部进程）：
  *   1. 复制 Web/player.html 到一个临时文件，删掉页面自身的 <script>（探针只关心静态布局）；
@@ -15,24 +15,19 @@
  */
 
 (function probeMain() {
-  /** 追帧按钮的两种文案（与 player-core 的 chaseButtonLabel 逐字一致）。 */
-  const CHASE_LABEL_SHORT = '追帧';
-  const CHASE_LABEL_LONG = '停止追帧';
-
   /** 宿主失败消息形态的长状态行，用来验证状态行只收敛、不盖住控件。 */
   const STATUS_LONG_TEXT = '解析失败：主播未开播（状态：未开播），请稍后重试或更换线路';
 
   /*
-   * 两个下拉必须填真实选项再测量。
+   * 画质下拉必须填真实选项再测量。
    *
-   * 页面运行时的档位 / 画质下拉一定有选项（player.html 的 renderTargets / renderQualities），
-   * 空下拉的自然宽度比真实运行态窄一截，几何结论会偏乐观——"860 px 起单行"正是在空下拉下测出来的。
-   * 下拉宽度由**最宽的选项**决定，因此这里按页面同款文案填满，并且包含各平台会真实出现的
-   * 最宽形态（HDR / 高帧率后缀，见 BilibiliParser 的档位命名），测量结果即最坏真实运行态。
+   * 页面运行时的画质下拉一定有选项（player.html 的 renderQualities），
+   * 空下拉的自然宽度比真实运行态窄一截，几何结论会偏乐观。下拉宽度由**最宽的选项**决定，
+   * 因此这里按页面同款文案填满，并且包含各平台会真实出现的最宽形态（HDR / 高帧率后缀，
+   * 见 BilibiliParser 的档位命名），测量结果即最坏真实运行态。
+   *
+   * 「缓冲」下拉是静态两选项（稳定缓冲 / 极限追帧），HTML 里已经写死，无需填充。
    */
-
-  /** 追帧档位下拉的选项文案（与 player.html 的 renderTargets 逐字一致）。 */
-  const TARGET_OPTION_LABELS = ['150 ms', '200 ms', '250 ms'];
 
   /** 画质下拉的选项文案：各平台真实档位名，含最宽形态。 */
   const QUALITY_OPTION_LABELS = [
@@ -65,9 +60,8 @@
     select.selectedIndex = 0;
   }
 
-  /** 把两个下拉填成真实运行态（页面的 renderTargets / renderQualities 在播放时必然会填）。 */
+  /** 把画质下拉填成真实运行态（页面的 renderQualities 在播放时必然会填）。 */
   function renderSelectOptions() {
-    fillSelect(document.getElementById('targetSelect'), TARGET_OPTION_LABELS);
     fillSelect(document.getElementById('qualitySelect'), QUALITY_OPTION_LABELS);
   }
 
@@ -209,7 +203,7 @@
    */
   function run() {
     const output = document.getElementById('probeOut');
-    const chaseBtn = document.getElementById('chaseBtn');
+    const modeSelect = document.getElementById('modeSelect');
     const statusLine = document.getElementById('statusLine');
     const lines = [];
 
@@ -227,15 +221,15 @@
     VIEWPORT_WIDTHS.forEach(function measureWidth(width) {
       document.getElementById('root').style.width = width + 'px';
 
-      chaseBtn.textContent = CHASE_LABEL_SHORT;
+      modeSelect.value = 'stable';
       statusLine.textContent = '未连接';
-      record('SHORT');
+      record('STABLE');
 
-      chaseBtn.textContent = CHASE_LABEL_LONG;
-      record('LONG');
+      modeSelect.value = 'extreme';
+      record('EXTREME');
 
       statusLine.textContent = STATUS_LONG_TEXT;
-      record('LONG+LONGSTATUS');
+      record('EXTREME+LONGSTATUS');
     });
 
     output.textContent = lines.join('\n');

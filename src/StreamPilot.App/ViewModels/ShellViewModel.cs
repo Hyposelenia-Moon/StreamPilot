@@ -124,6 +124,12 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>页面 → 宿主：用户在失败状态点重试弹幕连接。</summary>
     private const string PlayerDanmakuRetryType = "danmaku-retry";
 
+    /// <summary>页面 → 宿主：用户在「缓冲」下拉里切换播放模式（稳定缓冲 / 极限追帧）。</summary>
+    private const string PlayerPlaybackModeType = "playback-mode";
+
+    /// <summary>播放模式消息里的模式字段名。</summary>
+    private const string ModeFieldName = "mode";
+
     /// <summary>
     /// 页面 → 宿主：请求展开左侧控制面板。
     /// </summary>
@@ -865,6 +871,14 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
                 case PlayerDanmakuRetryType:
                     _ = RetryDanmakuAsync();
+                    break;
+
+                case PlayerPlaybackModeType:
+                    if (ReadPlaybackMode(root) is PlaybackMode mode)
+                    {
+                        ApplyPlayerMode(mode);
+                    }
+
                     break;
 
                 default:
@@ -1702,6 +1716,48 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         }
 
         return element.TryGetInt32(out int value) ? value : null;
+    }
+
+    /// <summary>读取播放页传来的播放模式。</summary>
+    /// <param name="root">消息根元素。</param>
+    /// <returns>播放模式；字段缺失或非法时返回 <see langword="null"/>。</returns>
+    private static PlaybackMode? ReadPlaybackMode(JsonElement root)
+    {
+        if (!root.TryGetProperty(ModeFieldName, out JsonElement element) || element.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return element.GetString() switch
+        {
+            "extreme" => PlaybackMode.Extreme,
+            "stable" => PlaybackMode.Stable,
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// 播放页在「缓冲」下拉里切换模式时同步到宿主：更新并持久化，下次播放沿用。
+    /// </summary>
+    /// <param name="mode">页面选择的播放模式。</param>
+    private void ApplyPlayerMode(PlaybackMode mode)
+    {
+        if (_options.Playback.Mode == mode)
+        {
+            return;
+        }
+
+        _options = _options with
+        {
+            Playback = _options.Playback with
+            {
+                Mode = mode,
+            },
+        };
+        _saveOptions(_options);
+        AppendLog(mode == PlaybackMode.Extreme
+            ? "播放页把播放模式改为「极限追帧」（下次播放沿用）"
+            : "播放页把播放模式改为「稳定缓冲」（下次播放沿用）");
     }
 
     /// <summary>读取播放页遥测里的暂停标记。</summary>
@@ -2803,6 +2859,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             compactControls = playback.CompactControls,
             autoHideControls = playback.AutoHideControls,
             panelCollapsed = _isControlPanelCollapsed,
+            mode = playback.Mode == PlaybackMode.Extreme ? "extreme" : "stable",
         });
     }
 

@@ -470,23 +470,21 @@ test('OUTBOUND_MESSAGE_TYPES 含 TARGET，且每个消息类型的取值都不�
   }
 });
 
-test('播放页改档位必须上报宿主：空闲与播放中两个分支都发出 target 消息', () => {
+test('播放页切换缓冲模式必须上报宿主：空闲与播放中两个分支都发出 playback-mode 消息', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
 
-  const handler = extractFunctionBody(html, 'function onTargetChange()');
-  assert.equal(handler.includes('reportTargetChange(targetMs, run);'), true, '改档后必须上报宿主');
-  assert.equal(
-    handler.indexOf('reportTargetChange(targetMs, run);') > handler.indexOf('else {'),
-    true,
-    '上报要在 if/else 之外，空闲分支（还没有 run）同样要走到');
-  assert.equal(
-    (handler.match(/return;/g) || []).length,
-    1,
-    '除非法档位那一个提前 return 之外，不允许再有让上报被跳过的出口');
+  const handler = extractFunctionBody(html, 'function onModeChange()');
+  assert.equal(handler.includes('void applyPlaybackMode(mode);'), true, '「缓冲」下拉切换必须调用 applyPlaybackMode');
 
-  const reporter = extractFunctionBody(html, 'function reportTargetChange(targetMs, run)');
-  assert.equal(reporter.includes('report(outbound.TARGET'), true, '上报用的消息类型必须是 outbound.TARGET');
-  assert.equal(reporter.includes('extremeTargetMs: targetMs'), true, '宿主按 extremeTargetMs 字段取值');
+  const applier = extractFunctionBody(html, 'function applyPlaybackMode(mode)');
+  assert.equal(applier.includes('reportPlaybackMode(mode);'), true, '切换模式后必须上报宿主');
+  assert.equal(applier.includes('run.mode = mode;'), true, '播放中要改写运行对象的模式');
+  assert.equal(applier.includes('run.extreme = mode === \'extreme\';'), true, '播放中要同步 extreme 标记');
+  assert.equal(applier.includes('applyPlayerTargetConfig(run, message, { mode: mode })'), true, '模式切换走统一适配层入口');
+
+  const reporter = extractFunctionBody(html, 'function reportPlaybackMode(mode)');
+  assert.equal(reporter.includes('report(outbound.MODE'), true, '上报用的消息类型必须是 outbound.MODE');
+  assert.equal(reporter.includes('mode: mode'), true, '宿主按 mode 字段取值');
   assert.equal(reporter.includes('run ? run.currentCandidate : null'), true, '空闲时没有候选可选，不能抛错');
 });
 
@@ -667,14 +665,10 @@ test('shouldAutoChase 判定自动追帧开关（默认开启）', () => {
   assert.equal(core.shouldAutoChase('run'), false, '非对象输入不得抛异常');
 });
 
-test('chaseButtonLabel 给出合并按钮两侧文案（追帧 / 停止追帧）', () => {
-  assert.equal(core.chaseButtonLabel(true), core.CHASE_BUTTON_LABELS.STOP);
-  assert.equal(core.chaseButtonLabel(false), core.CHASE_BUTTON_LABELS.START);
-  assert.equal(core.CHASE_BUTTON_LABELS.START, '追帧');
-  assert.equal(core.CHASE_BUTTON_LABELS.STOP, '停止追帧');
-  assert.equal(core.chaseButtonLabel(undefined), '追帧', '判定输入缺失时按"未追帧"给出「追帧」');
-
-  assert.equal(core.chaseSwitchLabel, undefined, '旧的两侧按钮文案函数必须删除，而不是留着不用');
+test('「追帧 / 停止追帧」按钮与文案已删除：缓冲模式改为下拉选择', () => {
+  assert.equal(core.chaseButtonLabel, undefined, '旧的按钮文案函数必须删除');
+  assert.equal(core.CHASE_BUTTON_LABELS, undefined, '旧的按钮文案常量必须删除');
+  assert.equal(core.chaseSwitchLabel, undefined, '旧的两侧按钮文案函数必须删除');
   assert.equal(core.CHASE_SWITCH_LABELS, undefined, '旧的「取消追帧 / 恢复追帧」文案必须删除');
 });
 
@@ -718,63 +712,44 @@ test('chaseStatusLabel 给出括号分段取值：追帧中给模式档位，停
   assert.equal(core.CHASE_CANCELLED_SUFFIX, undefined, '旧的"仅在已取消时追加"的常量必须删除');
 });
 
-test('追帧与停止追帧合并为播放页底部的单个按钮', () => {
+test('「追帧 / 停止追帧」按钮替换为「缓冲」下拉（稳定缓冲 / 极限追帧）', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
 
   const chaseIds = html.match(/id="[^"]*[Cc]hase[^"]*"/g) || [];
-  assert.deepEqual(chaseIds, ['id="chaseBtn"'], '追帧相关的按钮必须只剩一个（旧的取消/恢复按钮删除干净）');
+  assert.deepEqual(chaseIds, [], '追帧相关的按钮必须全部删除（旧的取消/恢复按钮不再存在）');
+  assert.equal(html.includes('id="modeSelect"'), true, '必须提供「缓冲」模式下拉');
+  assert.equal(html.includes('value="stable"'), true, '下拉必须含「稳定缓冲」选项');
+  assert.equal(html.includes('value="extreme"'), true, '下拉必须含「极限追帧」选项');
+  assert.equal(html.includes('id="targetSelect"'), false, '旧的档位下拉必须删除（档位移到设置）');
 
-  assert.equal(html.includes('toggleChase()'), true, '按钮必须绑定到合并后的开关');
-  assert.equal(html.includes('toggleAutoChase'), false, '旧的开关函数必须删除，不留死代码');
+  assert.equal(html.includes('toggleChase'), false, '旧的开关函数必须删除，不留死代码');
   assert.equal(html.includes('syncChaseToggle'), false, '旧的按钮同步函数必须删除');
-  assert.equal(html.includes('core.chaseButtonLabel'), true, '按钮文案必须来自 player-core 的纯函数');
-  assert.equal(
-    html.includes('const enabling = !core.shouldAutoChase(run);') && html.includes('run.autoChaseEnabled = enabling;'),
-    true,
-    '点「追帧」开启自动追帧，点「停止追帧」关闭它');
-  assert.equal(
-    html.includes('if (enabling)') && html.includes('chaseToLiveEdge(core.CHASE_KEEP_DEFAULT_SECONDS);'),
-    true,
-    '点「追帧」必须保留原一次性追帧的效果（开启后立刻追一次）');
+  assert.equal(html.includes('core.chaseButtonLabel'), false, '旧的按钮文案函数引用必须删除');
+  assert.equal(html.includes('renderTargets('), false, '旧的档位渲染函数必须删除（档位不再在页面渲染）');
+  assert.equal(html.includes('applyPlaybackMode(mode)'), true, '下拉切换必须走 applyPlaybackMode');
   assert.equal(html.includes('refreshPlaybackStatus(run)'), true, '遥测每轮都要把实测延迟刷进状态行');
   assert.equal(html.includes('lastLatencyMs'), true, '实测延迟必须来自运行对象的遥测值');
   assert.equal(
     html.includes('applyPlayerTargetConfig(run, message'),
     true,
-    '停止追帧必须走统一适配层入口（是否重建由能力表决定，见 applyEngineConfig）');
+    '切换模式必须走统一适配层入口（是否重建由能力表决定，见 applyEngineConfig）');
   assert.equal(
     /player\.configure\(/.test(html),
     false,
     'SP-01：全文不得再出现裸的 player.configure(...) 调用（两家引擎实例上都没有这个方法）');
 });
 
-test('追帧按钮必须预留最长文案的固定宽度，文案切换不再引起重排', () => {
+test('「缓冲」下拉是固定两选项的静态选择器，不需要为文案变化预留宽度', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
 
-  // 按钮文案由 player-core 给出：最长文案就是「停止追帧」，最短是「追帧」。
-  const longestLabel = core.CHASE_BUTTON_LABELS.STOP;
-  const shortestLabel = core.CHASE_BUTTON_LABELS.START;
-  assert.equal(longestLabel, '停止追帧');
-  assert.ok(longestLabel.length > shortestLabel.length, '用例前提：两个文案长度不同，宽度才会变');
+  // 下拉不再是按钮，没有「追帧→停止追帧」的文案切换；选项固定为两个模式名。
+  assert.equal(html.includes('#chaseBtn'), false, '旧的 #chaseBtn 样式必须删除');
+  const modeRule = extractRule(html, '#modeSelect');
+  assert.equal(/cursor:\s*pointer/.test(modeRule), true, '#modeSelect 必须是可点选的下拉');
 
-  const chaseFontSizePx = 13;
-  const chasePaddingXPx = 8;
-  const chaseBorderPx = 1;
-  const chaseHeadroomPx = 8;
-  const requiredPx = longestLabel.length * chaseFontSizePx + 2 * (chasePaddingXPx + chaseBorderPx) + chaseHeadroomPx;
-
-  const chaseRule = extractRule(html, '#chaseBtn');
-  const declaredMinWidthPx = Number(/min-width:\s*(\d+(?:\.\d+)?)px/.exec(chaseRule)?.[1]);
-  assert.ok(Number.isFinite(declaredMinWidthPx), '#chaseBtn 必须用 min-width 预留固定宽度，否则文案变长会把右侧控件挤到别行');
-  assert.ok(
-    declaredMinWidthPx >= requiredPx,
-    '预留宽度 ' + declaredMinWidthPx + 'px 必须容纳最长文案「' + longestLabel + '」的 ' + requiredPx + 'px'
-      + '（' + longestLabel.length + ' 字 × ' + chaseFontSizePx + 'px + 内边距/边框 + 余量）');
-
-  // 计算依据本身也要锁住：改成更宽的内边距 / 更大的字号而没有同步加宽 min-width 就应当失败。
-  assert.equal(/font-size:\s*(\d+(?:\.\d+)?)px/.exec(extractRule(html, '#playBtn'))?.[1], String(chaseFontSizePx));
-  assert.equal(/padding:\s*4px\s+(\d+(?:\.\d+)?)px/.exec(extractRule(html, 'button'))?.[1], String(chasePaddingXPx));
-  assert.equal(/border:\s*1px\s+solid/.test(extractRule(html, 'button')), true);
+  // 两个选项文案等长（「稳定缓冲」「极限追帧」都是 4 字），下拉宽度稳定。
+  assert.equal(html.includes('>稳定缓冲<'), true);
+  assert.equal(html.includes('>极限追帧<'), true);
 });
 
 /** 音量条宽度上限（像素）。超过它，「全屏」就会在常见窗口宽度下被挤到下一行。 */
@@ -796,20 +771,20 @@ test('音量条必须足够短，「全屏」才能留在同一行', () => {
     '音量条宽度 ' + volumeWidthPx + 'px 不得超过 ' + MAX_VOLUME_SLIDER_WIDTH_PX + 'px，否则「全屏」会被挤到下一行');
 });
 
-test('布局探针必须按真实运行态填充档位与画质下拉，并保留三种快照', () => {
+test('布局探针必须按真实运行态填充画质下拉，并按缓冲模式保留三种快照', () => {
   const probe = fs.readFileSync(path.join(__dirname, 'layout-probe', 'probe.js'), 'utf8');
 
-  // 空下拉的自然宽度比真实运行态窄一截，"860px 起单行"正是在空下拉下测出来的偏乐观结论。
+  // 空下拉的自然宽度比真实运行态窄一截，几何结论会偏乐观。
   assert.equal(probe.includes('renderSelectOptions();'), true, '探针测量前必须填下拉，否则几何结论不代表运行态');
-  assert.equal(probe.includes("getElementById('targetSelect')"), true, '档位下拉必须按页面的 renderTargets 填充');
   assert.equal(probe.includes("getElementById('qualitySelect')"), true, '画质下拉必须按页面的 renderQualities 填充');
-  assert.equal(probe.includes("'250 ms'"), true, '档位下拉要填页面同款文案「150/200/250 ms」');
+  assert.equal(probe.includes("getElementById('targetSelect')"), false, '旧档位下拉引用必须删除（档位移到设置）');
   assert.equal(probe.includes("'1080P 高码率'"), true, '画质下拉要填平台真实档位名，宽度才与运行态一致');
   assert.equal(probe.includes("'1080P 原画（HDR 高帧率）'"), true, '画质下拉要覆盖最宽的真实档位名（HDR / 高帧率后缀）');
 
-  // 三种快照（追帧 / 停止追帧 / 停止追帧 + 长状态行）必须保留。
-  assert.equal(probe.includes("const CHASE_LABEL_SHORT = '追帧';"), true);
-  assert.equal(probe.includes("const CHASE_LABEL_LONG = '停止追帧';"), true);
+  // 三种快照（稳定缓冲 / 极限追帧 / 极限追帧 + 长状态行）必须保留。
+  assert.equal(probe.includes("getElementById('modeSelect')"), true, '探针必须切换「缓冲」下拉的两种模式');
+  assert.equal(probe.includes("modeSelect.value = 'stable';"), true);
+  assert.equal(probe.includes("modeSelect.value = 'extreme';"), true);
   assert.equal(probe.includes('STATUS_LONG_TEXT'), true, '长状态行快照必须保留');
   assert.equal(probe.includes('lines='), true, '探针输出必须直接给出行数');
   assert.equal(probe.includes('fsSameLineAsPlay='), true, '探针输出必须直接给出「全屏」是否与播放控制同行');
@@ -835,7 +810,7 @@ test('底部控制条分层：主控层常驻、参数层可收起，且任何�
   assert.equal(/flex-direction:\s*row/.test(compactControls), true, '紧凑模式下控制条要横排');
   assert.equal(/flex-wrap:\s*wrap/.test(compactControls), true, '紧凑模式仍要允许换行');
 
-  // 主控层 / 参数层各放什么：线路与追帧属"调一次就不动"的参数，不能挤占主控层。
+  // 主控层 / 参数层各放什么：线路与缓冲模式属"调一次就不动"的参数，不能挤占主控层。
   const primary = html.slice(html.indexOf('<div id="primaryRow"'), html.indexOf('<div id="paramRow"'));
   const param = html.slice(html.indexOf('<div id="paramRow"'), html.indexOf('<div id="statusBar"'));
 
@@ -843,7 +818,7 @@ test('底部控制条分层：主控层常驻、参数层可收起，且任何�
     assert.equal(primary.includes('id="' + id + '"'), true, id + ' 必须留在主控层（高频操作）');
   });
 
-  ['lineSelect', 'targetSelect', 'chaseBtn'].forEach((id) => {
+  ['lineSelect', 'modeSelect'].forEach((id) => {
     assert.equal(param.includes('id="' + id + '"'), true, id + ' 必须收进参数层');
     assert.equal(primary.includes('id="' + id + '"'), false, id + ' 不得再出现在主控层');
   });
@@ -1662,29 +1637,25 @@ test('页面薄调用层：只用适配层入口，成功后 setStatus / 上报�
     true,
     '成功上报必须只出现在"确认生效"之后');
 
-  // 停止追帧与换档位都必须先判定生效再改 UI / 上报。
-  const chaseBody = extractFunctionBody(html, 'async function toggleChase()');
-  assert.equal(chaseBody.includes('if (!(await applyPlayerTargetConfig('), true, '停止追帧必须按生效结论分支');
-  assert.equal(chaseBody.includes('run.autoChaseEnabled = !enabling;'), true, '未生效时开关必须回滚');
-
-  const targetBody = extractFunctionBody(html, 'async function handleTargetChange(payload)');
-  assert.equal(targetBody.includes('if (!(await applyPlayerTargetConfig('), true, '宿主换档位必须按生效结论分支');
-  assert.equal(targetBody.includes('core.applyExtremeTarget(run, previousTargetMs);'), true, '未生效时档位必须回滚');
+  // 切换缓冲模式必须先判定生效再改 UI / 上报。
+  const modeBody = extractFunctionBody(html, 'async function applyPlaybackMode(mode)');
+  assert.equal(modeBody.includes('if (!(await applyPlayerTargetConfig('), true, '切换模式必须按生效结论分支');
+  assert.equal(modeBody.includes('run.mode = previousMode;'), true, '未生效时模式必须回滚');
+  assert.equal(modeBody.includes('run.extreme = previousMode === \'extreme\';'), true, '未生效时 extreme 标记必须回滚');
 });
 
-test('换档位是"改配置"而不是"换地址"：候选地址与队列在换档位路径上不被改写', () => {
+test('切换缓冲模式是"改配置"而不是"换地址"：候选地址与队列在该路径上不被改写', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
-  const targetBody = extractFunctionBody(html, 'async function handleTargetChange(payload)');
-  const changeBody = extractFunctionBody(html, 'elements.targetSelect.addEventListener');
+  const modeBody = extractFunctionBody(html, 'async function applyPlaybackMode(mode)');
 
-  for (const [name, body] of [['handleTargetChange', targetBody], ['onTargetChange', changeBody]]) {
-    assert.equal(body.includes('startCandidate'), false, name + ' 不得重新起播候选（换档位不改地址）');
+  for (const [name, body] of [['applyPlaybackMode', modeBody]]) {
+    assert.equal(body.includes('startCandidate'), false, name + ' 不得重新起播候选（切模式不改地址）');
     assert.equal(body.includes('switchToNextCandidate'), false, name + ' 不得切换候选');
     assert.equal(body.includes('requestFreshSources'), false, name + ' 不得请求重新解析');
     assert.equal(body.includes('candidate-active'), false, name + ' 不得重发候选激活上报');
   }
 
-  // 三个档位都只是配置值：换档位后仍应保持同一个候选对象（用纯函数证明档位不进 candidates）。
+  // 档位只是配置值：切换档位后仍应保持同一个候选对象（用纯函数证明档位不进 candidates）。
   const run = { extreme: true, extremeTargetMs: 250, extremeTargetSeconds: 0.25 };
   const candidate = { format: 'flv', url: 'http://127.0.0.1:5566/relay/token' };
   assert.equal(core.applyExtremeTarget(run, 150), true);
