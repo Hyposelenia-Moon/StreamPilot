@@ -42,9 +42,8 @@ public partial class UpdateWindow : Window
         PublishedText.Text = release.PublishedAt is { } published
             ? published.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture)
             : string.Empty;
-        NotesBox.Text = string.IsNullOrWhiteSpace(release.Notes)
-            ? "（该版本没有填写更新说明）"
-            : release.Notes;
+        NotesViewer.Document = MarkdownDocumentRenderer.Render(
+            string.IsNullOrWhiteSpace(release.Notes) ? "（该版本没有填写更新说明）" : release.Notes);
 
         StatusText.Text = $"更新包 {FormatSize(release.AssetSize)}。点「下载并安装」开始，下载完成后会自动替换文件。";
     }

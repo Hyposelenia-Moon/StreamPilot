@@ -50,16 +50,19 @@
 
     <TextBlock Grid.Row="1" Text="更新内容" Style="{StaticResource SectionTitle}" Margin="0,14,0,6" />
 
-    <!-- 更新说明：只读文本框（可选中复制），Markdown 原文照示，不做渲染 -->
-    <TextBox Grid.Row="2"
-             x:Name="NotesBox"
-             IsReadOnly="True"
-             AcceptsReturn="True"
-             TextWrapping="Wrap"
-             VerticalScrollBarVisibility="Auto"
-             VerticalContentAlignment="Top"
-             Background="{StaticResource CardBackgroundBrush}"
-             Padding="10,8" />
+    <!--
+      更新说明按 Markdown 渲染：标题、列表、粗体、代码块都按排版显示。
+      直接放只读 TextBox 会让用户看到 "## 变更"、"**粗体**" 这类原始符号。
+    -->
+    <Border Grid.Row="2" Style="{StaticResource CardPanel}" Padding="14,12">
+      <FlowDocumentScrollViewer x:Name="NotesViewer"
+                                IsToolBarVisible="False"
+                                VerticalScrollBarVisibility="Auto"
+                                IsSelectionEnabled="True"
+                                Background="Transparent"
+                                BorderThickness="0"
+                                Padding="0" />
+    </Border>
 
     <!-- 进度与状态 -->
     <StackPanel Grid.Row="3" Margin="0,12,0,0">
