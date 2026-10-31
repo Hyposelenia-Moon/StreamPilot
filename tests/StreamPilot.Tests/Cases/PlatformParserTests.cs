@@ -7,12 +7,10 @@ using StreamPilot.Core.Http;
 using StreamPilot.Core.Logging;
 using StreamPilot.Core.Models;
 using StreamPilot.Core.Parsers;
-using StreamPilot.Parsers.Bigo;
 using StreamPilot.Parsers.Bilibili;
 using StreamPilot.Parsers.Douyin;
 using StreamPilot.Parsers.Huya;
 using StreamPilot.Parsers.Douyu;
-using StreamPilot.Parsers.Yy;
 using StreamPilot.Tests.Framework;
 
 /// <summary>
@@ -34,116 +32,6 @@ public sealed class PlatformParserTests
         Assert.True(BilibiliParser.IsRiskControlCode(-509), "code=-509");
         Assert.False(BilibiliParser.IsRiskControlCode(-400), "code=-400 是房间不存在");
         Assert.False(BilibiliParser.IsRiskControlCode(0), "code=0 是成功");
-    }
-
-    /// <summary>YY 房间页：抽取主播名、标题与真实流标识。</summary>
-    [TestMethod("YY：房间页抽取主播名、标题与 sid")]
-    public void YyExtractsPageInfo()
-    {
-        const string Html = """
-            <script>
-            var pageInfo = {
-                encode: 'false',
-                uid : "480757017",
-                nick: "热浪大魔王",
-                sid : "95866468",
-                ssid : "95866468",
-                shortSid : "168",
-                bizType: '0',
-                biz: '',
-                roomName: decodeURIComponent("%e5%a4%9c%e9%97%a8%e5%a4%a9%e4%b8%8b")
-            };
-            </script>
-            """;
-
-        YyParser.YyRoomPage page = CreateYyParser().ParseRoomPage(Html, "168");
-
-        Assert.Equal("热浪大魔王", page.Anchor);
-        Assert.Equal("夜门天下", page.Title);
-        Assert.Equal("95866468", page.StreamId, "短号必须换回真实 sid");
-    }
-
-    /// <summary>YY 房间页：页面没有 sid 时回退用输入的房间号。</summary>
-    [TestMethod("YY：缺少 sid 时回退输入房间号")]
-    public void YyFallsBackToInputRoomId()
-    {
-        const string Html = """
-            var pageInfo = {
-                nick: "测试主播",
-                roomName: decodeURIComponent("%E6%B5%8B%E8%AF%95"),
-                biz: 'game'
-            };
-            """;
-
-        YyParser.YyRoomPage page = CreateYyParser().ParseRoomPage(Html, "12345678");
-
-        Assert.Equal("测试主播", page.Anchor);
-        Assert.Equal("测试", page.Title);
-        Assert.Equal("game", page.Category);
-        Assert.Equal("12345678", page.StreamId);
-    }
-
-    /// <summary>YY 落在 404 页时必须判定为房间不存在。</summary>
-    [TestMethod("YY：404 页面判定为房间不存在")]
-    public void YyMissingPageInfoMeansRoomNotFound()
-    {
-        const string Html = "<html><body><script src=\"//x/yycom_404/pc/js/index.js\"></script></body></html>";
-
-        ResolveException exception = Assert.Throws<ResolveException>(
-            () => CreateYyParser().ParseRoomPage(Html, "1350510393"));
-
-        Assert.Equal(ResolveFailure.RoomNotFound, exception.Failure);
-    }
-
-    /// <summary>Bigo：匿名响应里 roomStatus 恒为 0，有地址就必须按开播处理。</summary>
-    [TestMethod("Bigo：有 HLS 地址即视为开播")]
-    public void BigoAcceptsStreamDespiteOfflineStatus()
-    {
-        using JsonDocument document = JsonDocument.Parse(
-            """
-            { "hls_src": "https://cdn.example/live/index.m3u8", "roomStatus": 0,
-              "roomTopic": "标题", "nick_name": "主播", "needLogin": false }
-            """);
-
-        StreamCandidateBuilder builder = new(PlatformId.Bigo);
-        CreateBigoParser().CollectCandidates(builder, document.RootElement, out string title, out string anchor);
-
-        Assert.Equal("标题", title);
-        Assert.Equal("主播", anchor);
-        Assert.Equal(1, builder.Count);
-        Assert.Equal(StreamFormat.HlsTs, builder.Build()[0].Format);
-    }
-
-    /// <summary>Bigo：接口要求登录时归类为被拒绝，而不是未开播。</summary>
-    [TestMethod("Bigo：需要登录时归类为被拒绝")]
-    public void BigoReportsLoginRequiredAsRejected()
-    {
-        using JsonDocument document = JsonDocument.Parse(
-            """
-            { "hls_src": "", "roomStatus": 0, "roomTopic": "", "nick_name": "", "needLogin": true }
-            """);
-
-        StreamCandidateBuilder builder = new(PlatformId.Bigo);
-        ResolveException exception = Assert.Throws<ResolveException>(
-            () => CreateBigoParser().CollectCandidates(builder, document.RootElement, out _, out _));
-
-        Assert.Equal(ResolveFailure.Rejected, exception.Failure);
-    }
-
-    /// <summary>Bigo：既没有地址也不需要登录时按未开播处理。</summary>
-    [TestMethod("Bigo：无地址且无需登录按未开播")]
-    public void BigoWithoutStreamIsNotLive()
-    {
-        using JsonDocument document = JsonDocument.Parse(
-            """
-            { "hls_src": "", "roomStatus": 0, "roomTopic": "", "nick_name": "", "needLogin": false }
-            """);
-
-        StreamCandidateBuilder builder = new(PlatformId.Bigo);
-        ResolveException exception = Assert.Throws<ResolveException>(
-            () => CreateBigoParser().CollectCandidates(builder, document.RootElement, out _, out _));
-
-        Assert.Equal(ResolveFailure.NotLive, exception.Failure);
     }
 
     /// <summary>抖音：档位声明优先，码率换算为 kbps，未指定档位时取最高档。</summary>
@@ -270,57 +158,6 @@ public sealed class PlatformParserTests
         Assert.Equal(0, parser.ResolveRequestedRate("not-a-rate"), "非法档位键回退原画");
         Assert.Equal(0, parser.ResolveRequestedRate("999"), "越界档位键回退原画");
         Assert.Equal(0, parser.ResolveRequestedRate(null), "未指定档位时取最高档");
-    }
-
-    /// <summary>YY：gear 语义未证实，档位列表只放一项默认档。</summary>
-    [TestMethod("YY：档位列表只有一项默认档")]
-    public void YyExposesSingleDefaultQuality()
-    {
-        IReadOnlyList<QualityOption> qualities = YyParser.BuildQualityOptions(2);
-
-        Assert.Equal(1, qualities.Count);
-        Assert.Equal("2", qualities[0].Key);
-        Assert.Equal("默认（平台给定）", qualities[0].Label);
-        Assert.True(qualities[0].IsBest);
-    }
-
-    /// <summary>YY：非法或越界的 gear 必须回退到默认值 2。</summary>
-    [TestMethod("YY：非法 gear 回退默认值")]
-    public void YyFallsBackToDefaultGear()
-    {
-        YyParser parser = CreateYyParser();
-
-        Assert.Equal(5, parser.ResolveGear("5"), "纯数字档位键原样透传");
-        Assert.Equal(2, parser.ResolveGear(null), "未指定档位时用默认 gear");
-        Assert.Equal(2, parser.ResolveGear("best"), "best 表示平台默认档");
-        Assert.Equal(2, parser.ResolveGear("abc"), "非数字档位键回退默认 gear");
-        Assert.Equal(2, parser.ResolveGear("999"), "越界档位键回退默认 gear");
-    }
-
-    /// <summary>Bigo：只有一路 HLS，档位列表固定为一项 default。</summary>
-    [TestMethod("Bigo：档位列表固定为一项默认档")]
-    public void BigoExposesSingleDefaultQuality()
-    {
-        (IReadOnlyList<QualityOption> qualities, string? selectedKey) =
-            CreateBigoParser().BuildQualityOptions(preferredQualityKey: null);
-
-        Assert.Equal(1, qualities.Count);
-        Assert.Equal("default", qualities[0].Key);
-        Assert.Equal("默认（平台自带 HLS）", qualities[0].Label);
-        Assert.True(qualities[0].IsBest);
-        Assert.Equal("default", selectedKey);
-    }
-
-    /// <summary>Bigo：调用方指定的档位键必须被忽略（平台没有档位可选）。</summary>
-    [TestMethod("Bigo：忽略调用方指定的档位键")]
-    public void BigoIgnoresPreferredQualityKey()
-    {
-        (IReadOnlyList<QualityOption> qualities, string? selectedKey) =
-            CreateBigoParser().BuildQualityOptions("uhd");
-
-        Assert.Equal(1, qualities.Count);
-        Assert.Equal("default", qualities[0].Key);
-        Assert.Equal("default", selectedKey);
     }
 
     /// <summary>虎牙：档位来自 liveData.bitRateInfo（JSON 字符串），名称与排序按平台声明。</summary>
@@ -911,34 +748,6 @@ public sealed class PlatformParserTests
         Assert.Equal("ttwid=fresh", DouyinParser.BuildRoomEnterCookie("fresh"), "作用域释放后不再带入用户 Cookie");
     }
 
-    private static YyParser CreateYyParser() =>
-        new(new HttpTextClient(new HttpClientFactory(new NetworkOptions(), NullStructuredLogger.Instance), NullStructuredLogger.Instance),
-            NullStructuredLogger.Instance);
-
-    /// <summary>Bigo：只有一条 hls_src，但地址自带的时效必须被读出来。</summary>
-    /// <remarks>
-    /// 读不到有效期时，过期地址仍会被当作可用候选下发，页面先探测、重试、切线路，
-    /// 最后才轮到重新解析——用户的体感就是"点了播放没反应"。
-    /// </remarks>
-    [TestMethod("Bigo：读取 hls_src 里的过期时间")]
-    public void BigoReadsExpiryFromStreamUrl()
-    {
-        using JsonDocument document = JsonDocument.Parse(
-            """
-            { "hls_src": "https://cdn.example/live/index.m3u8?expire=1893456000&sig=abc",
-              "roomTopic": "标题", "nick_name": "主播", "needLogin": false }
-            """);
-
-        StreamCandidateBuilder builder = new(PlatformId.Bigo);
-        CreateBigoParser().CollectCandidates(builder, document.RootElement, out _, out _);
-
-        Assert.Equal(1, builder.Count);
-        Assert.Equal(
-            DateTimeOffset.FromUnixTimeSeconds(1893456000),
-            builder.Build()[0].ExpiresAt,
-            "签名地址里的 expire 必须写入候选有效期");
-    }
-
     /// <summary>抖音：选中档位可用时补上"不高于选中档"的备用线路，并读出时效。</summary>
     /// <remarks>
     /// 抖音每个档位只给 1 条 FLV + 1 条 HLS，没有 CDN 备选；选中档位的签名一旦失效，
@@ -982,10 +791,6 @@ public sealed class PlatformParserTests
     /// <summary>创建一个不发起网络请求的 B站解析器（HTTP 客户端只在测试里被构造，不会被调用）。</summary>
     /// <returns>B站解析器实例。</returns>
     private static BilibiliParser CreateBilibiliParser() =>
-        new(new HttpTextClient(new HttpClientFactory(new NetworkOptions(), NullStructuredLogger.Instance), NullStructuredLogger.Instance),
-            NullStructuredLogger.Instance);
-
-    private static BigoParser CreateBigoParser() =>
         new(new HttpTextClient(new HttpClientFactory(new NetworkOptions(), NullStructuredLogger.Instance), NullStructuredLogger.Instance),
             NullStructuredLogger.Instance);
 

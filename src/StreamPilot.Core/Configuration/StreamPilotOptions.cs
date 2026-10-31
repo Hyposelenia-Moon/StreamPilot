@@ -284,10 +284,10 @@ public sealed record PlatformOptions
     /// <summary>斗鱼 Cookie（可留空）。</summary>
     public string DouyuCookie { get; init; } = string.Empty;
 
-    /// <summary>YY Cookie（可留空）。</summary>
+    /// <summary>YY Cookie（已停用，仅为兼容旧配置保留字段）。</summary>
     public string YyCookie { get; init; } = string.Empty;
 
-    /// <summary>Bigo Cookie（可留空）。</summary>
+    /// <summary>Bigo Cookie（已停用，仅为兼容旧配置保留字段）。</summary>
     public string BigoCookie { get; init; } = string.Empty;
 
     /// <summary>按平台取对应的 Cookie。</summary>

@@ -959,7 +959,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             if (!outcome.Success || outcome.Room is null)
             {
                 _currentRoom = null;
-                // 平台自己的说明（例如 Bigo 的"需要登录"）比通用文案具体，优先展示它。
+                // 平台自己的说明（例如抖音的"需要登录"）比通用文案具体，优先展示它。
                 StatusMessage = outcome.Message.Length > 0
                     ? outcome.Message
                     : ResolveMessages.DescribeFailure(outcome.Failure);

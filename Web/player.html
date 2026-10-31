@@ -359,6 +359,7 @@
 
     #hint.hidden,
     #volDisplay.hidden,
+    #statsPanel.hidden,
     footer.hidden {
       display: none;
     }
@@ -517,6 +518,60 @@
        宿主的错误 / 警告不再长期占着状态行（状态行 6/12/20s 的分级保留作兜底），
        先弹一条看得见的提示，消失后状态行仍在。
     */
+    /*
+      视频统计浮层：右上角深色半透明面板。
+      只在用户点「统计」时出现，不参与控制条自动隐藏——它本来就是主动打开的信息，
+      跟着鼠标消失反而要反复打开。
+    */
+    #statsPanel {
+      position: absolute;
+      right: 14px;
+      top: 14px;
+      z-index: 5;
+      min-width: 236px;
+      max-width: 340px;
+      padding: 10px 12px;
+      border-radius: var(--sp-radius-md);
+      background: rgba(16, 20, 27, 0.84);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      color: #f5f7fa;
+      font-size: 12px;
+      line-height: 1.7;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+      -webkit-backdrop-filter: blur(8px);
+      backdrop-filter: blur(8px);
+      pointer-events: none;
+    }
+
+    .sp-stats-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: #ffffff;
+      padding-bottom: 6px;
+      margin-bottom: 6px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+    }
+
+    .sp-stats-list {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 2px 10px;
+      margin: 0;
+    }
+
+    .sp-stats-list dt {
+      color: rgba(255, 255, 255, 0.6);
+      white-space: nowrap;
+    }
+
+    .sp-stats-list dd {
+      margin: 0;
+      color: #ffffff;
+      font-family: Consolas, "Cascadia Mono", monospace;
+      font-variant-numeric: tabular-nums;
+      overflow-wrap: anywhere;
+    }
+
     #toast {
       position: absolute;
       right: 16px;
@@ -624,6 +679,11 @@
       </button>
       <div id="volDisplay" class="hidden">音量：30%</div>
       <div id="toast" role="alert" aria-live="polite"></div>
+      <!-- 统计浮层：点参数层的「统计」开关，数据每秒刷新一次 -->
+      <div id="statsPanel" class="sp-stats hidden" aria-hidden="true">
+        <div class="sp-stats-title">视频统计信息</div>
+        <dl id="statsList" class="sp-stats-list"></dl>
+      </div>
     </div>
 
     <footer id="controlsBar">
@@ -662,6 +722,7 @@
             <select id="targetSelect"></select>
           </label>
           <button type="button" id="chaseBtn" title="开启自动追帧并立刻追一次帧（跳到直播最新位置）">追帧</button>
+          <button type="button" id="statsBtn" title="显示当前直播的详细参数（分辨率 / 帧率 / 码率 / 编码）">统计</button>
         </div>
       </div>
       <div id="statusBar">
@@ -746,6 +807,9 @@
         paramToggle: document.getElementById('paramToggle'),
         healthBar: document.getElementById('healthBar'),
         toast: document.getElementById('toast'),
+        statsBtn: document.getElementById('statsBtn'),
+        statsPanel: document.getElementById('statsPanel'),
+        statsList: document.getElementById('statsList'),
         panelBtn: document.getElementById('panelBtn'),
       };
 
@@ -1187,6 +1251,12 @@
           elements.paramToggle.addEventListener('click', function onParamToggle() {
             uiState.paramsCollapsed = !uiState.paramsCollapsed;
             syncParameterRow();
+          });
+        }
+
+        if (elements.statsBtn) {
+          elements.statsBtn.addEventListener('click', function onStatsToggle() {
+            setStatsVisible(!statsState.enabled);
           });
         }
 
@@ -2789,6 +2859,144 @@
       }
 
       /** 绑定控件事件。 */
+      /**
+       * 参数层的「统计」开关：打开后在画面右上角显示分辨率、帧率、码率与编码。
+       *
+       * 帧率与码率都靠两次采样差分算出来（presentedFrames / decodedByteCount），
+       * 不解析容器、也不把播放速率当帧率；首次采样只建基线，所以刚打开时显示「—」是正常的。
+       */
+      const statsState = {
+        enabled: false,
+        timer: null,
+        lastAt: 0,
+        lastFrames: 0,
+        lastVideoBytes: null,
+        lastAudioBytes: null,
+        fps: null,
+        videoKbps: null,
+        audioKbps: null,
+      };
+
+      /** 切换统计浮层；重新打开时清空采样基线，避免拿上一次会话的差值算码率。 */
+      function setStatsVisible(visible) {
+        statsState.enabled = Boolean(visible);
+        if (elements.statsPanel) {
+          elements.statsPanel.classList.toggle('hidden', !statsState.enabled);
+          elements.statsPanel.setAttribute('aria-hidden', String(!statsState.enabled));
+        }
+
+        if (elements.statsBtn) {
+          elements.statsBtn.classList.toggle('active', statsState.enabled);
+        }
+
+        if (statsState.enabled) {
+          statsState.lastAt = 0;
+          statsState.lastFrames = 0;
+          statsState.lastVideoBytes = null;
+          statsState.lastAudioBytes = null;
+          renderStats();
+          statsState.timer = window.setInterval(renderStats, 1000);
+          return;
+        }
+
+        if (statsState.timer !== null) {
+          window.clearInterval(statsState.timer);
+          statsState.timer = null;
+        }
+      }
+
+      /** 采样一次，更新帧率与码率（第一次调用只记基线）。 */
+      function collectStats() {
+        const video = elements.video;
+        const now = performance.now();
+        const quality = typeof video.getVideoPlaybackQuality === 'function' ? video.getVideoPlaybackQuality() : null;
+        const frames = quality ? Number(quality.totalVideoFrames) || 0 : 0;
+        const videoBytes = typeof video.webkitVideoDecodedByteCount === 'number' ? video.webkitVideoDecodedByteCount : null;
+        const audioBytes = typeof video.webkitAudioDecodedByteCount === 'number' ? video.webkitAudioDecodedByteCount : null;
+
+        const elapsed = (now - statsState.lastAt) / 1000;
+        if (statsState.lastAt > 0 && elapsed >= 0.4) {
+          if (frames >= statsState.lastFrames) {
+            statsState.fps = (frames - statsState.lastFrames) / elapsed;
+          }
+
+          if (videoBytes !== null && statsState.lastVideoBytes !== null && videoBytes >= statsState.lastVideoBytes) {
+            statsState.videoKbps = ((videoBytes - statsState.lastVideoBytes) * 8) / elapsed / 1000;
+          }
+
+          if (audioBytes !== null && statsState.lastAudioBytes !== null && audioBytes >= statsState.lastAudioBytes) {
+            statsState.audioKbps = ((audioBytes - statsState.lastAudioBytes) * 8) / elapsed / 1000;
+          }
+        }
+
+        statsState.lastAt = now;
+        statsState.lastFrames = frames;
+        statsState.lastVideoBytes = videoBytes;
+        statsState.lastAudioBytes = audioBytes;
+      }
+
+      /** 把「标签 / 值」写进浮层；顺序与主流网页播放器的统计面板一致。 */
+      function renderStats() {
+        if (!statsState.enabled || !elements.statsList) {
+          return;
+        }
+
+        collectStats();
+
+        const video = elements.video;
+        const candidate = state.run ? state.run.currentCandidate : null;
+        const quality = typeof video.getVideoPlaybackQuality === 'function' ? video.getVideoPlaybackQuality() : null;
+        const dropped = quality ? Number(quality.droppedVideoFrames) || 0 : 0;
+        const total = quality ? Number(quality.totalVideoFrames) || 0 : 0;
+        const bufferSeconds = core.getLocalBufferSeconds(video.buffered, video.currentTime);
+
+        const rows = [
+          ['分辨率', video.videoWidth > 0 && video.videoHeight > 0 ? video.videoWidth + ' × ' + video.videoHeight : '—'],
+          ['帧率', statsState.fps !== null ? Math.round(statsState.fps) + ' fps' : '—'],
+          ['视频编码', describeCodec(candidate)],
+          ['视频码率', statsState.videoKbps !== null ? Math.round(statsState.videoKbps) + ' kbps' : '—'],
+          ['音频编码', candidate ? 'AAC' : '—'],
+          ['音频码率', statsState.audioKbps !== null ? Math.round(statsState.audioKbps) + ' kbps' : '—'],
+          ['缓冲', bufferSeconds.toFixed(1) + ' 秒'],
+          ['已播', formatStatDuration(video.currentTime)],
+          ['丢帧', total > 0 ? dropped + ' / ' + total : '—'],
+          ['线路', candidate && candidate.cdnHost ? candidate.cdnHost : '—'],
+        ];
+
+        const fragment = document.createDocumentFragment();
+        for (const [label, value] of rows) {
+          const term = document.createElement('dt');
+          term.textContent = label;
+          const detail = document.createElement('dd');
+          detail.textContent = value;
+          fragment.append(term, detail);
+        }
+
+        elements.statsList.replaceChildren(fragment);
+      }
+
+      /** 编码展示名：页面只拿得到 hevc / avc 两个值。 */
+      function describeCodec(candidate) {
+        if (!candidate || !candidate.codec) {
+          return '—';
+        }
+
+        return candidate.codec === 'hevc' ? 'H.265 (HEVC)' : candidate.codec === 'avc' ? 'H.264 (AVC)' : String(candidate.codec);
+      }
+
+      /** 秒数转 分:秒 / 时:分:秒（统计面板的「已播」）。 */
+      function formatStatDuration(seconds) {
+        const total = Math.max(0, Math.floor(Number(seconds) || 0));
+        const hours = Math.floor(total / 3600);
+        const minutes = Math.floor((total % 3600) / 60);
+        const rest = total % 60;
+        const pad = function pad(value) {
+          return String(value).padStart(2, '0');
+        };
+
+        return hours > 0 ? hours + ':' + pad(minutes) + ':' + pad(rest) : pad(minutes) + ':' + pad(rest);
+      }
+
       function bindControls() {
         elements.volume.addEventListener('input', function onVolumeInput() {
           applyVolume(elements.volume.value);

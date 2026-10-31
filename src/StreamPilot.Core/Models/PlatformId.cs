@@ -23,9 +23,9 @@ public enum PlatformId
     /// <summary>斗鱼直播（P1）。</summary>
     Douyu = 4,
 
-    /// <summary>YY 直播（P1）。</summary>
+    /// <summary>YY 直播（已停用：仅保留枚举值以兼容旧配置里的 lastPlatform / 预设平台）。</summary>
     Yy = 5,
 
-    /// <summary>Bigo Live（P2）。</summary>
+    /// <summary>Bigo Live（已停用：同上，保留枚举值以兼容旧配置）。</summary>
     Bigo = 6,
 }

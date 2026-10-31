@@ -54,8 +54,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private string _douyinCookie = string.Empty;
     private string _huyaCookie = string.Empty;
     private string _douyuCookie = string.Empty;
-    private string _yyCookie = string.Empty;
-    private string _bigoCookie = string.Empty;
     private string _recordingDirectory = string.Empty;
     private string _segmentMaxGibibytes = RecordingLimitUnits.FormatGibibytes(RecordingLimits.DefaultSegmentMaxBytes);
     private string _segmentMaxHours = RecordingLimitUnits.FormatHours(RecordingLimits.DefaultSegmentMaxDurationMinutes);
@@ -399,20 +397,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         set => SetField(ref _douyuCookie, value ?? string.Empty);
     }
 
-    /// <summary>YY Cookie（可留空）。</summary>
-    public string YyCookie
-    {
-        get => _yyCookie;
-        set => SetField(ref _yyCookie, value ?? string.Empty);
-    }
-
-    /// <summary>Bigo Cookie（可留空）。</summary>
-    public string BigoCookie
-    {
-        get => _bigoCookie;
-        set => SetField(ref _bigoCookie, value ?? string.Empty);
-    }
-
     /// <summary>录制输出根目录。</summary>
     public string RecordingDirectory
     {
@@ -570,8 +554,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         DouyinCookie = options.Platforms.DouyinCookie;
         HuyaCookie = options.Platforms.HuyaCookie;
         DouyuCookie = options.Platforms.DouyuCookie;
-        YyCookie = options.Platforms.YyCookie;
-        BigoCookie = options.Platforms.BigoCookie;
 
         RecordingDirectory = options.Recording.OutputDirectory;
         SegmentPolicyOptions segment = options.Recording.Segment.Normalize();
@@ -700,8 +682,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 DouyinCookie = DouyinCookie.Trim(),
                 HuyaCookie = HuyaCookie.Trim(),
                 DouyuCookie = DouyuCookie.Trim(),
-                YyCookie = YyCookie.Trim(),
-                BigoCookie = BigoCookie.Trim(),
             },
             Bridge = baseOptions.Bridge with
             {

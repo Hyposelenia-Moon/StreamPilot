@@ -14,12 +14,10 @@ using StreamPilot.Core.Runtime;
 using StreamPilot.Core.Services;
 using StreamPilot.Core.Updates;
 using StreamPilot.Parsers;
-using StreamPilot.Parsers.Bigo;
 using StreamPilot.Parsers.Bilibili;
 using StreamPilot.Parsers.Douyin;
 using StreamPilot.Parsers.Douyu;
 using StreamPilot.Parsers.Huya;
-using StreamPilot.Parsers.Yy;
 
 using WpfApplication = System.Windows.Application;
 using WpfMessageBox = System.Windows.MessageBox;
@@ -289,8 +287,6 @@ public partial class App : WpfApplication
             new DouyinParser(textClient, factory, _logger),
             new HuyaParser(textClient, _logger),
             new DouyuParser(textClient, _logger),
-            new YyParser(textClient, _logger),
-            new BigoParser(textClient, _logger),
         ]));
         registry.RegisterSingleton(_ => new StreamCache());
         registry.RegisterSingleton<IRoomResolver>(context => new RoomResolver(

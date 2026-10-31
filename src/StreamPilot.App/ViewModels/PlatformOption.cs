@@ -29,15 +29,6 @@ public sealed record PlatformOption(PlatformId Id, string DisplayName, IReadOnly
     /// <summary>斗鱼域名。</summary>
     private const string DouyuDomain = "douyu.com";
 
-    /// <summary>YY 域名。</summary>
-    private const string YyDomain = "yy.com";
-
-    /// <summary>Bigo Live 主域名。</summary>
-    private const string BigoDomain = "bigo.tv";
-
-    /// <summary>Bigo Live 东南亚域名。</summary>
-    private const string BigoSoutheastAsiaDomain = "bigo.sg";
-
     /// <summary>可用的平台列表（顺序即界面展示顺序，也是平台识别的优先级顺序）。</summary>
     public static IReadOnlyList<PlatformOption> All { get; } =
     [
@@ -45,8 +36,6 @@ public sealed record PlatformOption(PlatformId Id, string DisplayName, IReadOnly
         new PlatformOption(PlatformId.Douyin, "抖音", [DouyinDomain]),
         new PlatformOption(PlatformId.Huya, "虎牙", [HuyaDomain]),
         new PlatformOption(PlatformId.Douyu, "斗鱼", [DouyuDomain]),
-        new PlatformOption(PlatformId.Yy, "YY", [YyDomain]),
-        new PlatformOption(PlatformId.Bigo, "Bigo Live", [BigoDomain, BigoSoutheastAsiaDomain]),
     ];
 
     /// <summary>按平台标识查找展示项。</summary>

@@ -160,16 +160,6 @@
                          ToolTip="仅用于本次解析请求，用于换取需要登录的高画质档位；不写入日志，不随程序分发。"
                          AutomationProperties.AutomationId="DouyuCookieBox" />
 
-                <TextBlock Text="YY Cookie" Style="{StaticResource SettingLabel}" />
-                <TextBox Style="{StaticResource CookieBox}" Text="{Binding YyCookie, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="仅用于本次解析请求，用于换取需要登录的高画质档位；不写入日志，不随程序分发。"
-                         AutomationProperties.AutomationId="YyCookieBox" />
-
-                <TextBlock Text="Bigo Cookie" Style="{StaticResource SettingLabel}" />
-                <TextBox Style="{StaticResource CookieBox}" Text="{Binding BigoCookie, UpdateSourceTrigger=PropertyChanged}"
-                         Margin="0"
-                         ToolTip="仅用于本次解析请求，用于换取需要登录的高画质档位；不写入日志，不随程序分发。"
-                         AutomationProperties.AutomationId="BigoCookieBox" />
               </StackPanel>
             </Border>
           </StackPanel>

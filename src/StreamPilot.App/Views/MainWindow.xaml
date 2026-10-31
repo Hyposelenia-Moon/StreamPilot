@@ -147,7 +147,7 @@
                 <StackPanel Grid.Row="2">
                   <ListBox ItemsSource="{Binding PresetItems}"
                            SelectedItem="{Binding SelectedPresetItem, Mode=TwoWay}"
-                           MaxHeight="240"
+                           MaxHeight="300"
                            Background="Transparent"
                            BorderThickness="0"
                            ScrollViewer.HorizontalScrollBarVisibility="Disabled">
@@ -176,7 +176,16 @@
                     </ListBox.ItemContainerStyle>
                     <ListBox.ItemTemplate>
                       <DataTemplate>
-                        <Grid Margin="0,2">
+                        <!--
+                          两行布局：上一行只放名称与操作，下一行放状态与自动录。
+                          之前把「名称 / 状态 + 自动录 + 编辑 + 删除」全塞在一行，380 px 宽下名称被挤成
+                          "Sylva摸头妹 / 未…"，看不出完整主播名。
+                        -->
+                        <Grid Margin="0,3">
+                          <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                          </Grid.RowDefinitions>
                           <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto" />
                             <ColumnDefinition Width="*" />
@@ -184,50 +193,56 @@
                           </Grid.ColumnDefinitions>
 
                           <!-- 平台徽标：自绘圆角小方块 + 平台简称，不依赖任何图片资源 -->
-                          <Border Grid.Column="0" Width="30" Height="30" CornerRadius="7"
-                                  Background="{Binding BadgeBrush}" Margin="0,0,8,0">
+                          <Border Grid.Row="0" Grid.RowSpan="2" Grid.Column="0" Width="30" Height="30" CornerRadius="7"
+                                  Background="{Binding BadgeBrush}" Margin="0,0,8,0" VerticalAlignment="Top">
                             <TextBlock Text="{Binding BadgeText}" Foreground="#FFFFFF" FontWeight="SemiBold"
                                        FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center" />
                           </Border>
 
-                          <Button Grid.Column="1"
+                          <Button Grid.Row="0" Grid.Column="1"
                                   Command="{Binding ApplyCommand}"
                                   CommandParameter="{Binding}"
                                   ToolTip="{Binding ToolTipText}"
                                   HorizontalContentAlignment="Left"
+                                  VerticalAlignment="Center"
                                   Padding="0"
                                   Margin="0"
                                   Background="Transparent"
                                   BorderThickness="0">
-                            <TextBlock Text="{Binding DisplayText}" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{Binding AnchorName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                           </Button>
 
-                              <StackPanel Grid.Column="2" Orientation="Horizontal">
-                                <!-- 文字标签不能省：只有一个小方框时，没人知道它代表"开播自动录制" -->
-                                <CheckBox Content="自动录"
-                                          IsChecked="{Binding AutoRecord}"
-                                          VerticalAlignment="Center"
-                                          VerticalContentAlignment="Center"
-                                          FontSize="13"
-                                          Margin="0,0,6,0"
-                                          ToolTip="勾选后：后台每 2 分钟检测一次，该预设开播时自动开始录制，下播自动停止"
-                                          AutomationProperties.AutomationId="AutoRecordCheckBox" />
-                                <Button Content="编辑"
-                                        Command="{Binding DataContext.EditPresetCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                        CommandParameter="{Binding}"
-                                        AutomationProperties.AutomationId="EditPresetButton"
-                                        ToolTip="修改主播名称、直播链接或平台"
-                                        FontSize="13"
-                                        Padding="8,5"
-                                        Margin="0,0,0,0" />
-                                <Button Content="删除"
-                                        Command="{Binding DataContext.DeletePresetCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                        CommandParameter="{Binding}"
-                                        ToolTip="删除这个预设"
-                                        FontSize="13"
-                                        Padding="8,5"
-                                        Margin="6,0,0,0" />
-                              </StackPanel>
+                          <StackPanel Grid.Row="0" Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                            <Button Content="编辑"
+                                    Command="{Binding DataContext.EditPresetCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                    CommandParameter="{Binding}"
+                                    AutomationProperties.AutomationId="EditPresetButton"
+                                    ToolTip="修改主播名称、直播链接或平台"
+                                    FontSize="12"
+                                    Padding="7,3"
+                                    Margin="0" />
+                            <Button Content="删除"
+                                    Command="{Binding DataContext.DeletePresetCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                    CommandParameter="{Binding}"
+                                    ToolTip="删除这个预设"
+                                    FontSize="12"
+                                    Padding="7,3"
+                                    Margin="4,0,0,0" />
+                          </StackPanel>
+
+                          <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2"
+                                      Orientation="Horizontal" Margin="0,4,0,0">
+                            <Ellipse Width="6" Height="6" Fill="{Binding StateBrush}" VerticalAlignment="Center" Margin="0,0,5,0" />
+                            <TextBlock Text="{Binding StateText}" Style="{StaticResource MutedText}" FontSize="12"
+                                       VerticalAlignment="Center" Margin="0,0,12,0" />
+                            <CheckBox Content="自动录"
+                                      IsChecked="{Binding AutoRecord}"
+                                      FontSize="12"
+                                      VerticalAlignment="Center"
+                                      VerticalContentAlignment="Center"
+                                      ToolTip="勾选后：后台每 2 分钟检测一次，该预设开播时自动开始录制，下播自动停止"
+                                      AutomationProperties.AutomationId="AutoRecordCheckBox" />
+                          </StackPanel>
                         </Grid>
                       </DataTemplate>
                     </ListBox.ItemTemplate>

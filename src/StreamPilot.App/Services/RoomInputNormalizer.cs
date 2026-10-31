@@ -53,7 +53,7 @@ public static class RoomInputNormalizer
     /// <param name="input">用户输入。</param>
     /// <returns>全部为数字且非空返回 <see langword="true"/>。</returns>
     /// <remarks>
-    /// 只把纯数字当作房间号：虎牙/YY 的房间号也可能是字母组合，贸然转换会拼出打不开的链接；
+    /// 只把纯数字当作房间号：虎牙的房间号也可能是字母组合，贸然转换会拼出打不开的链接；
     /// 字母房间号按原样交给解析器（它们本来就接受"房间号"这种输入）。
     /// </remarks>
     public static bool IsPlainRoomId(string? input)

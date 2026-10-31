@@ -17,16 +17,18 @@ using StreamPilot.Tests.Framework;
 [TestClass]
 public sealed class PlatformDetectionTests
 {
-    /// <summary>六个平台各自的直播间页面链接都能识别（正常）。</summary>
-    [TestMethod("平台识别：六个平台的直播间链接")]
+    /// <summary>四个平台的直播间页面链接都能识别（正常）。</summary>
+    [TestMethod("平台识别：四个平台的直播间链接")]
     public void DetectsEveryPlatformFromRoomPageUrl()
     {
         Assert.Equal<PlatformId?>(PlatformId.Bilibili, PlatformDetector.Detect("https://live.bilibili.com/21452505"));
         Assert.Equal<PlatformId?>(PlatformId.Douyin, PlatformDetector.Detect("https://live.douyin.com/123456789"));
         Assert.Equal<PlatformId?>(PlatformId.Huya, PlatformDetector.Detect("https://www.huya.com/660000"));
         Assert.Equal<PlatformId?>(PlatformId.Douyu, PlatformDetector.Detect("https://www.douyu.com/9999"));
-        Assert.Equal<PlatformId?>(PlatformId.Yy, PlatformDetector.Detect("https://www.yy.com/168"));
-        Assert.Equal<PlatformId?>(PlatformId.Bigo, PlatformDetector.Detect("https://www.bigo.tv/abc123"));
+
+        // YY 与 Bigo 已停止支持：域名不再识别，粘进来会走"不支持的平台"提示而不是误判。
+        Assert.Null(PlatformDetector.Detect("https://www.yy.com/168"), "YY 已停用");
+        Assert.Null(PlatformDetector.Detect("https://www.bigo.tv/abc123"), "Bigo 已停用");
     }
 
     /// <summary>各平台分享出的短链与分享文案同样能识别（正常）。</summary>
@@ -39,8 +41,6 @@ public sealed class PlatformDetectionTests
             PlatformDetector.Detect("7.65 复制打开抖音，看看【某主播的直播间】 https://v.douyin.com/iRNBho6u/ 3@4.com"));
         Assert.Equal<PlatformId?>(PlatformId.Huya, PlatformDetector.Detect("https://m.huya.com/660000"));
         Assert.Equal<PlatformId?>(PlatformId.Douyu, PlatformDetector.Detect("https://v.douyu.com/show/abcdef"));
-        Assert.Equal<PlatformId?>(PlatformId.Yy, PlatformDetector.Detect("https://yy.com/168"));
-        Assert.Equal<PlatformId?>(PlatformId.Bigo, PlatformDetector.Detect("https://bigo.sg/abc123"));
 
         // 分享文案里链接前面有中文说明时，仍然取链接的主机名而不是文案里的其它字符。
         Assert.Equal<PlatformId?>(
@@ -55,7 +55,7 @@ public sealed class PlatformDetectionTests
         Assert.Equal<PlatformId?>(PlatformId.Huya, PlatformDetector.Detect("HTTPS://WWW.HUYA.COM/660000"));
         Assert.Equal<PlatformId?>(PlatformId.Bilibili, PlatformDetector.Detect("live.bilibili.com/21452505"));
         Assert.Equal<PlatformId?>(PlatformId.Douyin, PlatformDetector.Detect("  live.douyin.com/123456789  "));
-        Assert.Equal<PlatformId?>(PlatformId.Bigo, PlatformDetector.Detect("www.bigo.tv/abc123"));
+        Assert.Equal<PlatformId?>(PlatformId.Douyu, PlatformDetector.Detect("WWW.DOUYU.COM/9999"));
     }
 
     /// <summary>纯房间号无法识别，回退调用方指定的平台（异常/回退）。</summary>
@@ -94,14 +94,13 @@ public sealed class PlatformDetectionTests
         Assert.Null(PlatformDetector.Detect("看看这个直播间 https://example.com/1"), "未知域名不猜平台");
     }
 
-    /// <summary>平台下拉必须给出六个平台且都带可识别域名（边界）。</summary>
-    [TestMethod("平台识别：六个平台都带可识别域名")]
+    /// <summary>平台下拉必须给出四个平台且都带可识别域名（边界）。</summary>
+    [TestMethod("平台识别：四个平台都带可识别域名")]
     public void EveryPlatformHasMatchDomains()
     {
         PlatformId[] platforms =
         [
-            PlatformId.Bilibili, PlatformId.Douyin, PlatformId.Huya,
-            PlatformId.Douyu, PlatformId.Yy, PlatformId.Bigo,
+            PlatformId.Bilibili, PlatformId.Douyin, PlatformId.Huya, PlatformId.Douyu,
         ];
 
         foreach (PlatformId platform in platforms)
