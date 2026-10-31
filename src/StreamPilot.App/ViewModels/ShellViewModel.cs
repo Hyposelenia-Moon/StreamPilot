@@ -1833,7 +1833,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(IsUpdateAvailable));
             OnPropertyChanged(nameof(UpdateBannerText));
             (OpenUpdateCommand as RelayCommand)?.RaiseCanExecuteChanged();
-            StatusMessage = "发现新版本 " + release.Version + "，点右上角「更新」查看。";
+            StatusMessage = "发现新版本 " + release.Version + "，点左上角控制面板顶部的「更新」查看。";
             AppendLog("发现新版本：" + release.Version);
             _trayNotifier.NotifyUpdate(release.Version.ToString());
             return;

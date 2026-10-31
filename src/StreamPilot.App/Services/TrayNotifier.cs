@@ -60,7 +60,7 @@ public sealed class TrayNotifier : IDisposable
     /// <summary>弹一条"发现新版本"气泡通知。</summary>
     /// <param name="version">新版本号。</param>
     public void NotifyUpdate(string version) =>
-        _icon.ShowBalloonTip(BalloonTimeoutMs, "发现新版本 " + version, "点主界面右上角的「更新」即可查看并安装。", ToolTipIcon.Info);
+        _icon.ShowBalloonTip(BalloonTimeoutMs, "发现新版本 " + version, "点主界面左上角控制面板里的「更新」即可查看并安装。", ToolTipIcon.Info);
 
     /// <inheritdoc />
     public void Dispose()
