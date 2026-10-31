@@ -16,6 +16,15 @@ public partial class MainWindow : Window
     /// <summary>左侧控制面板展开时的宽度（像素）。</summary>
     private const double ControlPanelWidth = 380;
 
+    /// <summary>
+    /// 左侧控制面板收起后的窄条宽度（像素）。
+    /// </summary>
+    /// <remarks>
+    /// 收起后不能把列宽设成 0：恢复按钮必须留在左侧列里，
+    /// 否则只能浮在播放区上，而 WebView2 是原生 HWND（HwndHost），会把 WPF 浮层盖住。
+    /// </remarks>
+    private const double ControlPanelCollapsedWidth = 36;
+
     /// <summary>播放宿主（在 <c>Loaded</c> 时挂载到占位容器）。</summary>
     private readonly WebPlayerHost _playerHost;
 
@@ -145,7 +154,6 @@ public partial class MainWindow : Window
             _restoreWindowStyle = WindowStyle;
             ControlPanel.Visibility = Visibility.Collapsed;
             ControlColumn.Width = new GridLength(0);
-            CollapsedPanelRestoreButton.Visibility = Visibility.Collapsed;
             WindowStyle = WindowStyle.None;
             WindowState = WindowState.Normal;
             WindowState = WindowState.Maximized;
@@ -201,19 +209,25 @@ public partial class MainWindow : Window
     }
 
     /// <summary>按当前折叠状态摆放左侧面板列与「展开」入口。</summary>
+    /// <remarks>
+    /// 收起时保留 <see cref="ControlPanelCollapsedWidth"/> 的窄条而不是收成 0：
+    /// 恢复按钮必须留在左侧列内，浮在播放区上的 WPF 按钮会被 WebView2 的原生窗口盖住，
+    /// 表现就是"点了收起之后再也恢复不了"。
+    /// </remarks>
     private void ApplyControlPanelLayout()
     {
+        ControlPanel.Visibility = Visibility.Visible;
         if (_panelCollapsed)
         {
-            ControlColumn.Width = new GridLength(0);
-            ControlPanel.Visibility = Visibility.Collapsed;
-            CollapsedPanelRestoreButton.Visibility = Visibility.Visible;
+            ControlColumn.Width = new GridLength(ControlPanelCollapsedWidth);
+            ControlPanelContent.Visibility = Visibility.Collapsed;
+            CollapsedRail.Visibility = Visibility.Visible;
         }
         else
         {
             ControlColumn.Width = new GridLength(ControlPanelWidth);
-            ControlPanel.Visibility = Visibility.Visible;
-            CollapsedPanelRestoreButton.Visibility = Visibility.Collapsed;
+            ControlPanelContent.Visibility = Visibility.Visible;
+            CollapsedRail.Visibility = Visibility.Collapsed;
         }
     }
 
