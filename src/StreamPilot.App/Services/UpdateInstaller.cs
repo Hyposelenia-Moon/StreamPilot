@@ -162,8 +162,16 @@ public sealed class UpdateInstaller
             Directory.CreateDirectory(directory);
             ZipFile.ExtractToDirectory(zipPath, directory, overwriteFiles: true);
 
+            /*
+              发布包的结构是「一个顶层目录 + 里面的文件」（StreamPilot-windows-vX.Y.Z/...）。
+              如果直接拿解压目录当根，Apply 会把资源复制到安装目录下新建的一层同名目录里，
+              而不是覆盖原来的 Web/、tools/——真机验证时就是这样多出一层、Web 没更新。
+              所以这里先把唯一的顶层目录剥掉。
+            */
+            string root = ResolveStagedRoot(directory);
+
             string? executable = Directory
-                .EnumerateFiles(directory, $"*{AssetExecutablePrefix}*.exe", SearchOption.AllDirectories)
+                .EnumerateFiles(root, $"*{AssetExecutablePrefix}*.exe", SearchOption.AllDirectories)
                 .FirstOrDefault(path => Path.GetFileName(path).StartsWith(AssetExecutablePrefix, StringComparison.OrdinalIgnoreCase));
 
             if (executable is null)
@@ -173,11 +181,23 @@ public sealed class UpdateInstaller
 
             _logger.Info(ModuleName, "更新包已解压。", new Dictionary<string, object?>
             {
-                ["directory"] = directory,
+                ["root"] = root,
                 ["executable"] = Path.GetFileName(executable),
             });
-            return (directory, executable);
+            return (root, executable);
         }, cancellationToken);
+    }
+
+    /// <summary>
+    /// 求出更新包内容的真正根目录：若解压结果只有一个顶层目录、且没有散落的文件，就以该目录为根。
+    /// </summary>
+    /// <param name="extractedDirectory">zip 解压目录。</param>
+    /// <returns>内容根目录。</returns>
+    internal static string ResolveStagedRoot(string extractedDirectory)
+    {
+        string[] directories = Directory.GetDirectories(extractedDirectory);
+        string[] files = Directory.GetFiles(extractedDirectory);
+        return directories.Length == 1 && files.Length == 0 ? directories[0] : extractedDirectory;
     }
 
     /// <summary>
@@ -321,9 +341,24 @@ public sealed class UpdateInstaller
         {
             foreach (string candidate in Directory.EnumerateFiles(directory, "*" + BackupSuffix, SearchOption.TopDirectoryOnly))
             {
-                if (TryDelete(candidate))
+                // 刚退出的进程映像可能还被系统/杀毒扫着，删不掉就隔一会儿重试一次。
+                bool deleted = TryDelete(candidate);
+                if (!deleted)
+                {
+                    Thread.Sleep(400);
+                    deleted = TryDelete(candidate);
+                }
+
+                if (deleted)
                 {
                     _logger.Info(ModuleName, "已清理旧版本备份。", new Dictionary<string, object?>
+                    {
+                        ["file"] = Path.GetFileName(candidate),
+                    });
+                }
+                else
+                {
+                    _logger.Warn(ModuleName, "旧版本备份暂时删不掉，留到下次启动。", new Dictionary<string, object?>
                     {
                         ["file"] = Path.GetFileName(candidate),
                     });

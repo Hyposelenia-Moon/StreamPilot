@@ -99,8 +99,13 @@ public partial class App : WpfApplication
             shell.RefreshBridgeStatus();
             TryPersistDetectedMpvPath();
 
-            // 上次更新留下的 .old 备份此时已无人占用，启动时顺手清掉。
-            _updateInstaller?.CleanupPreviousVersions();
+            // 上次更新留下的 .old 备份清理：旧进程刚退出时映像句柄可能还没释放（杀毒扫描也会占用），
+            // 启动瞬间删除常常失败。推迟几秒再试，仍失败就留到下次启动，不影响使用。
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                _updateInstaller?.CleanupPreviousVersions();
+            });
         }
         catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
         {
