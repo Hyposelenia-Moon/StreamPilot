@@ -791,36 +791,39 @@ test('布局探针必须按真实运行态填充画质下拉，并按缓冲模�
   assert.equal(probe.includes('collisions='), true, '探针输出必须直接给出碰撞对');
 });
 
-test('底部控制条分层：主控层常驻、参数层可收起，且任何控件都不得绝对定位叠在一起', () => {
+test('参数组合并进主控行、默认隐藏，且任何控件都不得绝对定位叠在一起', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
   const controlsRule = extractRule(html, '#controls');
   const rowRule = extractRule(html, '.controlRow');
 
   assert.equal(/display:\s*flex/.test(controlsRule), true, '控制条必须是 flex 容器');
-  assert.equal(/flex-direction:\s*column/.test(controlsRule), true, '默认布局是主控层 / 参数层上下两层');
   assert.equal(/position:\s*(absolute|fixed)/.test(controlsRule), false, '控制条自身不能绝对定位');
 
-  assert.equal(/flex-wrap:\s*wrap/.test(rowRule), true, '每一层都必须允许换行，宽度不够时换行而不是把控件压到彼此身上');
+  assert.equal(/flex-wrap:\s*wrap/.test(rowRule), true, '主控行必须允许换行，宽度不够时换行而不是把控件压到彼此身上');
   assert.equal(/row-gap:\s*[^;]+/.test(rowRule), true, '换行后必须有行间距，行与行不能贴着（堆叠感）');
 
-  // 紧凑模式（旧版一行）把两层摊平：display: contents 让子控件直接成为 #controls 的 flex 项。
+  // 紧凑模式（旧版一行）参数组常驻同行：display: contents 让主控行子元素直接成为 #controls 的 flex 项。
   const compactRule = extractRule(html, 'body.sp-compact .controlRow');
-  assert.equal(/display:\s*contents/.test(compactRule), true, '紧凑模式必须摊平两层，否则不会回到旧版一行布局');
+  assert.equal(/display:\s*contents/.test(compactRule), true, '紧凑模式必须摊平主控行，否则不会回到旧版一行布局');
   const compactControls = extractRule(html, 'body.sp-compact #controls');
   assert.equal(/flex-direction:\s*row/.test(compactControls), true, '紧凑模式下控制条要横排');
   assert.equal(/flex-wrap:\s*wrap/.test(compactControls), true, '紧凑模式仍要允许换行');
 
-  // 主控层 / 参数层各放什么：线路与缓冲模式属"调一次就不动"的参数，不能挤占主控层。
-  const primary = html.slice(html.indexOf('<div id="primaryRow"'), html.indexOf('<div id="paramRow"'));
-  const param = html.slice(html.indexOf('<div id="paramRow"'), html.indexOf('<div id="statusBar"'));
+  // 参数组默认隐藏、点「参数」展开：线路/缓冲/统计合并进主控行，不独占第二行。
+  const paramGroupRule = extractRule(html, '#paramGroup');
+  assert.equal(/display:\s*none/.test(paramGroupRule), true, '参数组默认必须隐藏');
+  const paramOpenRule = extractRule(html, '#paramGroup.sp-open');
+  assert.equal(/display:\s*inline-flex/.test(paramOpenRule), true, '展开后参数组要横排显示');
 
+  // 高频操作留在主控行，线路/缓冲/统计收进参数组（位于「参数」按钮与「全屏」之间）。
+  const primary = html.slice(html.indexOf('<div id="primaryRow"'), html.indexOf('<div id="statusBar"'));
   ['playBtn', 'pauseBtn', 'stopBtn', 'volume', 'danmakuBtn', 'qualitySelect', 'fsBtn'].forEach((id) => {
-    assert.equal(primary.includes('id="' + id + '"'), true, id + ' 必须留在主控层（高频操作）');
+    assert.equal(primary.includes('id="' + id + '"'), true, id + ' 必须留在主控行（高频操作）');
   });
 
-  ['lineSelect', 'modeSelect'].forEach((id) => {
-    assert.equal(param.includes('id="' + id + '"'), true, id + ' 必须收进参数层');
-    assert.equal(primary.includes('id="' + id + '"'), false, id + ' 不得再出现在主控层');
+  const groupRegion = html.slice(html.indexOf('<span id="paramGroup"'), html.indexOf('id="fsBtn"'));
+  ['lineSelect', 'modeSelect', 'statsBtn'].forEach((id) => {
+    assert.equal(groupRegion.includes('id="' + id + '"'), true, id + ' 必须收进参数组');
   });
 
   // 主控层结构：全屏仍在行尾，且不用 auto 外边距独占行尾（会挤到下一行）。
@@ -831,7 +834,7 @@ test('底部控制条分层：主控层常驻、参数层可收起，且任何�
   assert.equal(/position:\s*absolute/.test(children), false, '控制条内部不得用绝对定位摆放控件（那正是重叠的成因）');
 });
 
-test('控制条支持播放中自动隐藏，且提供「参数层收起」开关', () => {
+test('控制条支持播放中自动隐藏，且提供「参数组展开」开关', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', '..', 'Web', 'player.html'), 'utf8');
 
   // 隐藏态：整条淡出且不接收鼠标（否则看不见的按钮还能被点到）。
@@ -846,11 +849,11 @@ test('控制条支持播放中自动隐藏，且提供「参数层收起」开�
   assert.equal(canHide.includes('!state.pausedByUser'), true, '用户暂停时不得隐藏控制条');
   assert.equal(canHide.includes('PLAYBACK_PHASES.PLAYING'), true, '只有播放阶段才允许自动隐藏');
 
-  // 参数层收起：按钮 + 收起态样式 + 通知无障碍技术的 aria-expanded。
-  assert.equal(html.includes('id="paramToggle"'), true, '参数层必须有收起开关');
-  assert.equal(html.includes('aria-expanded'), true, '收起开关必须同步 aria-expanded');
-  const collapsedRule = extractRule(html, '#paramRow.sp-collapsed');
-  assert.equal(/display:\s*none/.test(collapsedRule), true, '收起后参数层必须真正隐藏');
+  // 参数组展开：按钮 + 展开态样式 + 通知无障碍技术的 aria-expanded。
+  assert.equal(html.includes('id="paramToggle"'), true, '参数组必须有展开开关');
+  assert.equal(html.includes('aria-expanded'), true, '展开开关必须同步 aria-expanded');
+  const openRule = extractRule(html, '#paramGroup.sp-open');
+  assert.equal(/display:\s*inline-flex/.test(openRule), true, '展开后参数组必须横排显示');
 });
 
 test('状态行带缓冲健康度色条，失败提示额外用 toast 显示', () => {
