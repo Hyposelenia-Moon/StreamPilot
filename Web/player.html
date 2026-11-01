@@ -242,16 +242,27 @@
     #stage {
       position: relative;
       flex: 1 1 auto;
-      /* 空画面用极浅的竖向渐变，比一整块灰底更耐看；有画面后由视频内容覆盖 */
-      background: linear-gradient(180deg, #fbfcfd 0%, #e8ecf2 100%);
+      /* 留白区统一黑色：16:9 画面居中后，四周不再是浅色渐变，避免"白边" */
+      background: #000;
       min-height: 0;
+      overflow: hidden;
+      display: flex;
+    }
+
+    /* 16:9 画面帧：视频 / 弹幕 / 提示 / 统计浮层都相对它定位，尺寸由 JS 实时计算 */
+    .sp-video-frame {
+      position: relative;
+      margin: auto;
+      flex: 0 0 auto;
     }
 
     video {
+      display: block;
       width: 100%;
       height: 100%;
-      background-color: transparent;
-      object-fit: contain;
+      background-color: #000;
+      /* 直播默认 16:9：把源强制铺满 16:9 画面帧，不按实际画幅留黑边/白边 */
+      object-fit: fill;
       position: relative;
       z-index: 1;
     }
@@ -311,32 +322,36 @@
       pointer-events: none;
     }
 
-    /* 空态：图标 + 标题 + 一句操作提示，代替原来只有一行字的白条 */
+    /* 空态：大播放图标 + 标题 + 一句操作提示，画在黑底画面中央，不用白色卡片 */
     #hint.empty {
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 4px;
-      font-size: 16px;
+      gap: 12px;
+      padding: 0;
+      border: none;
+      background: transparent;
+      box-shadow: none;
+      color: rgba(255, 255, 255, 0.94);
+      font-size: 17px;
       font-weight: 600;
-      padding: 30px 44px;
-      border-radius: 16px;
-      box-shadow: 0 16px 40px rgba(31, 35, 41, 0.1);
+      letter-spacing: 0.5px;
     }
 
     #hint.empty::before {
       content: '▶';
       display: block;
-      width: 48px;
-      height: 48px;
-      line-height: 48px;
-      padding-left: 4px;
-      margin-bottom: 6px;
+      width: 76px;
+      height: 76px;
+      line-height: 76px;
+      padding-left: 8px;
+      margin-bottom: 2px;
       border-radius: 50%;
-      background: #eaf1fe;
-      color: #1b4fd8;
-      font-size: 18px;
+      background: rgba(47, 111, 235, 0.9);
+      color: #ffffff;
+      font-size: 30px;
       box-sizing: border-box;
+      box-shadow: 0 8px 30px rgba(47, 111, 235, 0.35);
     }
 
     /* 空态副文案由脚本写入 data-action（文案本体在 player-core.js，与测试同源） */
@@ -344,7 +359,8 @@
       content: attr(data-action);
       font-size: 13px;
       font-weight: 400;
-      color: #5b6472;
+      letter-spacing: 0;
+      color: rgba(255, 255, 255, 0.55);
     }
 
     #hint[data-level="warn"] {
@@ -508,20 +524,20 @@
        先弹一条看得见的提示，消失后状态行仍在。
     */
     /*
-      视频统计浮层：右上角深色半透明面板。
+      视频统计浮层：紧凑地贴在 16:9 画面右上角边缘，不遮挡画面中央。
       只在用户点「统计」时出现，不参与控制条自动隐藏——它本来就是主动打开的信息，
       跟着鼠标消失反而要反复打开。
     */
     #statsPanel {
       position: absolute;
-      right: 14px;
-      top: 14px;
+      right: 10px;
+      top: 10px;
       z-index: 5;
-      min-width: 236px;
-      max-width: 340px;
-      padding: 10px 12px;
+      min-width: 218px;
+      max-width: 320px;
+      padding: 9px 11px;
       border-radius: var(--sp-radius-md);
-      background: rgba(16, 20, 27, 0.84);
+      background: rgba(16, 20, 27, 0.82);
       border: 1px solid rgba(255, 255, 255, 0.14);
       color: #f5f7fa;
       font-size: 12px;
@@ -655,23 +671,30 @@
     -->
     <div id="stage">
       <!--
-        与参考播放页一致默认静音：首帧到达前 video 仍会输出已缓冲的音频，
-        不静音时用户会先听到一小段"试音"再被 applyVolume 设成 30%。
-        音量滑块与点击画面都能立刻打开声音，行为不受影响。
+        画面帧固定 16:9：直播默认按 16:9 显示，不管实际流是什么画幅（避免四周出现大片白边/黑边）。
+        视频、弹幕层与提示/统计浮层都放进 .sp-video-frame，统一相对"画面框"定位，
+        弹幕与统计就不会跑进两侧的留白里。尺寸由 layoutVideoFrame() 按可用空间实时计算。
       -->
-      <video id="video" playsinline muted></video>
-      <div id="danmakuLayer" class="sp-danmaku-layer sp-danmaku-hidden" aria-hidden="true"></div>
-      <div id="hint" class="empty" data-level="info">等待直播源</div>
-      <!-- 左侧面板收起时的恢复入口：宿主左列已归零，这里是唯一可见的开关 -->
-      <button type="button" id="panelBtn" title="展开控制面板（Ctrl+B）">
-        <span aria-hidden="true">☰</span><span>控制面板</span>
-      </button>
-      <div id="volDisplay" class="hidden">音量：30%</div>
-      <div id="toast" role="alert" aria-live="polite"></div>
-      <!-- 统计浮层：点参数层的「统计」开关，数据每秒刷新一次 -->
-      <div id="statsPanel" class="sp-stats hidden" aria-hidden="true">
-        <div class="sp-stats-title">视频统计信息</div>
-        <dl id="statsList" class="sp-stats-list"></dl>
+      <div class="sp-video-frame" id="videoFrame">
+        <!--
+          与参考播放页一致默认静音：首帧到达前 video 仍会输出已缓冲的音频，
+          不静音时用户会先听到一小段"试音"再被 applyVolume 设成 30%。
+          音量滑块能立刻打开声音，行为不受影响。
+        -->
+        <video id="video" playsinline muted></video>
+        <div id="danmakuLayer" class="sp-danmaku-layer sp-danmaku-hidden" aria-hidden="true"></div>
+        <div id="hint" class="empty" data-level="info">等待直播源</div>
+        <!-- 左侧面板收起时的恢复入口：宿主左列已归零，这里是唯一可见的开关 -->
+        <button type="button" id="panelBtn" title="展开控制面板（Ctrl+B）">
+          <span aria-hidden="true">☰</span><span>控制面板</span>
+        </button>
+        <div id="volDisplay" class="hidden">音量：30%</div>
+        <div id="toast" role="alert" aria-live="polite"></div>
+        <!-- 统计浮层：点参数层的「统计」开关，数据每秒刷新一次 -->
+        <div id="statsPanel" class="sp-stats hidden" aria-hidden="true">
+          <div class="sp-stats-title">视频统计信息</div>
+          <dl id="statsList" class="sp-stats-list"></dl>
+        </div>
       </div>
     </div>
 
@@ -791,6 +814,7 @@
         danmakuBtn: document.getElementById('danmakuBtn'),
         danmakuLayer: document.getElementById('danmakuLayer'),
         stage: document.getElementById('stage'),
+        videoFrame: document.getElementById('videoFrame'),
         controlsBar: document.getElementById('controlsBar'),
         primaryRow: document.getElementById('primaryRow'),
         paramRow: document.getElementById('paramRow'),
@@ -811,8 +835,7 @@
         currentReferer: '',
         roomTitle: '',
         lastVolume: core.INITIAL_VOLUME_PERCENT,
-        muteToggleVolume: core.INITIAL_VOLUME_PERCENT,
-        // 自动播放被策略拦截时置位：此时点画面是"接着播"，而不是切换静音。
+        // 自动播放被策略拦截时置位：此时点画面是"接着播"。
         autoplayBlocked: false,
         autoplayStartedAt: 0,
         hintLockUntil: 0,
@@ -1143,6 +1166,37 @@
         elements.paramToggle.setAttribute('aria-expanded', String(!collapsed));
         elements.paramToggle.classList.toggle('active', !collapsed);
         elements.paramToggle.title = collapsed ? '展开线路与缓冲模式' : '收起线路与缓冲模式';
+      }
+
+      /**
+       * 按可用空间把 16:9 画面帧放到最大并居中。
+       *
+       * 直播默认 16:9，不管实际流画幅；这里按「容器内能塞下的最大 16:9 矩形」设置画面帧，
+       * 视频 object-fit:fill 铺满画面帧，弹幕/统计/提示都相对画面帧定位，自然不越界。
+       */
+      function layoutVideoFrame() {
+        const stage = elements.stage;
+        const frame = elements.videoFrame;
+        if (!stage || !frame) {
+          return;
+        }
+
+        const availableWidth = stage.clientWidth;
+        const availableHeight = stage.clientHeight;
+        if (availableWidth <= 0 || availableHeight <= 0) {
+          return;
+        }
+
+        const ratio = 16 / 9;
+        let width = availableWidth;
+        let height = width / ratio;
+        if (height > availableHeight) {
+          height = availableHeight;
+          width = height * ratio;
+        }
+
+        frame.style.width = Math.round(width) + 'px';
+        frame.style.height = Math.round(height) + 'px';
       }
 
       /**
@@ -2803,7 +2857,7 @@
         applyPlaybackPhase(core.PLAYBACK_PHASES.STOPPED, null);
       }
 
-      /** 更新音量：界面与视频元素用同一份夹取后的百分比；有声音时同时记住它供"点画面切换静音"使用。 */
+      /** 更新音量：界面与视频元素用同一份夹取后的百分比；有声音时记住它供静音起播兜底恢复。 */
       function applyVolume(value) {
         const percent = core.clampVolumePercent(value);
         elements.video.volume = core.volumePercentToGain(percent);
@@ -2817,12 +2871,10 @@
         }, 1500);
         /*
           只要确实有声音就记下这个音量：video 元素默认带 muted 属性（与参考播放页一致，
-          避免首帧前的试音），起播兜底路径会立刻用本函数恢复音量。
-          若只在 remember=true 时记录，兜底恢复后"点画面切换静音"会退回到 0%。
+          避免首帧前的试音），静音起播兜底路径会立刻用本函数恢复音量。
         */
         if (percent > 0) {
           state.lastVolume = percent;
-          state.muteToggleVolume = percent;
         }
       }
 
@@ -2928,7 +2980,7 @@
           ['缓冲', bufferSeconds.toFixed(1) + ' 秒'],
           ['已播', formatStatDuration(video.currentTime)],
           ['丢帧', total > 0 ? dropped + ' / ' + total : '—'],
-          ['线路', candidate && candidate.cdnHost ? candidate.cdnHost : '—'],
+          ['线路', candidate && candidate.host ? candidate.host : '—'],
         ];
 
         const fragment = document.createDocumentFragment();
@@ -2971,14 +3023,10 @@
         });
 
         elements.video.addEventListener('click', function onVideoClick() {
-          // 被自动播放策略拦住时，点画面是"开始播放"；否则沿用点画面切换静音。
+          // 被自动播放策略拦住时，点画面是"开始播放"；除此之外点画面不做事（不再切换静音）。
           if (state.autoplayBlocked) {
             resumeBlockedPlayback();
-            return;
           }
-
-          const next = elements.video.muted ? state.lastVolume : 0;
-          applyVolume(next);
         });
 
         /*
@@ -3035,6 +3083,8 @@
           elements.fsBtn.textContent = fullscreen ? '退出全屏' : '全屏';
           // 进 / 出全屏都把控制条亮出来：刚切过去就淡出会让人以为控件没了。
           showControls();
+          // 全屏尺寸变了，16:9 画面帧要重新居中。
+          layoutVideoFrame();
           // 全屏下宿主不允许展开面板，恢复入口随之隐藏。
           syncPanelButton();
 
@@ -3045,6 +3095,18 @@
           */
           report(fullscreen ? outbound.FULLSCREEN_ENTER : outbound.FULLSCREEN_EXIT, fullscreen ? '进入全屏' : '退出全屏');
         });
+
+        window.addEventListener('resize', function onWindowResize() {
+          layoutVideoFrame();
+        });
+
+        // 舞台尺寸变化（全屏、窗口缩放、控制条换行导致的高度变化）都要重新居中 16:9 画面帧。
+        if (typeof ResizeObserver === 'function' && elements.stage) {
+          const stageObserver = new ResizeObserver(function onStageResize() {
+            layoutVideoFrame();
+          });
+          stageObserver.observe(elements.stage);
+        }
 
         document.addEventListener('keydown', function onKeyDown(event) {
           if (event.key === 'F11' || (event.key === 'Enter' && event.altKey)) {
@@ -3333,6 +3395,11 @@
       updatePauseButton();
       showEmptyState();
       renderStatusLine();
+      layoutVideoFrame();
+      // 首帧布局可能还没稳定：下一帧再校正一次，避免启动瞬间画面帧尺寸取到旧值。
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(layoutVideoFrame);
+      }
 
       if (hostChannel) {
         hostChannel.onMessage(handleHostMessage);
