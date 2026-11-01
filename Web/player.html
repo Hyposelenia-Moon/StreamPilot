@@ -2092,6 +2092,17 @@
         const delay = core.getReconnectDelayMs(reconnectCount, reason);
         if (delay < 0) {
           /*
+            流结束（确定性断开）且已经切过候选：多个候选先后「连接已结束」多半就是主播下播，
+            此时逐个试完剩余候选只会反复「重连 → 切线路」。直接请主程序重新解析确认，
+            主程序会区分「下播」与「地址过期」，下播时明确告知。
+          */
+          if (core.isStreamEndedReason(reason) && run.switchCount > 0) {
+            report(outbound.WARNING, '连续线路均结束连接（可能已下播），请主程序确认', run, candidate, { reconnectCount: reconnectCount });
+            requestFreshSources(run, '连续线路均结束连接（可能已下播）');
+            return;
+          }
+
+          /*
             这里不再先把 switching 置 true 再置回来：`switchToNextCandidate` 自己会置位并守门，
             中间那次"强制解锁"会让同一个候选在本轮里被重复切换（重复销毁播放器 = 画面连续重建）。
           */

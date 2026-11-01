@@ -323,6 +323,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>连续自动重新解析的次数（播放出画后清零）。</summary>
     private int _automaticReResolveCount;
 
+    /// <summary>最近一次解析的失败分类（成功时清空；供自动重新解析判断"是否下播"）。</summary>
+    private ResolveFailure? _lastResolveFailure;
+
     /// <summary>播放页是否处于用户暂停状态（页面遥测里的 paused 是权威状态，暂停不销毁会话）。</summary>
     private bool _isPlaybackPaused;
 
@@ -950,6 +953,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             if (!outcome.Success || outcome.Room is null)
             {
                 _currentRoom = null;
+                _lastResolveFailure = outcome.Failure;
                 // 平台自己的说明（例如抖音的"需要登录"）比通用文案具体，优先展示它。
                 StatusMessage = outcome.Message.Length > 0
                     ? outcome.Message
@@ -961,6 +965,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             }
 
             _currentRoom = outcome.Room;
+            _lastResolveFailure = null;
             // 短号/跳转链接会被归一化成真实房间号：输入框随之固定为标准直播间链接。
             RoomInput = RoomInputNormalizer.BuildRoomUrl(outcome.Room.Platform, outcome.Room.RoomId);
             ShowCurrentRoomInfo();
@@ -1384,6 +1389,15 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             if (await ResolveCoreAsync(playAfterResolve: false, bypassCache: true).ConfigureAwait(true))
             {
                 await PlayAsync(automatic: false).ConfigureAwait(true);
+            }
+            else if (_lastResolveFailure is ResolveFailure.NotLive or ResolveFailure.Replaying)
+            {
+                // 主播下播/轮播：明确告知播放页"已下播"，不再自动重试（重试也拿不到新地址）。
+                string notice = _lastResolveFailure == ResolveFailure.NotLive
+                    ? "主播已下播，已停止重试。"
+                    : "主播正在轮播/重播，已停止重试。";
+                PublishStatusToPlayer(notice);
+                AppendLog(notice);
             }
         }
         catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
