@@ -407,10 +407,10 @@
     }
 
     /*
-      控制条分两层（DOM 见 body 里的 #primaryRow / #paramRow）：
-      主控层放高频操作（播放 / 暂停 / 停止、音量、弹幕、画质、全屏），参数层放"调一次就不动"的
-      线路 / 追帧档位 / 追帧开关。主控层因此从 9 个控件降到 6 个，1024px 宽度下不换行。
-      紧凑模式（body.sp-compact，对应设置里的「紧凑控制条（旧版一行）」）把两层摊平成一行，
+      控制条单行布局（DOM 见 body 里的 #primaryRow / #paramGroup）：
+      主控层放高频操作（播放 / 暂停 / 停止、音量、弹幕、画质、全屏），参数组（线路 / 缓冲 / 统计）
+      合并进同一行，默认隐藏、点「参数」按钮才展开，把底部高度让给 16:9 画面。
+      紧凑模式（body.sp-compact，对应设置里的「紧凑控制条（旧版一行）」）参数组常驻同行，
       并保留原来"宁可换行也不压缩重叠"的行为。
     */
     #controls {
@@ -430,9 +430,15 @@
       row-gap: var(--sp-space-2);
     }
 
-    /* 参数层收起：只留主控层 */
-    #paramRow.sp-collapsed {
+    /* 参数组默认隐藏：合并进主控行，点「参数」才展开 */
+    #paramGroup {
       display: none;
+      align-items: center;
+      gap: var(--sp-space-2);
+    }
+
+    #paramGroup.sp-open {
+      display: inline-flex;
     }
 
     body.sp-compact #controls {
@@ -442,14 +448,18 @@
       padding: var(--sp-space-3) 10px;
     }
 
-    /* display: contents 让两层的子元素直接成为 #controls 的 flex 项，等价旧版一行布局 */
+    /* display: contents 让主控行的子元素直接成为 #controls 的 flex 项，等价旧版一行布局 */
     body.sp-compact .controlRow {
       display: contents;
     }
 
-    /* 紧凑模式下参数就在同一行，不再需要收起开关 */
+    /* 紧凑模式下参数组常驻同一行，不再需要收起开关 */
     body.sp-compact #paramToggle {
       display: none;
+    }
+
+    body.sp-compact #paramGroup {
+      display: inline-flex;
     }
 
     /* 音量组与播放键之间的细分隔线：同组控件靠得近，跨组的留出视觉间隔 */
@@ -720,23 +730,23 @@
             <span class="qualityLabel">画质</span>
             <select id="qualitySelect"></select>
           </label>
-          <button type="button" id="paramToggle" aria-expanded="true" aria-controls="paramRow"
-                  title="收起 / 展开线路与缓冲模式">参数</button>
+          <button type="button" id="paramToggle" aria-expanded="false" aria-controls="paramGroup"
+                  title="展开 / 收起线路与缓冲模式">参数</button>
+          <span id="paramGroup">
+            <label id="lineBox" for="lineSelect">
+              <span class="qualityLabel">线路</span>
+              <select id="lineSelect"></select>
+            </label>
+            <label id="modeBox" for="modeSelect">
+              <span class="qualityLabel">缓冲</span>
+              <select id="modeSelect">
+                <option value="stable">稳定缓冲</option>
+                <option value="extreme">极限追帧</option>
+              </select>
+            </label>
+            <button type="button" id="statsBtn" title="显示当前直播的详细参数（分辨率 / 帧率 / 码率 / 编码）">统计</button>
+          </span>
           <button type="button" id="fsBtn" title="全屏（双击画面同样可切换）">全屏</button>
-        </div>
-        <div id="paramRow" class="controlRow">
-          <label id="lineBox" for="lineSelect">
-            <span class="qualityLabel">线路</span>
-            <select id="lineSelect"></select>
-          </label>
-          <label id="modeBox" for="modeSelect">
-            <span class="qualityLabel">缓冲</span>
-            <select id="modeSelect">
-              <option value="stable">稳定缓冲</option>
-              <option value="extreme">极限追帧</option>
-            </select>
-          </label>
-          <button type="button" id="statsBtn" title="显示当前直播的详细参数（分辨率 / 帧率 / 码率 / 编码）">统计</button>
         </div>
       </div>
       <div id="statusBar">
@@ -817,7 +827,7 @@
         videoFrame: document.getElementById('videoFrame'),
         controlsBar: document.getElementById('controlsBar'),
         primaryRow: document.getElementById('primaryRow'),
-        paramRow: document.getElementById('paramRow'),
+        paramGroup: document.getElementById('paramGroup'),
         paramToggle: document.getElementById('paramToggle'),
         healthBar: document.getElementById('healthBar'),
         toast: document.getElementById('toast'),
@@ -875,7 +885,8 @@
       const uiState = {
         compact: false,
         autoHide: true,
-        paramsCollapsed: false,
+        // 参数层默认收起：底部只留主控行，把高度让给 16:9 画面；点「参数」才展开线路/缓冲/统计。
+        paramsCollapsed: true,
         /** 宿主左侧控制面板是否收起（收起时画面左上角显示恢复入口）。 */
         panelCollapsed: false,
         pointerInside: false,
@@ -1155,10 +1166,10 @@
         }, TOAST_DURATION_MS);
       }
 
-      /** 同步参数层的展开 / 收起（紧凑模式下两层同行，收起开关本身隐藏）。 */
+      /** 同步参数组的展开 / 收起（参数组合并进主控行；紧凑模式下常驻同行、收起开关隐藏）。 */
       function syncParameterRow() {
         const collapsed = uiState.paramsCollapsed && !uiState.compact;
-        elements.paramRow.classList.toggle('sp-collapsed', collapsed);
+        elements.paramGroup.classList.toggle('sp-open', !collapsed);
         if (!elements.paramToggle) {
           return;
         }
@@ -2980,7 +2991,7 @@
           ['缓冲', bufferSeconds.toFixed(1) + ' 秒'],
           ['已播', formatStatDuration(video.currentTime)],
           ['丢帧', total > 0 ? dropped + ' / ' + total : '—'],
-          ['线路', candidate && candidate.host ? candidate.host : '—'],
+          ['线路', candidate && candidate.lineLabel ? candidate.lineLabel : '—'],
         ];
 
         const fragment = document.createDocumentFragment();
@@ -3176,9 +3187,12 @@
         elements.lineSelect.replaceChildren();
 
         candidates.forEach(function addLine(item, index) {
+          const label = index === 0 ? '主线路' : '备用线路 ' + index;
+          // 记住展示名：统计面板的「线路」字段也用它，避免把 host 地址直接暴露给用户。
+          item.lineLabel = label;
           const option = document.createElement('option');
           option.value = String(item.sourceIndex);
-          option.textContent = index === 0 ? '主线路' : '备用线路 ' + index;
+          option.textContent = label;
           elements.lineSelect.appendChild(option);
         });
 

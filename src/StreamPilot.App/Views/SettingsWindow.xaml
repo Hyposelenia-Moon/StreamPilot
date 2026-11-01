@@ -111,6 +111,21 @@
                           ToolTip="把线路、追帧参数与播放/画质/全屏摊平成一行（旧版布局）；关闭时参数收进第二行" />
                 <CheckBox Content="解析成功后自动调用 mpv 播放" IsChecked="{Binding AutoLaunchMpv}"
                           Style="{StaticResource SettingFieldCheck}" Margin="0" />
+
+                <StackPanel Style="{StaticResource SettingRow}" Margin="0">
+                  <TextBlock Text="mpv 线路" Style="{StaticResource SettingLabel}" />
+                  <ComboBox Style="{StaticResource SettingFieldCombo}"
+                            ItemsSource="{Binding MpvLinePreferenceChoices}"
+                            SelectedItem="{Binding SelectedMpvLinePreference, Mode=TwoWay}"
+                            ToolTip="{Binding SelectedMpvLinePreference.Hint}"
+                            AutomationProperties.AutomationId="MpvLinePreferenceCombo">
+                    <ComboBox.ItemTemplate>
+                      <DataTemplate>
+                        <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource TextBrush}" ToolTip="{Binding Hint}" />
+                      </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                  </ComboBox>
+                </StackPanel>
               </StackPanel>
             </Border>
 

@@ -74,6 +74,13 @@ public sealed record PlaybackOptions
     /// <summary>是否自动外挂 mpv 播放（false 表示仅在用户点击时启动）。</summary>
     public bool AutoLaunchMpv { get; init; }
 
+    /// <summary>mpv 外挂播放使用的线路偏好（0 = 自动选最优；N = 第 N 条候选，越界时回退自动）。</summary>
+    /// <remarks>
+    /// 候选是解析时按优先级排序的，第 1 条即「主线路」，其后为「备用线路」。
+    /// 设置为全局偏好而非每次解析后手选，是为了让主界面的 mpv 线路下拉可以移入设置。
+    /// </remarks>
+    public int MpvLinePreference { get; init; }
+
     /// <summary>mpv 可执行文件路径；为空时按工具查找顺序自动探测。</summary>
     public string MpvPath { get; init; } = string.Empty;
 

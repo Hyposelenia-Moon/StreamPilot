@@ -39,6 +39,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private bool _compactControls;
     private bool _autoHideControls = true;
     private bool _autoLaunchMpv;
+    private DanmakuChoice _selectedMpvLinePreference = MpvLinePreferenceChoices[0];
     private bool _danmakuEnabled;
     private DanmakuChoice _selectedDanmakuDisplayMode = DanmakuChoice.DisplayModes[0];
     private DanmakuChoice _selectedDanmakuFilter = DanmakuChoice.Filters[0];
@@ -255,6 +256,33 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         get => _autoLaunchMpv;
         set => SetField(ref _autoLaunchMpv, value);
+    }
+
+    /// <summary>mpv 外挂播放的线路偏好选项（复用通用 Value/DisplayName/Hint 结构）。</summary>
+    /// <remarks>
+    /// 候选在解析时按优先级排序，第 1 条即「主线路」，其后依次为「备用线路」。
+    /// 偏好是全局的：mpv 外挂播放每次都用这条；候选不足时自动回退「自动」。
+    /// </remarks>
+    public static IReadOnlyList<DanmakuChoice> MpvLinePreferenceChoices { get; } =
+    [
+        new DanmakuChoice(0, "自动（推荐）", "按编码/封装自动选最优候选（已规避 HEVC-FLV 解码异常）"),
+        new DanmakuChoice(1, "主线路", "固定用第 1 条候选（通常是平台首选 CDN）"),
+        new DanmakuChoice(2, "备用线路 1", "固定用第 2 条候选"),
+        new DanmakuChoice(3, "备用线路 2", "固定用第 3 条候选"),
+        new DanmakuChoice(4, "备用线路 3", "固定用第 4 条候选"),
+    ];
+
+    /// <summary>mpv 线路偏好（0 = 自动，N = 第 N 条候选）。</summary>
+    public DanmakuChoice SelectedMpvLinePreference
+    {
+        get => _selectedMpvLinePreference;
+        set
+        {
+            if (value is not null)
+            {
+                SetField(ref _selectedMpvLinePreference, value);
+            }
+        }
     }
 
     /// <summary>
@@ -505,6 +533,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         CompactControls = options.Playback.CompactControls;
         AutoHideControls = options.Playback.AutoHideControls;
         AutoLaunchMpv = options.Playback.AutoLaunchMpv;
+        SelectedMpvLinePreference = DanmakuChoice.Find(MpvLinePreferenceChoices, options.Playback.MpvLinePreference);
 
         DanmakuOptions danmaku = options.Danmaku.Normalize();
         DanmakuEnabled = danmaku.Enabled;
@@ -624,6 +653,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 Volume = Clamp(Volume, 0, 100, PlaybackOptions.DefaultVolume),
                 AutoPlayOnResolve = AutoPlayOnResolve,
                 AutoLaunchMpv = AutoLaunchMpv,
+                MpvLinePreference = SelectedMpvLinePreference.Value,
                 CompactControls = CompactControls,
                 AutoHideControls = AutoHideControls,
             },

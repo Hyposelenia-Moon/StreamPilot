@@ -276,12 +276,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <summary>因「开播自动录制」而正在录制的预设（键 = 平台 + 名称，值 = 平台与房间号）。</summary>
     private readonly Dictionary<string, (PlatformId Platform, string RoomId)> _autoRecordings = [];
 
-    /// <summary>mpv 线路选择的候选（与 <see cref="MpvLineOptions"/> 下标一一对应，0 为「自动」）。</summary>
-    private List<StreamCandidate> _mpvLineCandidates = [];
-
-    /// <summary>mpv 线路选择的选中下标（0 = 自动）。</summary>
-    private int _selectedMpvLineIndex;
-
     /// <summary>托盘气泡通知（开播提醒 / 自动录制提示）。</summary>
     private readonly TrayNotifier _trayNotifier;
 
@@ -550,23 +544,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>是否正在检测预设开播状态。</summary>
     public bool IsCheckingPresets => _isCheckingPresets;
-
-    /// <summary>mpv 外挂播放的线路选项（首项固定「自动」，其余按候选顺序编号）。</summary>
-    public ObservableCollection<string> MpvLineOptions { get; } = [];
-
-    /// <summary>mpv 外挂播放选中的线路下标（0 = 自动）。</summary>
-    public int SelectedMpvLineIndex
-    {
-        get => _selectedMpvLineIndex;
-        set
-        {
-            if (_selectedMpvLineIndex != value)
-            {
-                _selectedMpvLineIndex = value;
-                OnPropertyChanged();
-            }
-        }
-    }
 
     /// <summary>当前选中的平台选项（下拉直接绑定对象，避免 SelectedValue 更新时序问题）。</summary>
     public PlatformOption SelectedPlatformOption
@@ -987,7 +964,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             // 短号/跳转链接会被归一化成真实房间号：输入框随之固定为标准直播间链接。
             RoomInput = RoomInputNormalizer.BuildRoomUrl(outcome.Room.Platform, outcome.Room.RoomId);
             ShowCurrentRoomInfo();
-            RefreshMpvLines();
             StatusMessage = $"解析成功：{outcome.Room.Anchor} / {outcome.Room.Title}"
                 + $"（状态：{LiveStatus}，共 {outcome.Room.Candidates.Count} 条线路）";
             AppendLog(StatusMessage);
@@ -1247,10 +1223,12 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             return false;
         }
 
-        // 用户指定了线路时按所选候选播放；否则仍走"最优候选"：HEVC 的 FLV 是 Enhanced FLV 封装，
-        // mpv/ffmpeg 对其 demux 会读错 NAL 大小（Invalid NAL unit size），必须改用同画质的 HLS(ts)。
-        StreamCandidate? candidate = SelectedMpvLineIndex > 0
-            ? _mpvLineCandidates.ElementAtOrDefault(SelectedMpvLineIndex - 1)
+        // 设置里的「mpv 线路」偏好：>0 用第 N 条候选，0 走"最优候选"。
+        // 最优候选仍要绕开 HEVC 的 Enhanced FLV：mpv/ffmpeg 对其 demux 会读错 NAL 大小
+        // （Invalid NAL unit size），必须改用同画质的 HLS(ts)。
+        int preference = _options.Playback.MpvLinePreference;
+        StreamCandidate? candidate = preference > 0
+            ? _currentRoom.Candidates.ElementAtOrDefault(preference - 1)
             : PickMpvCandidate(_currentRoom.Candidates);
 
         if (candidate is null)
@@ -1276,54 +1254,6 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         }
 
         return started;
-    }
-
-    /// <summary>解析成功后刷新 mpv 线路选择（候选列表 + 回到「自动」）。</summary>
-    private void RefreshMpvLines()
-    {
-        _mpvLineCandidates = [];
-        MpvLineOptions.Clear();
-        MpvLineOptions.Add("自动（推荐）");
-
-        if (_currentRoom is null)
-        {
-            SelectedMpvLineIndex = 0;
-            return;
-        }
-
-        for (int index = 0; index < _currentRoom.Candidates.Count; index += 1)
-        {
-            StreamCandidate candidate = _currentRoom.Candidates[index];
-            _mpvLineCandidates.Add(candidate);
-            string lineName = index == 0 ? "主线路" : "备用线路 " + index;
-            MpvLineOptions.Add($"{lineName}（{candidate.CdnHost} · {DescribeMpvCandidate(candidate)}）");
-        }
-
-        SelectedMpvLineIndex = 0;
-    }
-
-    /// <summary>把候选的编码与封装拼成一行短描述（供 mpv 线路选择展示）。</summary>
-    /// <param name="candidate">候选。</param>
-    /// <returns>形如 <c>HEVC / HLS</c> 的短描述。</returns>
-    private static string DescribeMpvCandidate(StreamCandidate candidate)
-    {
-        string codec = candidate.Codec switch
-        {
-            VideoCodec.Hevc => "HEVC",
-            VideoCodec.Avc => "H.264",
-            VideoCodec.Av1 => "AV1",
-            _ => candidate.Codec.ToString(),
-        };
-
-        string format = candidate.Format switch
-        {
-            StreamFormat.HlsTs => "HLS",
-            StreamFormat.HlsFmp4 => "HLS-fMP4",
-            StreamFormat.FlvHttp => "FLV",
-            _ => candidate.Format.ToString(),
-        };
-
-        return codec + " / " + format;
     }
 
     /// <summary>
