@@ -710,10 +710,9 @@
 
     <footer id="controlsBar">
       <!--
-        控制条分两层：
-        主控层（常驻）：播放 / 暂停 / 停止、音量、弹幕、画质、全屏；
-        参数层（可收起）：线路、追帧档位、追帧开关——都是"调一次就不再动"的参数。
-        分层后主控层在 1024px 宽度下不换行；设置里可切回「紧凑控制条（旧版一行）」。
+        控制条单行布局：主控行常驻（播放 / 暂停 / 停止、音量、弹幕、画质、全屏），
+        参数组（线路 / 缓冲 / 统计）合并进同一行、默认隐藏，点「参数」按钮往左展开。
+        设置里可切回「紧凑控制条（旧版一行）」。
       -->
       <div id="controls">
         <div id="primaryRow" class="controlRow">
@@ -725,13 +724,6 @@
           <input id="volume" type="range" min="0" max="100" step="1" value="30" />
           <span id="volumeLabel">30%</span>
           <span class="spacer"></span>
-          <button type="button" id="danmakuBtn" title="显示弹幕（首次开启会连接弹幕服务器，可在设置里调整屏蔽词与样式）">弹幕</button>
-          <label id="qualityBox" for="qualitySelect">
-            <span class="qualityLabel">画质</span>
-            <select id="qualitySelect"></select>
-          </label>
-          <button type="button" id="paramToggle" aria-expanded="false" aria-controls="paramGroup"
-                  title="展开 / 收起线路与缓冲模式">参数</button>
           <span id="paramGroup">
             <label id="lineBox" for="lineSelect">
               <span class="qualityLabel">线路</span>
@@ -746,6 +738,13 @@
             </label>
             <button type="button" id="statsBtn" title="显示当前直播的详细参数（分辨率 / 帧率 / 码率 / 编码）">统计</button>
           </span>
+          <button type="button" id="paramToggle" aria-expanded="false" aria-controls="paramGroup"
+                  title="展开 / 收起线路与缓冲模式">参数</button>
+          <button type="button" id="danmakuBtn" title="显示弹幕（首次开启会连接弹幕服务器，可在设置里调整屏蔽词与样式）">弹幕</button>
+          <label id="qualityBox" for="qualitySelect">
+            <span class="qualityLabel">画质</span>
+            <select id="qualitySelect"></select>
+          </label>
           <button type="button" id="fsBtn" title="全屏（双击画面同样可切换）">全屏</button>
         </div>
       </div>
