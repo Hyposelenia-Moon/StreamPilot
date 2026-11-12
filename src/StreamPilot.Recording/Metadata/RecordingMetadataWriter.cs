@@ -149,6 +149,26 @@ public sealed class RecordingMetadataWriter
         Flush();
     }
 
+    /// <summary>原子记录转封装后的文件名与字节数，落盘失败时恢复原分片记录。</summary>
+    /// <param name="segment">对应已完成分片的转换结果。</param>
+    /// <returns>侧车已经持久化转换结果时返回 true，调用方此时可以删除原文件。</returns>
+    public bool ReplaceSegment(RecordingSegment segment)
+    {
+        ArgumentNullException.ThrowIfNull(segment);
+        int index = _metadata.Segments.FindIndex(existing => existing.Index == segment.Index);
+        RecordingSegment previous = _metadata.Segments[index];
+        _metadata.Segments[index] = segment;
+        _metadata.TotalBytes += segment.Bytes - previous.Bytes;
+        if (Flush(force: true))
+        {
+            return true;
+        }
+
+        _metadata.Segments[index] = previous;
+        _metadata.TotalBytes += previous.Bytes - segment.Bytes;
+        return false;
+    }
+
     /// <summary>标记录制结束并强制刷新。</summary>
     /// <param name="stopReason">停止原因。</param>
     public void Complete(RecordingStopReason stopReason)

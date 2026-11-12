@@ -2059,7 +2059,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             return;
         }
 
-        string key = PresetStateKey(item);
+        string key = PresetStateKey(item.Preset);
         _previousPresetStates.TryGetValue(key, out PresetLiveState previous);
 
         switch (status.Status)
@@ -2089,12 +2089,15 @@ public sealed class ShellViewModel : INotifyPropertyChanged
                 break;
         }
 
-        _previousPresetStates[key] = item.State;
+        if (fromPolling)
+        {
+            _previousPresetStates[key] = item.State;
+        }
     }
 
     /// <summary>预设状态变化检测的稳定键：平台 + 名称（与预设身份一致，房间号/链接变化不换键）。</summary>
-    private static string PresetStateKey(PresetItemViewModel item) =>
-        $"{(int)item.Platform}:{item.Preset.Name}";
+    private static string PresetStateKey(RoomPreset preset) =>
+        $"{(int)preset.Platform}:{preset.Name}";
 
     /// <summary>「开播自动录制」开关变化：持久化到预设存储。</summary>
     /// <param name="item">预设项。</param>
@@ -2117,7 +2120,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             return;
         }
 
-        string key = PresetStateKey(item);
+        string key = PresetStateKey(item.Preset);
         if (_autoRecordings.ContainsKey(key))
         {
             return;
@@ -2158,7 +2161,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// <param name="item">下播的预设项。</param>
     private async Task StopAutoRecordingAsync(PresetItemViewModel item)
     {
-        string key = PresetStateKey(item);
+        string key = PresetStateKey(item.Preset);
         if (!_autoRecordings.TryGetValue(key, out (PlatformId Platform, string RoomId) recording))
         {
             return;
@@ -2371,7 +2374,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
             return error;
         }
 
-        RoomPreset updated = built;
+        RoomPreset updated = built with { AutoRecord = item.AutoRecord };
         if (_presetStore.HasConflict(updated, item.Preset))
         {
             return "已存在同平台的同名预设，请换一个名称。";
@@ -2380,6 +2383,39 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         if (!_presetStore.Update(item.Preset, updated))
         {
             return "保存预设失败：该预设可能已被删除，或名称/链接不合法。";
+        }
+
+        string previousKey = PresetStateKey(item.Preset);
+        string updatedKey = PresetStateKey(updated);
+        string previousRoomInput = RoomInputNormalizer.Normalize(item.RoomInput);
+        if (RoomInputNormalizer.IsPlainRoomId(previousRoomInput))
+        {
+            previousRoomInput = RoomInputNormalizer.BuildRoomUrl(item.Platform, previousRoomInput);
+        }
+        if (_autoRecordings.TryGetValue(previousKey, out var ownedRecording))
+        {
+            previousRoomInput = RoomInputNormalizer.BuildRoomUrl(ownedRecording.Platform, ownedRecording.RoomId);
+        }
+        string updatedRoomInput = RoomInputNormalizer.Normalize(updated.RoomInput);
+        if (RoomInputNormalizer.IsPlainRoomId(updatedRoomInput))
+        {
+            updatedRoomInput = RoomInputNormalizer.BuildRoomUrl(updated.Platform, updatedRoomInput);
+        }
+        if (item.Platform != updated.Platform || previousRoomInput != updatedRoomInput)
+        {
+            await StopAutoRecordingAsync(item).ConfigureAwait(true);
+            _previousPresetStates.Remove(previousKey);
+        }
+        if (previousKey != updatedKey)
+        {
+            if (_previousPresetStates.Remove(previousKey, out var previousState))
+            {
+                _previousPresetStates[updatedKey] = previousState;
+            }
+            if (_autoRecordings.Remove(previousKey, out var activeRecording))
+            {
+                _autoRecordings[updatedKey] = activeRecording;
+            }
         }
 
         ResetPresetResolveState();
@@ -2745,13 +2781,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     /// </remarks>
     private async Task StartDanmakuAsync(ResolvedRoom room)
     {
-        if (!_options.Danmaku.Enabled)
+        if (!_options.Danmaku.Enabled || room.Platform != PlatformId.Bilibili)
         {
-            return;
-        }
-
-        if (room.Platform != PlatformId.Bilibili)
-        {
+            await StopDanmakuAsync().ConfigureAwait(true);
             return;
         }
 

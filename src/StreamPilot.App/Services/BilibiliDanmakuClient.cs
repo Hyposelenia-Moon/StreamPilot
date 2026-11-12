@@ -121,10 +121,12 @@ public sealed class BilibiliDanmakuClient : IDanmakuClient
 
         CancellationTokenSource loopCts = new();
         _loopCts = loopCts;
+        CancellationToken loopToken = loopCts.Token;
+        using CancellationTokenSource connectCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, loopToken);
 
         try
         {
-            DanmakuSession session = await OpenSessionAsync(roomId, request.Cookie, cancellationToken).ConfigureAwait(false);
+            DanmakuSession session = await OpenSessionAsync(roomId, request.Cookie, connectCts.Token).ConfigureAwait(false);
             _socket = session.Socket;
             _authCompletion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -133,11 +135,11 @@ public sealed class BilibiliDanmakuClient : IDanmakuClient
               认证是"发一包、等一包回复"的握手，没有读循环在跑，回复永远读不到，
               只会一直等到 AuthTimeoutSeconds 超时（表现为"弹幕连接失败：等待认证回复超时"）。
             */
-            _receiveLoop = Task.Run(() => ReceiveLoopAsync(session, loopCts.Token), CancellationToken.None);
-            await AuthenticateAsync(session.Socket, session.Token, roomId, session.CookieHeader, cancellationToken).ConfigureAwait(false);
+            _receiveLoop = Task.Run(() => ReceiveLoopAsync(session, loopToken), CancellationToken.None);
+            await AuthenticateAsync(session.Socket, session.Token, roomId, session.CookieHeader, connectCts.Token).ConfigureAwait(false);
 
-            _heartbeatLoop = Task.Run(() => HeartbeatLoopAsync(loopCts.Token), CancellationToken.None);
-            _batchLoop = Task.Run(() => BatchLoopAsync(loopCts.Token), CancellationToken.None);
+            _heartbeatLoop = Task.Run(() => HeartbeatLoopAsync(loopToken), CancellationToken.None);
+            _batchLoop = Task.Run(() => BatchLoopAsync(loopToken), CancellationToken.None);
 
             SetState(DanmakuConnectionState.Connected);
             _logger.Info(ModuleName, "弹幕连接已建立。", new Dictionary<string, object?>
@@ -146,12 +148,39 @@ public sealed class BilibiliDanmakuClient : IDanmakuClient
                 ["host"] = session.Host,
             });
         }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        catch (OperationCanceledException exception)
+        {
+            bool stopped = cancellationToken.IsCancellationRequested || loopToken.IsCancellationRequested;
+            if (ReferenceEquals(_loopCts, loopCts))
+            {
+                await DisconnectAsync(CancellationToken.None).ConfigureAwait(false);
+                if (!stopped)
+                {
+                    SetState(DanmakuConnectionState.Failed);
+                }
+            }
+
+            if (stopped)
+            {
+                throw;
+            }
+
+            throw new DanmakuException("connect", "获取弹幕凭证超时。", exception);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException and not StackOverflowException)
         {
             _logger.LogError(LogLevel.Warn, ModuleName, "弹幕连接失败。", exception);
-            await DisconnectAsync(CancellationToken.None).ConfigureAwait(false);
-            SetState(DanmakuConnectionState.Failed);
-            throw;
+            if (ReferenceEquals(_loopCts, loopCts))
+            {
+                await DisconnectAsync(CancellationToken.None).ConfigureAwait(false);
+                SetState(DanmakuConnectionState.Failed);
+            }
+            if (exception is DanmakuException)
+            {
+                throw;
+            }
+
+            throw new DanmakuException("connect", "连接弹幕服务器失败：" + exception.Message, exception);
         }
     }
 

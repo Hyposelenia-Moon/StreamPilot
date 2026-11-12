@@ -50,6 +50,7 @@ public sealed class UpdateInstaller
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>下载到本地的 zip 路径。</returns>
     /// <exception cref="InvalidOperationException">下载失败或校验不通过时抛出。</exception>
+    /// <remarks>等待响应头和相邻数据块使用网络配置中的请求超时。</remarks>
     public async Task<string> DownloadAsync(
         UpdateReleaseInfo release,
         string mirrorPrefix,
@@ -78,11 +79,15 @@ public sealed class UpdateInstaller
         string temporary = target + ".part";
         try
         {
+            using CancellationTokenSource idle = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            TimeSpan timeout = TimeSpan.FromSeconds(Math.Clamp(_factory.NetworkOptions.RequestTimeoutSeconds, 1, 120));
+            idle.CancelAfter(timeout);
             using HttpResponseMessage response = await _factory
                 .GetStreamingClient()
-                .GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+                .GetAsync(url, HttpCompletionOption.ResponseHeadersRead, idle.Token)
                 .ConfigureAwait(false);
             response.EnsureSuccessStatusCode();
+            idle.CancelAfter(timeout);
 
             long? total = response.Content.Headers.ContentLength;
             await using Stream source = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
@@ -91,10 +96,11 @@ public sealed class UpdateInstaller
                 byte[] buffer = new byte[81920];
                 long received = 0;
                 int read;
-                while ((read = await source.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+                while ((read = await source.ReadAsync(buffer, idle.Token).ConfigureAwait(false)) > 0)
                 {
                     await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
                     received += read;
+                    idle.CancelAfter(timeout);
                     if (total is > 0)
                     {
                         progress?.Report(Math.Clamp((double)received / total.Value, 0, 1));
@@ -131,7 +137,10 @@ public sealed class UpdateInstaller
             {
                 ["url"] = url,
             });
-            throw new InvalidOperationException("下载更新包失败：" + exception.Message, exception);
+            string detail = exception is OperationCanceledException && !cancellationToken.IsCancellationRequested
+                ? "等待更新包数据超时，请重试。"
+                : exception.Message;
+            throw new InvalidOperationException("下载更新包失败：" + detail, exception);
         }
     }
 
@@ -331,45 +340,31 @@ public sealed class UpdateInstaller
             return;
         }
 
-        string? directory = Path.GetDirectoryName(executable);
-        if (directory is null)
+        string candidate = executable + BackupSuffix;
+        if (!File.Exists(candidate))
         {
             return;
         }
 
-        try
+        bool deleted = TryDelete(candidate);
+        if (!deleted)
         {
-            foreach (string candidate in Directory.EnumerateFiles(directory, "*" + BackupSuffix, SearchOption.TopDirectoryOnly))
-            {
-                // 刚退出的进程映像可能还被系统/杀毒扫着，删不掉就隔一会儿重试一次。
-                bool deleted = TryDelete(candidate);
-                if (!deleted)
-                {
-                    Thread.Sleep(400);
-                    deleted = TryDelete(candidate);
-                }
-
-                if (deleted)
-                {
-                    _logger.Info(ModuleName, "已清理旧版本备份。", new Dictionary<string, object?>
-                    {
-                        ["file"] = Path.GetFileName(candidate),
-                    });
-                }
-                else
-                {
-                    _logger.Warn(ModuleName, "旧版本备份暂时删不掉，留到下次启动。", new Dictionary<string, object?>
-                    {
-                        ["file"] = Path.GetFileName(candidate),
-                    });
-                }
-            }
+            Thread.Sleep(400);
+            deleted = TryDelete(candidate);
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+
+        if (deleted)
         {
-            _logger.Warn(ModuleName, "清理旧版本备份失败。", new Dictionary<string, object?>
+            _logger.Info(ModuleName, "已清理旧版本备份。", new Dictionary<string, object?>
             {
-                ["detail"] = exception.Message,
+                ["file"] = Path.GetFileName(candidate),
+            });
+        }
+        else
+        {
+            _logger.Warn(ModuleName, "旧版本备份暂时删不掉，留到下次启动。", new Dictionary<string, object?>
+            {
+                ["file"] = Path.GetFileName(candidate),
             });
         }
     }

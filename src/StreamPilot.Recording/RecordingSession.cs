@@ -351,6 +351,12 @@ public sealed class RecordingSession : IRecordingSession
             // 因此这里写出的 sidecar 必然反映真实产物，不会出现"有分片但 totalBytes=0"（SP-03）。
             _metadataWriter.Complete(_stopReason);
             _status = _status with { IsRecording = false };
+            // 后台转换只在侧车收尾后写入，保持写入顺序。
+            if (_candidate.Format == StreamFormat.FlvHttp && _request.ConvertToMp4)
+            {
+                RecordingSegment[] segments = _metadataWriter.Metadata.Segments.ToArray();
+                _ = Task.Run(() => ConvertSegmentsAsync(segments), CancellationToken.None);
+            }
         }
     }
 
@@ -486,13 +492,6 @@ public sealed class RecordingSession : IRecordingSession
             segmentIndex: Math.Max(0, result.Segments.Count - 1),
             reconnectCount: result.ReconnectCount,
             currentFileName: result.Segments.Count > 0 ? result.Segments[^1].FileName : string.Empty);
-
-        // 录制结束后的收尾：把 FLV 无损搬进 MP4，成功后删除 FLV。
-        // 不阻塞停止流程（大文件搬运要几秒到几十秒），失败时保留 FLV 保住数据。
-        if (_request.ConvertToMp4)
-        {
-            _ = Task.Run(() => ConvertSegmentsAsync(result.Segments), CancellationToken.None);
-        }
     }
 
     /// <summary>
@@ -529,6 +528,21 @@ public sealed class RecordingSession : IRecordingSession
                 });
                 continue;
             }
+
+            RecordingSegment converted = segment with { FileName = Path.GetFileName(mp4Path), Bytes = result.OutputBytes };
+            if (!_metadataWriter.ReplaceSegment(converted))
+            {
+                _logger.Warn(_moduleName, "MP4 已生成，侧车更新失败，保留 FLV。", new Dictionary<string, object?>
+                {
+                    ["file"] = segment.FileName,
+                });
+                continue;
+            }
+            _status = _status with
+            {
+                TotalBytes = _metadataWriter.Metadata.TotalBytes,
+                CurrentFileName = _status.CurrentFileName == segment.FileName ? converted.FileName : _status.CurrentFileName,
+            };
 
             try
             {

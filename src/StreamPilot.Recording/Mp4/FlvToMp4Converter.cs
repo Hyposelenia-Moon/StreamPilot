@@ -754,12 +754,20 @@ public static class FlvToMp4Converter
         /// <param name="cancellationToken">取消令牌。</param>
         public async Task AddAsync(FlvTag tag, CancellationToken cancellationToken)
         {
-            if (tag.Type == FlvTagType.Video && _video is not null)
+            if (tag.Type == FlvTagType.Video)
             {
+                if (_video is null)
+                {
+                    throw new InvalidOperationException("视频轨缺少可支持的配置，保留 FLV。");
+                }
                 AddVideoSample(tag);
             }
-            else if (tag.Type == FlvTagType.Audio && _audio is not null)
+            else if (tag.Type == FlvTagType.Audio)
             {
+                if (_audio is null)
+                {
+                    throw new InvalidOperationException("音频轨缺少可支持的配置，保留 FLV。");
+                }
                 AddAudioSample(tag);
             }
             else
